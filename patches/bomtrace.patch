@@ -1,0 +1,473 @@
+diff --git a/src/execve.c b/src/execve.c
+index a9224543b..75286be02 100644
+--- a/src/execve.c
++++ b/src/execve.c
+@@ -14,6 +14,314 @@
+ 
+ #include "defs.h"
+ 
++// calculate the string length of the space-character separated argv array.
++// the calculated length includes the ending NULL character.
++static int get_argv_length(char **argv)
++{
++        int i = 0; int len = 0; char *p = argv[i];
++        while(p) {
++                len += strlen(p) + 1;
++                i++;
++                p = argv[i];
++        }
++        return len;
++}
++
++// copy out argv array and put the space concatenated string into a malloc'ed buf.
++// caller of this copy_argv function needs to free the malloc'ed memory.
++static char * copy_argv(char **argv)
++{
++        int i = 0; int len = 0; char *p = argv[i];
++        char *buf = NULL;
++        len = get_argv_length(argv);
++        buf = malloc(len);
++        if (!buf) { return buf; }
++        len = 0;
++        while(p) {
++                strcpy(buf + len, p);
++                len += strlen(p) + 1;
++                buf[len - 1] = ' ';  // use space character as the separator
++                i++;
++                p = argv[i];
++        }
++        buf[len - 1] = 0;
++        return buf;
++}
++
++// Get number of argv in tracee's argv array
++static unsigned int
++get_argc(struct tcb *const tcp, kernel_ulong_t addr)
++{
++	if (!addr)
++		return 0;
++
++	const unsigned int wordsize = current_wordsize;
++	kernel_ulong_t prev_addr = 0;
++	unsigned int n;
++
++	for (n = 0; addr > prev_addr; prev_addr = addr, addr += wordsize, ++n) {
++		kernel_ulong_t word = 0;
++		if (umoven(tcp, addr, wordsize, &word)) {
++			if (n == 0)
++				return 0;
++
++			addr = 0;
++			break;
++		}
++		if (word == 0)
++			break;
++	}
++	return n;
++}
++
++/*
++ * Copy string specified by address `addr' and length `len'.
++ * If `user_style' has QUOTE_0_TERMINATED bit set, treat the string
++ * as a NUL-terminated string.
++ * Pass `user_style' on to `string_quote'.
++ * Append `...' to the output if either the string length exceeds `max_strlen',
++ * or QUOTE_0_TERMINATED bit is set and the string length exceeds `len'.
++ *
++ * Returns the result of umovenstr if style has QUOTE_0_TERMINATED,
++ * or the result of umoven otherwise.
++ */
++// copied and modified the code of printstr_ex() function
++static char *
++copystr_ex2(struct tcb *const tcp, const kernel_ulong_t addr,
++	    const kernel_ulong_t len, const unsigned int user_style)
++{
++	static char *str;
++	//static char *outstr;
++
++	unsigned int size;
++	unsigned int style = user_style;
++	int rc;
++
++	if (!addr) {
++		return NULL;
++	}
++	/* Allocate static buffers if they are not allocated yet. */
++	if (!str) {
++		str = xmalloc(max_strlen + 1);
++	}
++
++	/* Fetch one byte more because string_quote may look one byte ahead. */
++	size = max_strlen + 1;
++
++	if (size > len)
++		size = len;
++	if (style & QUOTE_0_TERMINATED)
++		rc = umovestr(tcp, addr, size, str);
++	else
++		rc = umoven(tcp, addr, size, str);
++
++	if (rc < 0) {
++		return NULL;
++	}
++	// May need to quote_string for some commands
++	return(strdup(str));
++#if 0
++	if (size > max_strlen)
++		size = max_strlen;
++	else
++		str[size] = '\xff';
++
++	if ((style & (QUOTE_0_TERMINATED | QUOTE_EXPECT_TRAILING_0))
++	    == (QUOTE_0_TERMINATED | QUOTE_EXPECT_TRAILING_0)
++	    && size == len && size) {
++		--size;
++	}
++
++	/* If string_quote didn't see NUL and (it was supposed to be ASCIZ str
++	 * or we were requested to print more than -s NUM chars)...
++	 */
++	string_quote(str, outstr, size, style, NULL);
++
++	return(strdup(outstr));
++#endif
++}
++
++static inline char *
++copy_single_str(struct tcb *const tcp, kernel_ulong_t addr)
++{
++        return copystr_ex2(tcp, addr, -1, QUOTE_0_TERMINATED);
++}
++
++// Copy the array of char * pointers in argv array in tracee process.
++// the new argv array in tracer's process is allocated and needs to be freed after use.
++static char *
++copy_argv_array(struct tcb *const tcp, kernel_ulong_t addr)
++{
++	if (!addr) {
++		return NULL;
++	}
++
++	const unsigned int wordsize = current_wordsize;
++	kernel_ulong_t prev_addr = 0;
++	unsigned int n = 0;
++
++	unsigned int argc = get_argc(tcp, addr);
++	char **array = (char **)xmalloc( (argc+1) * sizeof(char *));
++
++	for (;; prev_addr = addr, addr += wordsize, ++n) {
++		union {
++			unsigned int w32;
++			kernel_ulong_t wl;
++			char data[sizeof(kernel_ulong_t)];
++		} cp;
++
++		if (addr < prev_addr || umoven(tcp, addr, wordsize, cp.data)) {
++			if (n == 0) {
++				return NULL;
++			}
++			break;
++		}
++
++		const kernel_ulong_t word = (wordsize == sizeof(cp.w32))
++					    ? (kernel_ulong_t) cp.w32 : cp.wl;
++		if (word == 0)
++			break;
++
++		array[n] = copy_single_str(tcp, word);
++	}
++        array[argc] = NULL;
++
++	char *argv_str = copy_argv(array);
++	for (n=0; n<argc; n++) {
++		free(array[n]);
++	}
++	free(array);
++
++	return argv_str;
++}
++
++// copy the program path in tracee's process
++static char *
++copy_path(struct tcb *const tcp, const kernel_ulong_t addr)
++{
++	char path[PATH_MAX];
++	int nul_seen;
++	unsigned int n = PATH_MAX - 1;
++
++	if (!addr) {
++		return NULL;
++	}
++
++	/* Fetch one byte more to find out whether path length > n. */
++	nul_seen = umovestr(tcp, addr, n + 1, path);
++	if (nul_seen < 0)
++		return NULL;
++	else {
++		path[n++] = !nul_seen;
++	}
++
++	return strdup(path);
++}
++
++// get current working directory for a traced process.
++static char *
++bomsh_get_pwd(struct tcb *tcp)
++{
++	static char pwddir[PATH_MAX] = "";
++	char cwd_file[32] = "";
++	sprintf(cwd_file, "/proc/%d/cwd", tcp->pid);
++	int bytes = readlink(cwd_file, pwddir, PATH_MAX);
++	if (bytes == -1) {
++		tprintf("Bomtrace failed to readlink cwd\n");
++		return NULL;
++	}
++	pwddir[bytes] = 0;
++	return strdup(pwddir);
++}
++
++// write some data to a file
++static void bomsh_write_file(const char *filepath, const char *data, const char *mode)
++{
++        FILE *fp = fopen(filepath, mode);
++        if (fp != NULL) {
++                fputs(data, fp);
++                fclose(fp);
++        }
++}
++
++/*
++// read all data from the file FILEPATH and malloc the required buffer.
++// returned buffer needs to be freed by the caller
++static char * bomsh_read_file(const char *filepath)
++{
++        char * buffer = 0;
++        long length;
++        FILE * f = fopen (filepath, "rb");
++
++        if (f) {
++                fseek(f, 0, SEEK_END);
++                length = ftell(f);
++                fseek (f, 0, SEEK_SET);
++                buffer = malloc(length+1);
++                if (buffer) {
++                        if (fread(buffer, 1, length, f) > 0) {
++                                buffer[length] = 0;
++                        }
++                        buffer[length] = 0;
++                }
++                fclose (f);
++        }
++        return buffer;
++}
++*/
++
++static const char *bomsh_cmd_file = "/tmp/bomsh_cmd";
++
++// record the command data for the command to execute next: write it to bomsh_cmd_file for later use by bomsh_run_hook.
++static void bomsh_record_command(struct tcb *tcp, const unsigned int index)
++{
++	char *pwd = bomsh_get_pwd(tcp);
++	if (!pwd) {
++		return;
++	}
++	char *path = copy_path(tcp, tcp->u_arg[index + 0]);
++        if (!path) {
++                free(pwd);
++                return;
++        }
++	char *argv_str = copy_argv_array(tcp, tcp->u_arg[index + 1]);
++        if (!argv_str) {
++                free(pwd);
++                free(path);
++                return;
++        }
++	//tprintf("pid: %d pwd: %s path: %s argv: %s\n", tcp->pid, pwd, path, argv_str);
++        int len1 = strlen(pwd);
++        int len2 = strlen(path);
++        int len = len1 + len2 + strlen(argv_str) + 3;
++        char * cmd_data = malloc(len + 1);  // allocate the memory
++        if (!cmd_data) {
++                free(pwd);
++                free(path);
++                free(argv_str);
++                return;
++        }
++        // now concatenate the 3 strings.
++        strcpy(cmd_data, pwd);
++        cmd_data[len1] = '\n';  // use newline character as separator
++        strcpy(cmd_data + len1 + 1, path);
++        cmd_data[len1 + 1 + len2] = '\n';  // use newline character as separator
++        strcpy(cmd_data + len1 + len2 + 2, argv_str);
++        cmd_data[len - 1] = 0;  // must be null-terminated
++        char pid_str[100];
++        sprintf(pid_str, "pid: %d tracer-pid: %d\n", tcp->pid, getpid());
++        char cmd_file[100];
++        sprintf(cmd_file, "%s.pid%d", bomsh_cmd_file, tcp->pid);
++        bomsh_write_file(cmd_file, pid_str, "w");
++        bomsh_write_file(cmd_file, cmd_data, "a");
++        //tprintf("bomsh_record_command, cmd: %s pid: %d write cmd_data: %s\n", path, tcp->pid, cmd_data);
++        // need to free the malloc'ed memory
++	free(argv_str);
++	free(path);
++	free(pwd);
++        free(cmd_data);
++}
++
+ static void
+ printargv(struct tcb *const tcp, kernel_ulong_t addr)
+ {
+@@ -96,6 +404,19 @@ printargc(struct tcb *const tcp, kernel_ulong_t addr)
+ static void
+ decode_execve(struct tcb *tcp, const unsigned int index)
+ {
++#if 0
++	tprintf("yongkui pid: %d prog: %p %p\n", tcp->pid, (char *)tcp->u_arg[index + 0], (char *)tcp->u_arg[index + 1]);
++	char *pwd = bomsh_get_pwd(tcp);
++	char *path = copy_path(tcp, tcp->u_arg[index + 0]);
++	char *argv_str = copy_argv_array(tcp, tcp->u_arg[index + 1]);
++	tprintf("pid: %d pwd: %s path: %s argv: %s\n", tcp->pid, pwd, path, argv_str);
++	free(argv_str);
++	free(path);
++	free(pwd);
++#endif
++	/* Record this command */
++	bomsh_record_command(tcp, index);
++
+ 	/* pathname */
+ 	printpath(tcp, tcp->u_arg[index + 0]);
+ 	tprint_arg_next();
+diff --git a/src/strace.c b/src/strace.c
+index 7370275e1..ea15252c3 100644
+--- a/src/strace.c
++++ b/src/strace.c
+@@ -2854,6 +2854,73 @@ init(int argc, char *argv[])
+ 		((followfork && !output_separately) || nprocs > 1);
+ }
+ 
++static void
++bomsh_usage(void)
++{
++	printf("Usage: bomtrace -h [-o FILE] PROG [ARGS]\n");
++	exit(0);
++}
++
++static int bomsh_output_selected = 0;
++
++static void ATTRIBUTE_NOINLINE
++bomsh_init(int argc, char *argv[])
++{
++	int i, c;
++	static const char bomsh_optstring[] = "+ho:";
++
++	static const struct option bomsh_longopts[] = {
++		{ "help",		no_argument,	   0, 'h' },
++		{ "output",		required_argument, 0, 'o' },
++		{ 0, 0, 0, 0 }
++	};
++	char *argv0 = argv[0];
++	static const char *bomsh_argv[] = {"-f", "-s99999", "-e", "trace=execve", "--seccomp-bpf", "-qqq"};
++	int bomsh_argc = sizeof(bomsh_argv)/sizeof(char *);
++	outfname = "/tmp/bomsh_hook_strace_logfile";
++
++	while ((c = getopt_long(argc, argv, bomsh_optstring, bomsh_longopts, NULL)) != EOF) {
++
++		switch (c) {
++		case 'h':
++			bomsh_usage();
++			break;
++		case 'o':
++			outfname = optarg;
++			bomsh_output_selected = 1;
++			break;
++		default:
++			error_msg_and_help(NULL);
++			break;
++		}
++	}
++
++	argv += optind;
++	argc -= optind;
++	if (argc <= 0) {
++		error_msg_and_help("must have PROG [ARGS]");
++	}
++	int new_argc = argc+bomsh_argc+1;
++	char ** new_argv = (char **)malloc( (new_argc+1)* sizeof(char *));
++	if (!new_argv) {
++		printf("Failed to alloc memory.");
++		exit(0);
++	}
++	new_argv[0] = argv0;
++	for (i=0; i<bomsh_argc; i++) {
++		new_argv[i + 1] = (char *)bomsh_argv[i];
++	}
++	for (i=0; i<argc; i++) {
++		new_argv[bomsh_argc+1+i] = argv[i];
++	}
++	new_argv[new_argc] = NULL;
++
++	// must reinitialize getopt() by resetting optind to 0
++	optind = 0;
++	init(new_argc, new_argv);
++	free(new_argv);
++}
++
+ static struct tcb *
+ pid2tcb(const int pid)
+ {
+@@ -3542,6 +3609,35 @@ trace_syscall(struct tcb *tcp, unsigned int *sig)
+ 	}
+ }
+ 
++const char *bomsh_hook_cmd1 = "/tmp/bomsh_hook.py -b /tmp/bomdir -vv -s /tmp/bomsh_cmd";
++const char *bomsh_hook_cmd2 = " -vv >> /tmp/bomsh_hook_stdout 2>>/tmp/bomsh_hook_stderr < /dev/null";
++const char *bomsh_hook_cmd22 = " > /dev/null 2>&1 < /dev/null";
++//const char *bomsh_hook_cmd = "/tmp/bomsh_hook.py -vvvv -s /tmp/bomsh_cmd -b /tmp/bomdir >> /tmp/bomsh_hook_stdout.txt 2>>/tmp/bomsh_hook_stderr.txt < /dev/null";
++//const char *bomsh_hook_cmd = "/tmp/bomsh_hook.py -vv -s /tmp/bomsh_cmd -b /tmp/bomdir > /dev/null 2>&1 < /dev/null";
++
++// run a hooked external program, with pwd/cmd/argv of cmd_data as parameters
++static void bomsh_hook_program(int pid)
++{
++	char cmd_file[100];
++	char hook_cmd[200];
++	sprintf(cmd_file, "/tmp/bomsh_cmd.pid%d", pid);
++	if( access( cmd_file, F_OK ) != 0 ) {
++		// file does not exist
++		return;
++	}
++	if (bomsh_output_selected) {
++		sprintf(hook_cmd, "%s.pid%d %s", bomsh_hook_cmd1, pid, bomsh_hook_cmd2);
++	} else {
++		sprintf(hook_cmd, "%s.pid%d %s", bomsh_hook_cmd1, pid, bomsh_hook_cmd22);
++	}
++        if (system(hook_cmd) == -1) {
++		tprintf("Bomsh failed to hook for pid: %d cmd: %s\n", pid, hook_cmd);
++        //} else {
++	//	tprintf("Bomsh succeeded to hook for pid: %d cmd: %s\n", pid, hook_cmd);
++	}
++	remove(cmd_file);
++}
++
+ /* Returns true iff the main trace loop has to continue. */
+ static bool
+ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3670,6 +3766,9 @@ dispatch_event(const struct tcb_wait_data *wd)
+ 		break;
+ 
+ 	case TE_EXITED:
++		//tprintf("yongkui exited pid: %d status: %d\n", current_tcp->pid, status);
++		// Run the hook program to collect BOM.
++		bomsh_hook_program(current_tcp->pid);
+ 		print_exited(current_tcp, current_tcp->pid, status);
+ 		droptcb(current_tcp);
+ 		return true;
+@@ -3868,7 +3967,8 @@ int
+ main(int argc, char *argv[])
+ {
+ 	setlocale(LC_ALL, "");
+-	init(argc, argv);
++	bomsh_init(argc, argv);
++	//init(argc, argv);
+ 
+ 	exit_code = !nprocs;
+ 

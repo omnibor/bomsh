@@ -1,0 +1,21 @@
+# Format of each line: CVE-YEAR-num checksum1 checksum2
+
+# The range between checksum1 and checksum2 is vulnerable for this CVE.
+# checksum2 must be newer than checksum1 for the range to be meaningful.
+
+# The two checksums can only be blob type, and they must be the same git file. All the blob IDs between the two checksums (including them) are vulnerable.
+# The all-zero checksum can be used. If the all-zero checksum is checksum1, then it means the creation of this file.
+# If the all-zero checksum is checksum2, then it means there is no fix yet for this CVE (very unlikely).
+# A single CVE can have multiple lines to specify multiple ranges for different files as well as for the same file.
+# If multiple ranges are specified for the same file, then the final effective range for this file is the union of all ranges (which are allowed to overlap).
+
+# Only the full-length 40-characters checksum is accepted for now. A short checksum can be converted to full-length via "git rev-parse <your-short-checksum>" command.
+# In future, we can probably use git revision range instead of (checksum1 checksum2) in my opinion.
+# Lines starting with '#' character or empty lines are ignored.
+
+# This sample file is used for the "--range_of_vulnerable_cve" option of bomsh_create_cve.py script.
+
+# Below is an example for Apache Log4j2, with blob type checksums
+#CVE-2021-44228 7bf59430463f34e9bbf4082ac70e358659c71854 30e65ad24f4b4d799e52cfd70fcbebc0490b7343
+CVE-2021-44228 0000000000000000000000000000000000000000 30e65ad24f4b4d799e52cfd70fcbebc0490b7343
+#CVE-2021-44228 93efacf2b0831642296a3036a403813c388f3b42 30e65ad24f4b4d799e52cfd70fcbebc0490b7343
