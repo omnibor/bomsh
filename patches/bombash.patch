@@ -1,0 +1,350 @@
+diff --git a/eval.c b/eval.c
+index 1d967da1..3f1b52c0 100644
+--- a/eval.c
++++ b/eval.c
+@@ -51,6 +51,8 @@
+ static void send_pwd_to_eterm PARAMS((void));
+ static sighandler alrm_catcher PARAMS((int));
+ 
++static char bomsh_exec_path[PATH_MAX] = "";
++
+ /* Read and execute commands until EOF is reached.  This assumes that
+    the input source has already been initialized. */
+ int
+@@ -59,6 +61,17 @@ reader_loop ()
+   int our_indirection_level;
+   COMMAND * volatile current_command;
+ 
++if (find_variable("BOMSH")) {
++  if (readlink("/proc/self/exe", bomsh_exec_path, PATH_MAX) == -1) {
++    internal_warning("bomsh_get_exec_path, pid: %d\n", getpid());
++  }
++  char *bomsh = get_string_value("BOMSH");
++  if (strlen(bomsh) == 0 && strlen(bomsh_exec_path) > 0) {
++    bind_variable("BOMSH", bomsh_exec_path, 0);
++    //internal_warning("bomsh_get_exec_path, pid: %d exec_path: %s set env now\n", getpid(), bomsh_exec_path);
++  }
++}
++
+   USE_VAR(current_command);
+ 
+   current_command = (COMMAND *)NULL;
+@@ -286,6 +299,8 @@ execute_array_command (a, v)
+ }
+ #endif
+   
++extern void bomsh_run_hook(char *command);
++
+ static void
+ execute_prompt_command ()
+ {
+@@ -295,6 +310,9 @@ execute_prompt_command ()
+   ARRAY *pcmds;
+ #endif
+ 
++  if (find_variable("BOMSH")) {
++	bomsh_run_hook("prompt_cmd");
++  }
+   pcv = find_variable ("PROMPT_COMMAND");
+   if (pcv  == 0 || var_isset (pcv) == 0 || invisible_p (pcv))
+     return;
+diff --git a/execute_cmd.c b/execute_cmd.c
+index 425679a2..c68220b2 100644
+--- a/execute_cmd.c
++++ b/execute_cmd.c
+@@ -5800,6 +5800,247 @@ initialize_subshell ()
+     } \
+   while (0)
+       
++// the below flag turns on/off BOMSH debug messages
++#define bomsh_debug_on 0
++char *bomsh_hook_lock_file = "/tmp/bomsh_hook_lock";
++char *bomsh_cmd_file = "/tmp/bomsh_cmd";
++char *bomsh_cmd_hist_file = "/tmp/bomsh_cmd_history";
++char *bomsh_trace_file = "/tmp/bomsh_trace_log";
++
++// write some data to a file
++static void bomsh_write_file(const char *filepath, const char *data, char *mode)
++{
++	FILE *fp = fopen(filepath, mode);
++	if (fp != NULL) {
++		fputs(data, fp);
++		fclose(fp);
++	}
++}
++
++// read all data from the file FILEPATH and malloc the required buffer.
++// returned buffer needs to be freed by the caller
++static char * bomsh_read_file(const char *filepath)
++{
++	char * buffer = 0;
++	long length;
++	FILE * f = fopen (filepath, "rb");
++
++	if (f) {
++		fseek(f, 0, SEEK_END);
++		length = ftell(f);
++		fseek (f, 0, SEEK_SET);
++		buffer = malloc(length+1);
++		if (buffer) {
++			if (fread(buffer, 1, length, f) > 0) {
++				buffer[length] = 0;
++			}
++			buffer[length] = 0;
++		}
++		fclose (f);
++	}
++	return buffer;
++}
++
++// calculate the string length of the space-character separated argv array.
++// the calculated length includes the ending NULL character.
++static int get_argv_length(char **argv)
++{
++	int i = 0; int len = 0; char *p = argv[i];
++	while(p) {
++		len += strlen(p) + 1;
++		i++;
++		p = argv[i];
++	}
++	return len;
++}
++
++// copy out argv array and put the space concatenated string into a malloc'ed buf.
++// caller of this copy_argv function needs to free the malloc'ed memory.
++static char * copy_argv(char **argv)
++{
++	int i = 0; int len = 0; char *p = argv[i];
++	char *buf = NULL;
++	len = get_argv_length(argv);
++	buf = malloc(len);
++	if (!buf) { return buf; }
++	len = 0;
++	while(p) {
++		strcpy(buf + len, p);
++		len += strlen(p) + 1;
++		buf[len - 1] = ' ';  // use space character as the separator
++		i++;
++		p = argv[i];
++	}
++	buf[len - 1] = 0;
++	return buf;
++}
++
++#define BOMSH_NO_HOOKUP_STR "BOMSH_NO_HOOKUP"
++int bomsh_hook_running = 0;  // a flag to indicate bomsh_hook program is running
++char *bomsh_hook_cmd = "/tmp/bomsh_hook.py -vv -s /tmp/bomsh_cmd -b /tmp/bomdir > /dev/null 2>&1 < /dev/null";
++
++// run a hooked external program, with pwd/cmd/argv of cmd_data as parameters
++static void bomsh_hook_program(char *command)
++{
++	char *hook_cmd = get_string_value("BOMSH_HOOK_CMD");
++	if (!hook_cmd) {  // always run a default hook command
++		hook_cmd = bomsh_hook_cmd;
++	}
++	// write a special string to indicate that no hookup during system() call.
++	bomsh_write_file(bomsh_hook_lock_file, BOMSH_NO_HOOKUP_STR, "w");
++	if (system(hook_cmd) == -1) {
++		if (bomsh_debug_on) {
++			internal_warning("Bomsh failed to hook for pid: %d cmd: %s\n", getpid(), command);
++		}
++	}
++	if (bomsh_debug_on) {
++		internal_warning("unlock the hook, hook_running: %d pid: %d cmd: %s\n", bomsh_hook_running, getpid(), command);
++	}
++	// unlock the hook
++	bomsh_write_file(bomsh_hook_lock_file, "", "w");
++}
++
++// run the hookup program with system() call.
++// the cmd_data is already saved in the bomsh_cmd_file in bomsh_record_command().
++void bomsh_run_hook(char *command)
++{
++	int pid = getpid();
++	if (bomsh_debug_on) {
++		internal_warning("Entering bomsh_run_hook, pid: %d hook_running: %d =====Entering", pid, bomsh_hook_running);
++	}
++	char * hook_status = bomsh_read_file(bomsh_hook_lock_file);
++	if (hook_status && strlen(hook_status) > 0) {  // if hook_lock file is not empty, then it means hookup program is still running
++		bomsh_hook_running = 1;  // set this flag so we don't record this command
++		if (bomsh_debug_on) {
++			internal_warning("bomsh_run_hook, pid: %d read hook_status: %s ----------------- skip hooking\n", pid, hook_status);
++		}
++		free(hook_status);
++		return;  // skip hooking since there is an existing hookup program running.
++	}
++	char * cmd_data = bomsh_read_file(bomsh_cmd_file);
++	if (cmd_data && strlen(cmd_data) > 0) {  // the bomsh_cmd_file is not empty, then we run the hookup program.
++		if (bomsh_debug_on) {
++			internal_warning("bomsh_run_hook, cmd: %s pid: %d read cmd_data: %s\n", command, pid, cmd_data);
++		}
++		bomsh_hook_program(command);
++		bomsh_write_file(bomsh_cmd_file, "", "w");   //delete the contents after use
++		bomsh_hook_running = 0;
++		free(cmd_data);
++	}
++	return;
++}
++
++// record the command data for the command to execute next: write it to bomsh_cmd_file for later use by bomsh_run_hook.
++static void bomsh_record_command(char *cmd, char **argv, char **envp)
++{
++	if (bomsh_debug_on) {
++		internal_warning("Enterning bomsh_record_command, hook_running: %d pid: %d start recording command: %s +++++Entering\n", bomsh_hook_running, getpid(), cmd);
++	}
++	if (bomsh_hook_running) {
++		// if hookup program is already running, then no need to record this command
++		if (bomsh_debug_on) {
++			internal_warning("hook_running: %d pid: %d ================== skip recording command: %s\n", bomsh_hook_running, getpid(), cmd);
++		}
++		return;
++	}
++	// first get pwddir/cmd/argv strings.
++	char * pwddir = getcwd(0,0);
++	if (!pwddir) {
++		return;
++	}
++	char * argv_str = copy_argv(argv);
++	if (!argv_str) {
++		free(pwddir);
++		return;
++	}
++	int len1 = strlen(pwddir);
++	int len2 = strlen(cmd);
++	int len = len1 + len2 + strlen(argv_str) + 3;
++	char * cmd_data = malloc(len + 1);  // allocate the memory
++	if (!cmd_data) {
++		free(pwddir);
++		free(argv_str);
++		return;
++	}
++	// now concatenate the 3 strings.
++	strcpy(cmd_data, pwddir);
++	cmd_data[len1] = '\n';  // use newline character as separator
++	strcpy(cmd_data + len1 + 1, cmd);
++	cmd_data[len1 + 1 + len2] = '\n';  // use newline character as separator
++	strcpy(cmd_data + len1 + len2 + 2, argv_str);
++	cmd_data[len - 1] = 0;  // must be null-terminated
++	char pid_str[100];
++	sprintf(pid_str, "pid: %d ppid: %d pgid: %d\n", getpid(), getppid(), getpgid(0));
++	bomsh_write_file(bomsh_cmd_file, pid_str, "w");
++	bomsh_write_file(bomsh_cmd_file, cmd_data, "a");
++	if (bomsh_debug_on) {
++		internal_warning("bomsh_record_command, cmd: %s pid: %d write cmd_data: %s\n", cmd, getpid(), cmd_data);
++	}
++	//char *hist_file = bomsh_cmd_hist_file;
++	char *hist_file = get_string_value("BOMSH_CMD_HISTORY_FILE");
++	if (hist_file) {
++		// also append the string to the bomsh command history file
++		if (hist_file[0] == 0) {
++			hist_file = bomsh_cmd_hist_file;
++		}
++		//internal_warning("bomsh_record_command, cmd: %s pid: %d hist_file: %p value: %s\n", cmd, getpid(), hist_file, hist_file);
++		cmd_data[len1] = ' ';  // use space character as separator
++		cmd_data[len1 + 1 + len2] = ' ';  // use space character as separator
++		cmd_data[len - 1] = '\n';  // add newline character to append a new line to the history file
++		cmd_data[len] = 0;  // must be null-terminated
++		bomsh_write_file(hist_file, pid_str, "a");
++		bomsh_write_file(hist_file, cmd_data, "a");
++	}
++	// need to free the malloc'ed memory
++	free(cmd_data);
++	free(pwddir);
++	free(argv_str);
++}
++
++// only GNU make is supported
++static int bomsh_is_make_command(char *command)
++{
++    int len = strlen(command);
++    if (len < 5) {
++        return 0;
++    }
++    return strncmp(command + len - 5, "/make", 5) == 0;
++}
++
++// this should be done after bomsh_record_command()
++static void bomsh_add_shell_to_make_command(char ***pargs)
++{
++	char **args = *pargs;
++	int i = 1; int args_len = strvec_len(args);
++	char *shell_opt = "SHELL=/bin/bombash";
++	char *bombash = get_string_value("BOMSH");
++	if (strlen(bombash) > 0) {
++		int shell_opt_len = strlen(bombash) + 6;
++		shell_opt = malloc(shell_opt_len + 1);
++		strcpy(shell_opt, "SHELL=");
++		strcat(shell_opt, bombash);
++	}
++	char **newargs = strvec_create (args_len + 2);
++	newargs[0] = args[0];
++	newargs[1] = shell_opt;
++	for(i = 1; i < args_len + 1; i++) {
++		newargs[i+1] = args[i];
++	}
++	*pargs = newargs;
++	free(args);
++}
++
++static void bomsh_handle_make_command(char *command, char ***pargs)
++{
++  char * make_prog = "/usr/bin/make";
++  if (find_variable("BOMSH_MAKE")) {
++	  make_prog = get_string_value("BOMSH_MAKE");
++  }
++  if (strcmp(command, make_prog) == 0 || bomsh_is_make_command(command)) {  // TODO: find a good way to identify make
++	  bomsh_add_shell_to_make_command(pargs);
++  }
++}
++
+ /* Call execve (), handling interpreting shell scripts, and handling
+    exec failures. */
+ int
+@@ -5811,6 +6052,23 @@ shell_execve (command, args, env)
+   char sample[HASH_BANG_BUFSIZ];
+   int sample_len;
+ 
++  if (find_variable("BOMSH_TRACE_LOG")) {
++	  char *trace_file = get_string_value("BOMSH_TRACE_LOG");
++  	char mybuf[400];
++  	sprintf(mybuf, "\nshell_execve, pid: %d ppid: %d pgid: %d sid: %d stdout: %ld stderr: %ld cmd: %s\n", getpid(), getppid(), getpgid(0), getsid(0), ftell(stdout), ftell(stderr), command);
++		bomsh_write_file(trace_file, mybuf, "a");
++	char * argv_str = copy_argv(args);
++		bomsh_write_file(trace_file, argv_str, "a"); free(argv_str);
++  }
++  if (bomsh_debug_on) {
++  	internal_warning("yongkui, shell_execve, pid: %d ppid: %d pgid: %d sid: %d cmd: %s", getpid(), getppid(), getpgid(0), getsid(0), command);
++  }
++  if (find_variable("BOMSH")) {
++	  // let's run hook and record the command
++	bomsh_run_hook(command);
++	bomsh_record_command(command, args, env);
++	bomsh_handle_make_command(command, &args);
++  }
+   SETOSTYPE (0);		/* Some systems use for USG/POSIX semantics */
+   execve (command, args, env);
+   i = errno;			/* error from execve() */
+diff --git a/shell.c b/shell.c
+index ce8087f7..81fda4be 100644
+--- a/shell.c
++++ b/shell.c
+@@ -1013,6 +1013,8 @@ exit_shell (s)
+   sh_exit (s);
+ }
+ 
++extern void bomsh_run_hook(char *command);
++
+ /* A wrapper for exit that (optionally) can do other things, like malloc
+    statistics tracing. */
+ void
+@@ -1025,6 +1027,10 @@ sh_exit (s)
+   /* mlocation_write_table (); */
+ #endif
+ 
++  if (find_variable("BOMSH")) {
++        bomsh_run_hook("sh_exit");
++  }
++
+   exit (s);
+ }
+ 

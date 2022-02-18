@@ -1,0 +1,1073 @@
+diff --git a/src/execve.c b/src/execve.c
+index a9224543b..fe95b3270 100644
+--- a/src/execve.c
++++ b/src/execve.c
+@@ -14,6 +14,351 @@
+ 
+ #include "defs.h"
+ 
++// calculate the string length of the space-character separated argv array.
++// the calculated length includes the ending NULL character.
++static int get_argv_length(char **argv)
++{
++        int i = 0; int len = 0; char *p = argv[i];
++        while(p) {
++                len += strlen(p) + 1;
++                i++;
++                p = argv[i];
++        }
++        return len;
++}
++
++// copy out argv array and put the space concatenated string into a malloc'ed buf.
++// caller of this copy_argv function needs to free the malloc'ed memory.
++static char * copy_argv(char **argv)
++{
++        int i = 0; int len = 0; char *p = argv[i];
++        char *buf = NULL;
++        len = get_argv_length(argv);
++        buf = malloc(len);
++        if (!buf) { return buf; }
++        len = 0;
++        while(p) {
++                strcpy(buf + len, p);
++                len += strlen(p) + 1;
++                buf[len - 1] = ' ';  // use space character as the separator
++                i++;
++                p = argv[i];
++        }
++        buf[len - 1] = 0;
++        return buf;
++}
++
++// Get number of argv in tracee's argv array
++static unsigned int
++get_argc(struct tcb *const tcp, kernel_ulong_t addr)
++{
++	if (!addr)
++		return 0;
++
++	const unsigned int wordsize = current_wordsize;
++	kernel_ulong_t prev_addr = 0;
++	unsigned int n;
++
++	for (n = 0; addr > prev_addr; prev_addr = addr, addr += wordsize, ++n) {
++		kernel_ulong_t word = 0;
++		if (umoven(tcp, addr, wordsize, &word)) {
++			if (n == 0)
++				return 0;
++
++			addr = 0;
++			break;
++		}
++		if (word == 0)
++			break;
++	}
++	return n;
++}
++
++/*
++ * Copy string specified by address `addr' and length `len'.
++ * If `user_style' has QUOTE_0_TERMINATED bit set, treat the string
++ * as a NUL-terminated string.
++ * Pass `user_style' on to `string_quote'.
++ * Append `...' to the output if either the string length exceeds `max_strlen',
++ * or QUOTE_0_TERMINATED bit is set and the string length exceeds `len'.
++ *
++ * Returns the result of umovenstr if style has QUOTE_0_TERMINATED,
++ * or the result of umoven otherwise.
++ */
++// copied and modified the code of printstr_ex() function
++static char *
++copystr_ex2(struct tcb *const tcp, const kernel_ulong_t addr,
++	    const kernel_ulong_t len, const unsigned int user_style)
++{
++	static char *str;
++	//static char *outstr;
++
++	unsigned int size;
++	unsigned int style = user_style;
++	int rc;
++
++	if (!addr) {
++		return NULL;
++	}
++	/* Allocate static buffers if they are not allocated yet. */
++	if (!str) {
++		str = xmalloc(max_strlen + 1);
++	}
++
++	/* Fetch one byte more because string_quote may look one byte ahead. */
++	size = max_strlen + 1;
++
++	if (size > len)
++		size = len;
++	if (style & QUOTE_0_TERMINATED)
++		rc = umovestr(tcp, addr, size, str);
++	else
++		rc = umoven(tcp, addr, size, str);
++
++	if (rc < 0) {
++		return NULL;
++	}
++	// May need to quote_string for some commands
++	return(strdup(str));
++}
++
++static inline char *
++copy_single_str(struct tcb *const tcp, kernel_ulong_t addr)
++{
++        return copystr_ex2(tcp, addr, -1, QUOTE_0_TERMINATED);
++}
++
++// Copy the array of char * pointers in argv array in tracee process.
++// the new argv array in tracer's process is allocated and needs to be freed after use.
++static char *
++copy_argv_array(struct tcb *const tcp, kernel_ulong_t addr)
++{
++	if (!addr) {
++		return NULL;
++	}
++
++	const unsigned int wordsize = current_wordsize;
++	kernel_ulong_t prev_addr = 0;
++	unsigned int n = 0;
++
++	unsigned int argc = get_argc(tcp, addr);
++	char **array = (char **)xmalloc( (argc+1) * sizeof(char *));
++
++	for (;; prev_addr = addr, addr += wordsize, ++n) {
++		union {
++			unsigned int w32;
++			kernel_ulong_t wl;
++			char data[sizeof(kernel_ulong_t)];
++		} cp;
++
++		if (addr < prev_addr || umoven(tcp, addr, wordsize, cp.data)) {
++			if (n == 0) {
++				return NULL;
++			}
++			break;
++		}
++
++		const kernel_ulong_t word = (wordsize == sizeof(cp.w32))
++					    ? (kernel_ulong_t) cp.w32 : cp.wl;
++		if (word == 0)
++			break;
++
++		array[n] = copy_single_str(tcp, word);
++	}
++        array[argc] = NULL;
++
++	char *argv_str = copy_argv(array);
++	for (n=0; n<argc; n++) {
++		free(array[n]);
++	}
++	free(array);
++
++	return argv_str;
++}
++
++char *copy_path(struct tcb *const tcp, const kernel_ulong_t addr);
++
++// copy the program path in tracee's process
++char *
++copy_path(struct tcb *const tcp, const kernel_ulong_t addr)
++{
++	char path[PATH_MAX];
++	int nul_seen;
++	unsigned int n = PATH_MAX - 1;
++
++	if (!addr) {
++		return NULL;
++	}
++
++	/* Fetch one byte more to find out whether path length > n. */
++	nul_seen = umovestr(tcp, addr, n + 1, path);
++	if (nul_seen < 0)
++		return NULL;
++	else {
++		path[n++] = !nul_seen;
++	}
++
++	return strdup(path);
++}
++
++char * bomsh_get_pwd(struct tcb *tcp);
++
++// get current working directory for a traced process.
++char * bomsh_get_pwd(struct tcb *tcp)
++{
++	static char pwddir[PATH_MAX] = "";
++	char cwd_file[32] = "";
++	sprintf(cwd_file, "/proc/%d/cwd", tcp->pid);
++	int bytes = readlink(cwd_file, pwddir, PATH_MAX);
++	if (bytes == -1) {
++		tprintf("Bomtrace failed to readlink cwd\n");
++		return NULL;
++	}
++	pwddir[bytes] = 0;
++	return strdup(pwddir);
++}
++
++void bomsh_write_file(const char *filepath, const char *data, const char *mode);
++
++// write some data to a file
++void bomsh_write_file(const char *filepath, const char *data, const char *mode)
++{
++        FILE *fp = fopen(filepath, mode);
++        if (fp != NULL) {
++                fputs(data, fp);
++                fclose(fp);
++        }
++}
++
++extern struct bomsh_configs {
++        char *hook_script_file;
++        char *hook_script_cmdopt;
++        char *shell_cmd_file;
++        char *logfile;
++        char *syscalls;
++} g_bomsh_config;
++
++extern int bomsh_detach_on_pid;
++extern int bomsh_is_pre_exec_program(char *prog);
++extern int bomsh_is_watched_program(char *prog);
++extern int bomsh_is_detach_on_pid_program(char *prog);
++extern void bomsh_hook_program(int pid, int pre_exec_mode, const char *suffix);
++
++// record the command data for the command to execute next: write it to bomsh_cmd_file for later use by bomsh_run_hook.
++// returns 1 when record the command successfully and need to run pre-exec hookup
++// returns 2 when record the command successfully and no need to run pre-exec hookup
++// otherwise, recording fails, returns 0
++static int bomsh_record_command(struct tcb *tcp, const unsigned int index)
++{
++	char *abs_path = NULL;
++	char *pwd = bomsh_get_pwd(tcp);
++	if (!pwd) {
++		return 0;
++	}
++	char *path = copy_path(tcp, tcp->u_arg[index + 0]);
++        if (!path) {
++                free(pwd);
++                return 0;
++        }
++	if (bomsh_is_detach_on_pid_program(path)) {
++		// no need to record this command or follow its child processes
++		bomsh_detach_on_pid = tcp->pid;
++		free(pwd);
++		free(path);
++		return 0;
++	}
++	if( !bomsh_is_watched_program(path) ) {
++		// file cannot read or execute, or not watched
++		free(pwd);
++		free(path);
++		return 0;
++	}
++	// Convert to absolute path if necessary
++	abs_path = path;
++	if (path[0] != '/') {
++		abs_path = malloc(strlen(pwd) + strlen(path) + 2);
++		if (!abs_path) {
++			free(pwd);
++			free(path);
++			return 0;
++		}
++		strcpy(abs_path, pwd);
++		strcat(abs_path, "/");
++		strcat(abs_path, path);
++	}
++	// strace's pwd may be different from command's pwd, so must use absolute path to check file existence
++	if( access( abs_path, R_OK|X_OK ) != 0 ) {
++		// file cannot read or execute, or not watched
++		free(pwd);
++		free(path);
++		if (abs_path && abs_path != path) { free(abs_path); }
++		return 0;
++	}
++	if (abs_path && abs_path != path) { free(abs_path); }
++	char *argv_str = copy_argv_array(tcp, tcp->u_arg[index + 1]);
++        if (!argv_str) {
++		free(pwd);
++		free(path);
++                return 0;
++        }
++	//tprintf("pid: %d pwd: %s path: %s argv: %s\n", tcp->pid, pwd, path, argv_str);
++        int len1 = strlen(pwd);
++        int len2 = strlen(path);
++        int len = len1 + len2 + strlen(argv_str) + 3;
++        char * cmd_data = malloc(len + 1);  // allocate the memory
++        if (!cmd_data) {
++                free(pwd);
++                free(path);
++                free(argv_str);
++                return 0;
++        }
++        // now concatenate the 3 strings.
++        strcpy(cmd_data, pwd);
++        cmd_data[len1] = '\n';  // use newline character as separator
++        strcpy(cmd_data + len1 + 1, path);
++        cmd_data[len1 + 1 + len2] = '\n';  // use newline character as separator
++        strcpy(cmd_data + len1 + len2 + 2, argv_str);
++        cmd_data[len - 1] = 0;  // must be null-terminated
++        char pid_str[32];
++        sprintf(pid_str, "pid: %d\n", tcp->pid);
++        //sprintf(pid_str, "pid: %d tracer-pid: %d\n", tcp->pid, getpid());
++        char cmd_file[100];
++	const char *shell_cmd_file = "/tmp/bomsh_cmd";
++	if (g_bomsh_config.shell_cmd_file) {
++		shell_cmd_file = g_bomsh_config.shell_cmd_file;
++	}
++	unsigned long n = snprintf(cmd_file, sizeof(cmd_file), "%s.pid%d", shell_cmd_file, tcp->pid);
++	if (n >= sizeof(cmd_file)) {
++		if (g_bomsh_config.logfile) {
++			bomsh_write_file(g_bomsh_config.logfile, "\nError: bomsh cmd file name too long\n", "a");
++		}
++                free(pwd);
++                free(path);
++                free(argv_str);
++		return 0;
++	}
++	cmd_file[sizeof(cmd_file)-1] = 0;
++        bomsh_write_file(cmd_file, pid_str, "w");
++        bomsh_write_file(cmd_file, cmd_data, "a");
++        if (g_bomsh_config.logfile) {
++		bomsh_write_file(g_bomsh_config.logfile, "\n\nInvoking bomsh_record_cmd\n", "a");
++	        bomsh_write_file(g_bomsh_config.logfile, pid_str, "a");
++		bomsh_write_file(g_bomsh_config.logfile, cmd_data, "a");
++	}
++        //tprintf("bomsh_record_command, cmd: %s pid: %d write cmd_data: %s\n", path, tcp->pid, cmd_data);
++	int rc = 1;
++	if( !bomsh_is_pre_exec_program(path) ) {
++		// no need to run pre-exec hookup.
++		rc = 2;
++	}
++        // need to free the malloc'ed memory
++	free(argv_str);
++	free(path);
++	free(pwd);
++	free(cmd_data);
++	return rc;
++}
++
+ static void
+ printargv(struct tcb *const tcp, kernel_ulong_t addr)
+ {
+@@ -96,6 +441,12 @@ printargc(struct tcb *const tcp, kernel_ulong_t addr)
+ static void
+ decode_execve(struct tcb *tcp, const unsigned int index)
+ {
++	/* Record this command */
++	if (bomsh_record_command(tcp, index) == 1) {
++		// run hook program in pre-exec mode
++		bomsh_hook_program(tcp->pid, 1, "");
++	}
++
+ 	/* pathname */
+ 	printpath(tcp, tcp->u_arg[index + 0]);
+ 	tprint_arg_next();
+diff --git a/src/open.c b/src/open.c
+index d7654d7e8..5cfe94977 100644
+--- a/src/open.c
++++ b/src/open.c
+@@ -110,9 +110,135 @@ tprint_open_modes(unsigned int flags)
+ 	tprint_open_modes64(flags);
+ }
+ 
++extern struct bomsh_configs {
++        char *hook_script_file;
++        char *hook_script_cmdopt;
++        char *shell_cmd_file;
++        char *logfile;
++        char *syscalls;
++} g_bomsh_config;
++
++extern int bomsh_openat_mode;
++extern int bomsh_openat_fd;
++extern int bomsh_openat_fd_pid;
++extern char *copy_path(struct tcb *const tcp, const kernel_ulong_t addr);
++extern char * bomsh_get_pwd(struct tcb *tcp);
++extern void bomsh_write_file(const char *filepath, const char *data, const char *mode);
++
++// record the openat_file command data for the openat syscall next: write it to bomsh_cmd_file for later use by bomsh_run_hook.
++// returns 1 when record the command successfully, and always run pre-exec hookup if successful
++// otherwise, recording failes, returns 0
++static int bomsh_record_openat_file_command(struct tcb *tcp, const unsigned int index)
++{
++	char *abs_path = NULL;
++	char *pwd = bomsh_get_pwd(tcp);
++	if (!pwd) {
++		return 0;
++	}
++	// this is the file to open
++	char *path = copy_path(tcp, tcp->u_arg[index + 0]);
++        if (!path) {
++                free(pwd);
++                return 0;
++        }
++	// Convert to absolute path if necessary
++	abs_path = path;
++	if (path[0] != '/') {
++		abs_path = malloc(strlen(pwd) + strlen(path) + 2);
++		if (!abs_path) {
++			free(pwd);
++			free(path);
++			return 0;
++		}
++		strcpy(abs_path, pwd);
++		strcat(abs_path, "/");
++		strcat(abs_path, path);
++	}
++	// strace's pwd may be different from command's pwd, so must use absolute path to check file existence
++	if( access( abs_path, R_OK ) != 0 ) {
++		// file cannot read
++		free(pwd);
++		free(path);
++		if (abs_path && abs_path != path) { free(abs_path); }
++		return 0;
++	}
++	if (abs_path && abs_path != path) { free(abs_path); }
++	const char *prog = "bomsh_openat_file";
++        int len1 = strlen(pwd);
++        int len2 = strlen(prog);
++        int len = len1 + 2*len2 + strlen(path) + 4;
++        char * cmd_data = malloc(len + 1);  // allocate the memory
++        if (!cmd_data) {
++                free(pwd);
++                free(path);
++                return 0;
++        }
++        // now concatenate the 4 strings.
++        strcpy(cmd_data, pwd);
++        cmd_data[len1] = '\n';  // use newline character as separator
++        strcpy(cmd_data + len1 + 1, prog);
++        cmd_data[len1 + 1 + len2] = '\n';  // use newline character as separator
++        strcpy(cmd_data + len1 + len2 + 2, prog);
++        cmd_data[len1 + 2 + 2*len2] = ' ';  // use space character between prog and file path
++        strcpy(cmd_data + len1 + 2*len2 + 3, path);
++        cmd_data[len - 1] = 0;  // must be null-terminated
++        char pid_str[32];
++        sprintf(pid_str, "pid: %d\n", tcp->pid);
++        char cmd_file[100];
++	const char *shell_cmd_file = "/tmp/bomsh_cmd";
++	if (g_bomsh_config.shell_cmd_file) {
++		shell_cmd_file = g_bomsh_config.shell_cmd_file;
++	}
++	unsigned long n = snprintf(cmd_file, sizeof(cmd_file), "%s.pid%dfd", shell_cmd_file, tcp->pid);
++	if (n >= sizeof(cmd_file)) {
++		if (g_bomsh_config.logfile) {
++			bomsh_write_file(g_bomsh_config.logfile, "\nError: bomsh cmd file name too long\n", "a");
++		}
++                free(pwd);
++                free(path);
++		return 0;
++	}
++	cmd_file[sizeof(cmd_file)-1] = 0;
++        bomsh_write_file(cmd_file, pid_str, "w");
++        bomsh_write_file(cmd_file, cmd_data, "a");
++        if (g_bomsh_config.logfile) {
++		bomsh_write_file(g_bomsh_config.logfile, "\n\nInvoking bomsh_record_cmd\n", "a");
++	        bomsh_write_file(g_bomsh_config.logfile, pid_str, "a");
++		bomsh_write_file(g_bomsh_config.logfile, cmd_data, "a");
++	}
++        //tprintf("bomsh_record_command, cmd: %s pid: %d write cmd_data: %s\n", prog, tcp->pid, cmd_data);
++	// -2 value to indicate a successful bomsh_openat_file recording. Need to save pid too.
++	bomsh_openat_fd = -2;
++	bomsh_openat_fd_pid = tcp->pid;
++        // need to free the malloc'ed memory
++	free(path);
++	free(pwd);
++	free(cmd_data);
++        return 1;
++}
++
++extern void bomsh_hook_program(int pid, int pre_exec_mode, const char *suffix);
++
++static void
++bomsh_try_record_file_checksum(struct tcb *tcp, int offset)
++{
++	kernel_ulong_t mode = tcp->u_arg[offset + 1];
++	// only a small subset of file writes are interesting to us
++	if ((mode & O_ACCMODE) && (mode & O_CLOEXEC) && !(mode & (O_NONBLOCK | O_CREAT | O_TRUNC))) {
++		if (bomsh_record_openat_file_command(tcp, offset)) {
++			// run hook program in pre-exec mode
++			bomsh_hook_program(tcp->pid, 1, "fd");
++		}
++	}
++}
++
+ static int
+ decode_open(struct tcb *tcp, int offset)
+ {
++	if (bomsh_openat_mode) {
++		bomsh_try_record_file_checksum(tcp, offset);
++	}
++
+ 	/* pathname */
+ 	printpath(tcp, tcp->u_arg[offset]);
+ 	tprint_arg_next();
+diff --git a/src/strace.c b/src/strace.c
+index 6e4f8221f..e5ef69982 100644
+--- a/src/strace.c
++++ b/src/strace.c
+@@ -2848,6 +2848,479 @@ init(int argc, char *argv[])
+ 		((followfork && !output_separately) || nprocs > 1);
+ }
+ 
++// read all data from the file FILEPATH and malloc the required buffer.
++// returned buffer needs to be freed by the caller
++static char * bomsh_read_file(const char *filepath)
++{
++        char * buffer = 0;
++        long length;
++        FILE * f = fopen (filepath, "rb");
++
++        if (f) {
++                fseek(f, 0, SEEK_END);
++                length = ftell(f);
++                fseek (f, 0, SEEK_SET);
++                buffer = malloc(length+1);
++                if (buffer) {
++                        if (fread(buffer, 1, length, f) > 0) {
++                                buffer[length] = 0;
++                        }
++                        buffer[length] = 0;
++                }
++                fclose (f);
++        }
++        return buffer;
++}
++
++// 100 programs should be sufficient for most software builds
++#define BOMSH_MAX_WATCHED_PROGRAMS 100
++static char *bomsh_watched_programs_str = NULL;
++static char **bomsh_pre_exec_programs = 0;
++static int bomsh_num_pre_exec_programs = 0;
++static char **bomsh_watched_programs = 0;
++static char **bomsh_detach_on_pid_programs = 0;
++static int bomsh_num_watched_programs = 0;
++static int bomsh_num_detach_on_pid_programs = 0;
++
++int bomsh_is_pre_exec_program(char *prog);
++int bomsh_is_watched_program(char *prog);
++int bomsh_is_detach_on_pid_program(char *prog);
++
++// write some data to a file
++static void bomsh_write_file(const char *filepath, const char *data, const char *mode)
++{
++        FILE *fp = fopen(filepath, mode);
++        if (fp != NULL) {
++                fputs(data, fp);
++                fclose(fp);
++        }
++}
++
++#if 0
++static const char *bomsh_tracefile = "/tmp/bomsh_tracefile";
++static void bomsh_print_programs(char **progs, int num_progs)
++{
++	if (!progs) {
++		return;
++	}
++	fprintf(stderr, "\n start printing programs:\n");
++	//bomsh_write_file(bomsh_tracefile, "\n start printing programs:\n", "a");
++	for (int i=0; i<num_progs; i++) {
++		if (!progs[i]) {
++			break;
++		}
++		fprintf(stderr, "%s\n", progs[i]);
++		//bomsh_write_file(bomsh_tracefile, progs[i], "a");
++	}
++}
++
++// find the index of array element that equals path.
++// return -1 if the element cannot be found
++static int binary_search_program(char *array[], char *path, int low, int high) {
++	// Repeat until the pointers low and high meet each other
++	while (low <= high) {
++		int mid = low + (high - low) / 2;
++		if (strcmp(array[mid], path) == 0) {
++			return mid;
++		}
++		if (strcmp(array[mid], path) < 0)
++			low = mid + 1;
++		else
++			high = mid - 1;
++	}
++	return -1;
++}
++#endif
++
++static int strcmp_comparator(const void *p, const void *q)
++{
++	return strcmp(* (char * const *) p, * (char * const *) q);
++}
++
++// check if a program is in the watched list.
++static int bomsh_is_program_inlist(char *prog, char **prog_list, int num_progs)
++{
++	return bsearch(&prog, prog_list, num_progs, sizeof(char *), strcmp_comparator) != NULL;
++	//return binary_search_program(prog_list, prog, 0, num_progs - 1) != -1;
++}
++
++// check if a program is in the pre-exec mode program list.
++int bomsh_is_pre_exec_program(char *prog)
++{
++	if (!bomsh_pre_exec_programs) {  // there is no any watched program, so matching any program
++		return 1;
++	}
++	return bomsh_is_program_inlist(prog, bomsh_pre_exec_programs, bomsh_num_pre_exec_programs);
++}
++
++// check if a program is in the watched list.
++int bomsh_is_watched_program(char *prog)
++{
++	if (!bomsh_watched_programs) {  // there is no any watched program, so matching any program
++		return 1;
++	}
++	return bomsh_is_program_inlist(prog, bomsh_watched_programs, bomsh_num_watched_programs);
++}
++
++// check if a program is in the detach_on_pid list.
++int bomsh_is_detach_on_pid_program(char *prog)
++{
++	if (!bomsh_detach_on_pid_programs) {  // there is no any detach_on_pid program, so matching none.
++		return 0;
++	}
++	return bomsh_is_program_inlist(prog, bomsh_detach_on_pid_programs, bomsh_num_detach_on_pid_programs);
++}
++
++// Extract list of programs from the string and save them into an array of pointers.
++// The programs_str contains the list of programs separated by newline character.
++static char **
++bomsh_get_watched_programs(char *programs_str, int *num_programs)
++{
++        char ** ret_watched_progs;
++        char * watched_progs[BOMSH_MAX_WATCHED_PROGRAMS];
++	char delim[] = "\n";
++
++	int i = 0;
++	char *ptr = strtok(programs_str, delim);
++	while(ptr != NULL)
++	{
++		if (strlen(ptr) > 0 && ptr[0] != '#') {
++			watched_progs[i] = ptr; i++;
++			if (i >= BOMSH_MAX_WATCHED_PROGRAMS) {
++				fprintf(stderr, "Maximum reached, only the first %d programs are read\n", BOMSH_MAX_WATCHED_PROGRAMS);
++				goto ret_here;
++			}
++		}
++		ptr = strtok(NULL, delim);
++	}
++	if (i == 0) {  // need at least one watched program
++		fprintf(stderr, "No watched program is read\n");
++		return NULL;
++	}
++ret_here:
++	ret_watched_progs = (char **)malloc( i * sizeof(char *) );
++	//fprintf(stderr, "progs: %p num: %d\n", ret_watched_progs, i);
++	if (!ret_watched_progs) {
++		return NULL;
++	}
++	*num_programs = i;
++	for(i=0; i < *num_programs; i++) {
++		ret_watched_progs[i] = watched_progs[i];
++	}
++	// sort the array for binary search
++	qsort(ret_watched_progs, i, sizeof(char *), strcmp_comparator);
++	return ret_watched_progs;
++}
++
++/*
++ * Each line is a program to watch, there should be no leading or trailing spaces.
++ * Empty line or line starting with '#' character will be ignored.
++ * pre-exec mode programs are also in this file, separated by an exact line of "---"
++ * detach_on_pid programs are also in this file, separated by an exact line of "==="
++ */
++static char **
++bomsh_read_watched_programs(char *prog_file)
++{
++	bomsh_watched_programs_str = bomsh_read_file(prog_file);
++	if (!bomsh_watched_programs_str) {
++		fprintf(stderr, "Cannot open the watched program list file\n");
++		return NULL;
++	}
++	char *equal_sep_line = strstr(bomsh_watched_programs_str, "===");
++        if (equal_sep_line) {
++		*equal_sep_line = 0;
++		equal_sep_line += 4;  // move to start of detach-on-pid program list
++	}
++	char *minus_sep_line = strstr(bomsh_watched_programs_str, "---");
++        if (minus_sep_line) {
++		*minus_sep_line = 0;
++		minus_sep_line += 4;  // move to start of pre-exec program list
++	}
++	char ** watched_progs;
++	watched_progs = bomsh_get_watched_programs(bomsh_watched_programs_str, &bomsh_num_watched_programs);
++	if (minus_sep_line) {
++		bomsh_pre_exec_programs = bomsh_get_watched_programs(minus_sep_line, &bomsh_num_pre_exec_programs);
++	}
++	if (equal_sep_line) {
++		bomsh_detach_on_pid_programs = bomsh_get_watched_programs(equal_sep_line, &bomsh_num_detach_on_pid_programs);
++	}
++	if (!watched_progs && !bomsh_detach_on_pid_programs && !bomsh_pre_exec_programs) {
++		free(bomsh_watched_programs_str);
++		return NULL;
++	}
++	//bomsh_print_programs(watched_progs, bomsh_num_watched_programs);
++	//bomsh_print_programs(bomsh_pre_exec_programs, bomsh_num_pre_exec_programs);
++	//bomsh_print_programs(bomsh_detach_on_pid_programs, bomsh_num_detach_on_pid_programs);
++	return watched_progs;
++}
++
++struct bomsh_configs {
++	char *hook_script_file;
++	char *hook_script_cmdopt;
++	char *shell_cmd_file;
++	char *logfile;
++	char *syscalls;
++};
++struct bomsh_configs g_bomsh_config;
++
++// a special mode to trace openat/close syscalls and record checksums of interested files.
++int bomsh_openat_mode = 0;
++int bomsh_openat_fd = -1;
++static int bomsh_openat_fd_closed = 0;
++int bomsh_openat_fd_pid = -1;
++
++int bomsh_detach_on_pid = -5;
++void bomsh_hook_program(int pid, int pre_exec_mode, const char *suffix);
++
++// run a hooked external program
++// Set pre_exec_mode to 1 to indicate it is in pre-exec mode
++// suffix will be "fd" for our internal bomsh_openat_file command
++void bomsh_hook_program(int pid, int pre_exec_mode, const char *suffix)
++{
++	char cmd_file[100];
++	char hook_cmd[500];
++	const char *hook_script = "/tmp/bomsh_hook2.py";
++	const char *shell_cmd_file = "/tmp/bomsh_cmd";
++	const char *hook_cmdopt = "-vv > /dev/null 2>&1 < /dev/null";
++	if (g_bomsh_config.shell_cmd_file) {
++		shell_cmd_file = g_bomsh_config.shell_cmd_file;
++	}
++	snprintf(cmd_file, sizeof(cmd_file)-1, "%s.pid%d%s", shell_cmd_file, pid, suffix);
++	cmd_file[sizeof(cmd_file)-1] = 0;
++	if( access( cmd_file, F_OK ) != 0 ) {
++		// file does not exist
++		return;
++	}
++	if (g_bomsh_config.hook_script_file) {
++		hook_script = g_bomsh_config.hook_script_file;
++	}
++	if (g_bomsh_config.hook_script_cmdopt) {
++		hook_cmdopt = g_bomsh_config.hook_script_cmdopt;
++	}
++	unsigned long n;
++	if (pre_exec_mode) {
++		n = snprintf(hook_cmd, sizeof(hook_cmd), "%s -s %s --pre_exec %s", hook_script, cmd_file, hook_cmdopt);
++	} else {
++		n = snprintf(hook_cmd, sizeof(hook_cmd), "%s -s %s %s", hook_script, cmd_file, hook_cmdopt);
++	}
++	if (n >= sizeof(hook_cmd)) {
++		if (g_bomsh_config.logfile) {
++			bomsh_write_file(g_bomsh_config.logfile, "\nError: hook cmd too long\n", "a");
++		}
++		return;
++	}
++	hook_cmd[sizeof(hook_cmd)-1] = 0;
++	if (g_bomsh_config.logfile) {
++		if (pre_exec_mode) {
++			bomsh_write_file(g_bomsh_config.logfile, "\nInvoking pre-exec hook_cmd: ", "a");
++		} else {
++			bomsh_write_file(g_bomsh_config.logfile, "\nInvoking hook_cmd: ", "a");
++		}
++		bomsh_write_file(g_bomsh_config.logfile, hook_cmd, "a");
++	}
++        if (system(hook_cmd) == -1) {
++		//tprintf("Bomsh failed to hook for pid: %d cmd: %s\n", pid, hook_cmd);
++        //} else {
++	//	tprintf("Bomsh succeeded to hook for pid: %d cmd: %s\n", pid, hook_cmd);
++	}
++	if (!pre_exec_mode) {
++		// must not remove file in pre-exec mode
++		remove(cmd_file);
++	}
++}
++
++static void bomsh_check_openat_fdclosed(struct tcb *tcp)
++{
++	// must be the close (3) syscall, with matching fd and pid.
++	if (tcp->scno == 3 && bomsh_openat_fd == (int)(tcp->u_arg[0]) && tcp->pid == bomsh_openat_fd_pid) {
++		// set the flag so that we can record post-checksum in next syscall.
++		bomsh_openat_fd_closed = 1;
++	} else {
++		if (bomsh_openat_fd_closed) {
++			// invoke the hook program to record post-checksum of file write
++			bomsh_hook_program(bomsh_openat_fd_pid, 0, "fd");
++			// reset the flag and relevant variables.
++			bomsh_openat_fd_closed = 0;
++			bomsh_openat_fd = -1;
++			bomsh_openat_fd_pid = -1;
++		}
++	}
++}
++
++#if 0
++static void
++bomsh_print_configs(void)
++{
++	fprintf(stderr, "hook_script_file: %s\n", g_bomsh_config.hook_script_file);
++	fprintf(stderr, "hook_script_cmdopt: %s\n", g_bomsh_config.hook_script_cmdopt);
++	fprintf(stderr, "shell_cmd_file: %s\n", g_bomsh_config.shell_cmd_file);
++	fprintf(stderr, "logfile: %s\n", g_bomsh_config.logfile);
++	fprintf(stderr, "syscalls: %s\n", g_bomsh_config.syscalls);
++}
++#endif
++
++// read the configuration key/value from the current key=value line
++static void
++bomsh_read_value_for_keys(char *line_start, char *value_equal, char *value_newline)
++{
++	static const char *bomsh_config_keys[] = {"hook_script_file", "hook_script_cmdopt", "shell_cmd_file", "logfile", "syscalls"};
++	static char ** bomsh_config_fields[] = {
++		&g_bomsh_config.hook_script_file,
++		&g_bomsh_config.hook_script_cmdopt,
++		&g_bomsh_config.shell_cmd_file,
++		&g_bomsh_config.logfile,
++		&g_bomsh_config.syscalls
++	};
++	int num_keys = sizeof(bomsh_config_keys)/sizeof(char *);
++        const char *key; unsigned long len;
++	for (int i=0; i < num_keys; i++) {
++		key = bomsh_config_keys[i];
++		if (strncmp(key, line_start, strlen(key)) == 0) {
++			len = value_newline - value_equal ;  // this len includes NULL terminating character
++			if (len >= PATH_MAX - sizeof(int) * 3) {
++				continue;
++			}
++			char *buf = malloc(len);
++			if (!buf) {
++				fprintf(stderr, "Failed to alloc memory.");
++				return;
++			}
++			strncpy(buf, value_equal + 1, len - 1);
++			buf[len - 1] = 0;
++			*(bomsh_config_fields[i]) = buf;
++			//fprintf(stderr, "Read key: %s value: %s\n", key, buf);
++		}
++	}
++}
++
++// scan the config file and read all the configuration keys and values
++static void
++bomsh_read_configs(char *config_file)
++{
++	char *bomsh_configs_str = bomsh_read_file(config_file);
++	if (!bomsh_configs_str) {
++		fprintf(stderr, "Cannot open the config file\n");
++		return;
++	}
++        char *p = bomsh_configs_str;  // pointing to current character
++        char *q = bomsh_configs_str;  // pointing to the beginning of current line
++        char *r = NULL;  // pointing to the first '=' character in the line
++        while (*p) {
++		if (*p == '=' && !r) {  // move to the first '=' character in the line
++			r = p;
++		}
++		else if (*p == '\n') {
++			if (*q != '#' && *q != '\n' && r > q && r < p) {  // found one valid line of key=value
++				bomsh_read_value_for_keys(q, r, p);
++			}
++			q = p + 1;  // move to the beginning of next line
++			r = NULL;  // set to NULL for next line
++		}
++		p++;
++	}
++}
++
++static void
++bomsh_usage(void)
++{
++	printf("Usage: bomtrace -h [-o FILE] [-c FILE] [-w FILE] PROG [ARGS]\n");
++	exit(0);
++}
++
++static void ATTRIBUTE_NOINLINE
++bomsh_init(int argc, char *argv[])
++{
++	int i, c;
++	static const char bomsh_optstring[] = "+hc:o:w:";
++
++	static const struct option bomsh_longopts[] = {
++		{ "help",		no_argument,	   0, 'h' },
++		{ "config",		required_argument, 0, 'c' },
++		{ "output",		required_argument, 0, 'o' },
++		{ "watch",		required_argument, 0, 'w' },
++		{ 0, 0, 0, 0 }
++	};
++	char *argv0 = argv[0];
++	static const char *bomsh_argv1[] = {"-f", "-s99999", "-e", "trace=execve", "-qqq"};
++	static const char *bomsh_argv2[] = {"-f", "-s99999", "-e", "trace=execve", "--seccomp-bpf", "-qqq"};
++	const char **bomsh_argv;
++	int bomsh_argc;
++	outfname = "/tmp/bomsh_hook_strace_logfile";
++	memset(&g_bomsh_config, 0, sizeof(g_bomsh_config));
++
++	while ((c = getopt_long(argc, argv, bomsh_optstring, bomsh_longopts, NULL)) != EOF) {
++
++		switch (c) {
++		case 'h':
++			bomsh_usage();
++			break;
++		case 'o':
++			outfname = optarg;
++			break;
++		case 'c':
++			// read the configuration items from the file
++			bomsh_read_configs(optarg);
++			//bomsh_print_configs();
++			break;
++		case 'w':
++			// read the list of programs from the file
++			bomsh_watched_programs = bomsh_read_watched_programs(optarg);
++			break;
++		default:
++			error_msg_and_help(NULL);
++			break;
++		}
++	}
++
++	argv += optind;
++	argc -= optind;
++	if (argc <= 0) {
++		error_msg_and_help("must have PROG [ARGS]");
++	}
++	if (bomsh_detach_on_pid_programs) {
++		// cannot use both detach and --seccomp-bpf due to limitation
++		bomsh_argv = bomsh_argv1;
++		bomsh_argc = sizeof(bomsh_argv1)/sizeof(char *);
++	} else {
++		bomsh_argv = bomsh_argv2;
++		bomsh_argc = sizeof(bomsh_argv2)/sizeof(char *);
++	}
++	char * trace_syscalls = NULL;
++	if (g_bomsh_config.syscalls) {
++		trace_syscalls = (char *) malloc(strlen(bomsh_argv[3]) + strlen(g_bomsh_config.syscalls) + 2);
++		if (!trace_syscalls) {
++			fprintf(stderr, "Failed to alloc memory.");
++			exit(0);
++		}
++		sprintf(trace_syscalls, "%s,%s", bomsh_argv[3], g_bomsh_config.syscalls);
++		bomsh_argv[3] = trace_syscalls;  // more syscalls will be traced
++		if (strncmp(g_bomsh_config.syscalls, "openat,close", 12) == 0) {
++			bomsh_openat_mode = 1;
++		}
++	}
++	int new_argc = argc+bomsh_argc+1;
++	char ** new_argv = (char **)malloc( (new_argc+1)* sizeof(char *));
++	if (!new_argv) {
++		fprintf(stderr, "Failed to alloc memory.");
++		exit(0);
++	}
++	// Copy all options to the new_argv array to apply to strace in the end.
++	new_argv[0] = argv0;
++	for (i=0; i<bomsh_argc; i++) {
++		new_argv[i + 1] = (char *)bomsh_argv[i];
++	}
++	for (i=0; i<argc; i++) {
++		new_argv[bomsh_argc+1+i] = argv[i];
++	}
++	new_argv[new_argc] = NULL;
++
++	// must reinitialize getopt() by resetting optind to 0
++	optind = 0;
++	init(new_argc, new_argv);
++	free(new_argv);
++	if (trace_syscalls) free(trace_syscalls);
++}
++
+ static struct tcb *
+ pid2tcb(const int pid)
+ {
+@@ -3586,6 +4059,10 @@ dispatch_event(const struct tcb_wait_data *wd)
+ 		ATTRIBUTE_FALLTHROUGH;
+ 
+ 	case TE_SYSCALL_STOP:
++		if (bomsh_openat_mode) {
++			// Check if any file is closed and record its checksum if needed
++			bomsh_check_openat_fdclosed(current_tcp);
++		}
+ 		if (trace_syscall(current_tcp, &restart_sig) < 0) {
+ 			/*
+ 			 * ptrace() failed in trace_syscall().
+@@ -3664,6 +4141,9 @@ dispatch_event(const struct tcb_wait_data *wd)
+ 		break;
+ 
+ 	case TE_EXITED:
++		//tprintf("yongkui exited pid: %d status: %d\n", current_tcp->pid, status);
++		// Run the hook program to do analysis
++		bomsh_hook_program(current_tcp->pid, 0, "");
+ 		print_exited(current_tcp, current_tcp->pid, status);
+ 		droptcb(current_tcp);
+ 		return true;
+@@ -3696,6 +4176,13 @@ dispatch_event(const struct tcb_wait_data *wd)
+ 			}
+ 		}
+ 
++		// try detaching for some processes, like ./configure, etc.
++		if (bomsh_detach_on_pid == current_tcp->pid) {
++			bomsh_detach_on_pid = -2;
++			detach(current_tcp); /* do "-b execve" thingy */
++			return true;
++		}
++
+ 		if (detach_on_execve) {
+ 			if (current_tcp->flags & TCB_SKIP_DETACH_ON_FIRST_EXEC) {
+ 				current_tcp->flags &= ~TCB_SKIP_DETACH_ON_FIRST_EXEC;
+@@ -3862,7 +4349,8 @@ int
+ main(int argc, char *argv[])
+ {
+ 	setlocale(LC_ALL, "");
+-	init(argc, argv);
++	bomsh_init(argc, argv);
++	//init(argc, argv);
+ 
+ 	exit_code = !nprocs;
+ 
+diff --git a/src/syscall.c b/src/syscall.c
+index 92aaee092..1cce6269e 100644
+--- a/src/syscall.c
++++ b/src/syscall.c
+@@ -770,6 +770,19 @@ print_injected_note(struct tcb *tcp)
+ 		tprints(" (DELAYED)");
+ }
+ 
++extern int bomsh_openat_mode;
++extern int bomsh_openat_fd;
++extern int bomsh_openat_fd_pid;
++
++static void bomsh_record_openat_fd(struct tcb *tcp)
++{
++	// -2 value is set in open_decode to flag successful bomsh_openat_fd_path recording.
++	// also the pid must match, then we save the return value which is the opened file fd.
++	if (bomsh_openat_fd == -2 && tcp->pid == bomsh_openat_fd_pid) {
++		bomsh_openat_fd = tcp->u_rval;
++	}
++}
++
+ int
+ syscall_exiting_trace(struct tcb *tcp, struct timespec *ts, int res)
+ {
+@@ -947,6 +960,10 @@ syscall_exiting_trace(struct tcb *tcp, struct timespec *ts, int res)
+ 				    ((kernel_ulong_t) tcp->u_rval <= INT_MAX)) {
+ 					tprints("= ");
+ 					printfd(tcp, tcp->u_rval);
++					if (bomsh_openat_mode) {
++						// record the fd for later match with close syscall
++						bomsh_record_openat_fd(tcp);
++					}
+ 				} else {
+ 					tprintf("= %" PRI_kld, tcp->u_rval);
+ 				}

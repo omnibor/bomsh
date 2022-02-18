@@ -1,0 +1,29 @@
+# See here for image contents: https://github.com/microsoft/vscode-dev-containers/tree/v0.217.1/containers/cpp/.devcontainer/base.Dockerfile
+
+# [Choice] Debian / Ubuntu version (use Debian 11, Ubuntu 18.04/21.04 on local arm64/Apple Silicon): debian-11, debian-10, ubuntu-21.04, ubuntu-20.04, ubuntu-18.04
+ARG VARIANT="bullseye"
+FROM mcr.microsoft.com/vscode/devcontainers/cpp:0-${VARIANT}
+
+# [Optional] Uncomment this section to install additional packages.
+RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
+    && apt-get -y install --no-install-recommends bison autoconf automake autotools-dev
+
+RUN cd /home/vscode \
+    && git clone https://wwwin-github.cisco.com/Software-Transparency/bomsh \
+    && git clone https://github.com/bminor/bash.git \
+    && cd bash && patch -p1 < ../bomsh/patches/bombash.patch \
+    && ./configure && make && cp ./bash ../bomsh/bin/bombash
+
+RUN cd /home/vscode \
+    && git clone https://github.com/strace/strace.git \
+    && cd strace && patch -p1 < ../bomsh/patches/bomtrace.patch \
+    && ./bootstrap && ./configure --enable-mpers=check \
+    && make && cp src/strace ../bomsh/bin/bomtrace
+
+RUN cd /home/vscode \
+    && git clone https://github.com/strace/strace.git strace2 \
+    && cd strace2 && patch -p1 < ../bomsh/patches/bomtrace2.patch \
+    && ./bootstrap && ./configure --enable-mpers=check \
+    && make && cp src/strace ../bomsh/bin/bomtrace2
+
+RUN echo "Bomsh/Bomtrace build successfull!"

@@ -1,0 +1,22 @@
+# Format of each line: CVE-YEAR-num checksum1 checksum2
+
+# The range between checksum1 and checksum2 is vulnerable for this CVE.
+# checksum2 must be newer than checksum1 for the range to be meaningful.
+
+# The two checksums can only be blob type, and they must be the same git file. All the blob IDs between the two checksums (including them) are vulnerable.
+# The all-zero checksum can be used. If the all-zero checksum is checksum1, then it means the creation of this file.
+# If the all-zero checksum is checksum2, then it means there is no fix yet for this CVE (very unlikely).
+# A single CVE can have multiple lines to specify multiple ranges for different files as well as for the same file.
+# If multiple ranges are specified for the same file, then the final effective range for this file is the union of all ranges (which are allowed to overlap).
+
+# Only the full-length 40-characters checksum is accepted for now. A short checksum can be converted to full-length via "git rev-parse <your-short-checksum>" command.
+# In future, we can probably use git revision range instead of (checksum1 checksum2) in my opinion.
+# Lines starting with '#' character or empty lines are ignored.
+
+# This sample file is used for the "--range_of_vulnerable_cve" option of bomsh_create_cve.py script.
+
+# Below is an example for OpenSSL, with blob type checksums
+CVE-2014-3721 8d4939d601258a0e5d5e8f04632ad6c9f185064c 44d8a2591a56df4f030a2c6665f5a754152a5ab9
+CVE-2014-3721 82f1565a95d979bcf2204d1076ae80d677328209 898b9b97d1ba414580128408eab675061c7e8110
+CVE-2014-3722 0000000000000000000000000000000000000000 44d8a2591a56df4f030a2c6665f5a754152a5ab9
+CVE-2014-3723 e8bd3be8a4237e372c4d1c7a5ee8b043746a99b2 0000000000000000000000000000000000000000
