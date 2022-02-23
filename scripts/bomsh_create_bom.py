@@ -204,6 +204,25 @@ def find_all_regular_files(builddir):
 #### Start of gitbom routines ####
 ############################################################
 
+def save_gitbom_doc(gitbom_doc_file, destdir, checksum=''):
+    '''
+    Save the generated gitBOM doc file to destdir.
+    :param gitbom_doc_file: the generated gitBOM doc file to save
+    :param destdir: destination directory to store the created gitBOM doc file
+    :param checksum: the githash of gitbom_doc_file
+    '''
+    if checksum:
+        ahash = checksum
+    else:
+        ahash = get_git_file_hash(gitbom_doc_file)
+    subdir = os.path.join(destdir, ahash[:2])
+    object_file = os.path.join(subdir, ahash[2:])
+    if os.path.exists(object_file):
+        return
+    cmd = 'mkdir -p ' + subdir + ' && /usr/bin/cp ' + gitbom_doc_file + ' ' + object_file + ' || true'
+    os.system(cmd)
+
+
 def create_gitbom_doc_text(infiles, db):
     """
     Create the gitBOM doc text contents
@@ -235,13 +254,7 @@ def create_gitbom_doc(infile_hashes, db, destdir):
     output_file = os.path.join(g_tmpdir, "bomsh_temp_gitbom_file")
     write_text_file(output_file, lines)
     ahash = get_git_file_hash(output_file)
-    newfile = os.path.join(destdir, ahash)
-    if os.path.exists(newfile):
-        if infile_hashes:
-            verbose("Warning: gitBOM file " + newfile + " already exists for infiles " + str(infile_hashes), LEVEL_4)
-            verbose("Warning: gitBOM file " + newfile + " already exists, file contents: " + lines, LEVEL_3)
-    else:
-        shutil.move(output_file, newfile)
+    save_gitbom_doc(output_file, destdir, ahash)
     return ahash
 
 
@@ -314,14 +327,12 @@ def update_gitbom_dir(bomdir, infiles, checksum, outfile):
         verbose("Warning: outfile " + outfile + " is not ELF file, skipping embedding .bom section")
         return
     # Try to embed the .bom ELF section or archive entry
+    gitbom_doc = os.path.join(g_object_bomdir, gitbom_doc_hash[:2], gitbom_doc_hash[2:])
+    with_bom_file = os.path.join(g_with_bom_dir, checksum + "-with_bom-" + gitbom_doc_hash + "-" + os.path.basename(outfile))
     if is_archive_file(outfile):
-        gitbom_doc = os.path.join(g_object_bomdir, gitbom_doc_hash)
-        with_bom_file = os.path.join(g_with_bom_dir, checksum + "-with_bom-" + gitbom_doc_hash + "-" + os.path.basename(outfile))
         verbose("Create archive with_bom file: " + with_bom_file)
         embed_gitbom_hash_archive_entry(outfile, gitbom_doc, with_bom_file)
     else:
-        gitbom_doc = os.path.join(g_object_bomdir, gitbom_doc_hash)
-        with_bom_file = os.path.join(g_with_bom_dir, checksum + "-with_bom-" + gitbom_doc_hash + "-" + os.path.basename(outfile))
         verbose("Create ELF with_bom file: " + with_bom_file)
         embed_gitbom_hash_elf_section(outfile, gitbom_doc, with_bom_file)
 
