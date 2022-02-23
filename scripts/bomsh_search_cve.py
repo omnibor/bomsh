@@ -338,6 +338,25 @@ def get_node_id_from_checksum_line(checksum_line):
     return checksum_line.strip()
 
 
+def get_all_gitbom_doc_files(object_bomdir):
+    '''
+    Get all the gitBOM doc files stored in object_bomdir
+    :param object_bomdir: the gitBOM object directory to store all gitBOM docs
+    returns a list of gitBOM doc files and its associated githash
+    '''
+    entries = os.listdir(object_bomdir)
+    for entry in entries:
+        if not len(entry) == 2:
+            continue
+        adir = os.path.join(object_bomdir, entry)
+        if not os.path.isdir(adir):
+            continue
+        for afile in os.listdir(adir):
+            ahash = entry + afile
+            gitbom_doc_file = os.path.join(adir, afile)
+            yield gitbom_doc_file, ahash
+
+
 def create_gitbom_doc_treedb(object_bomdir, use_checksum_line=True):
     '''
     Create the gitBOM doc hash-tree DB from all the gitBOM docs in the bomdir.
@@ -348,18 +367,14 @@ def create_gitbom_doc_treedb(object_bomdir, use_checksum_line=True):
     treedb = {}
     if not os.path.isdir(object_bomdir):
         return treedb
-    entries = os.listdir(object_bomdir)
-    for entry in entries:
-        if len(entry) != 40:
-            continue
-        afile = os.path.join(object_bomdir, entry)
+    for afile, ahash in get_all_gitbom_doc_files(object_bomdir):
         if use_checksum_line:
             node = create_gitbom_node_of_checksum_line(afile)
         else:
             node = create_gitbom_node_of_bom_id(afile)
         # can only use bom_id as key, since the associated checksum is unknown
         # CVEs are usually associated with leaf nodes only, so this should still work
-        treedb[entry] = {"hash_tree": node}
+        treedb[ahash] = {"hash_tree": node}
     return treedb
 
 
@@ -370,11 +385,12 @@ def update_gitbom_doc_treedb_for_bomid(object_bomdir, checksum, bom_id, treedb):
     :param object_bomdir: the gitBOM object directory to store all gitBOM docs
     :param checksum: the git checksum of the file that is associated with bom_id
     :param bom_id: a single bom_id that is embedded in binary file
+    :param treedb: the dict to update with checksum as key
     returns a dict with checksum (blob_id) as key (even if bom_id exists for blob_id)
     '''
     if checksum in treedb:
         return treedb
-    afile = os.path.join(object_bomdir, bom_id)
+    afile = os.path.join(object_bomdir, bom_id[:2], bom_id[2:])
     if not os.path.exists(afile):
         return treedb
     node = create_gitbom_node_of_blob_id(afile)
@@ -411,7 +427,7 @@ def update_gitbom_doc_treedb_for_checksum_line(object_bomdir, checksum, bom_id, 
     '''
     if bom_id in treedb:
         return treedb
-    afile = os.path.join(object_bomdir, bom_id)
+    afile = os.path.join(object_bomdir, bom_id[:2], bom_id[2:])
     if not os.path.exists(afile):
         return treedb
     node = create_gitbom_node_of_checksum_line(afile)
