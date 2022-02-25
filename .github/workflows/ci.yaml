@@ -23,3 +23,16 @@ jobs:
         with:
           config_file: .ci/yamllint.yml
           strict: true
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v2
+      - name: docker build
+        run: docker run -v ${PWD}:/out $(cd .devcontainer && docker build -q .)
+      - name: Check
+        run: |
+          ls bombash
+          ls bomtrace
+          ls bomtrace2
