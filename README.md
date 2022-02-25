@@ -39,13 +39,13 @@ To compile Bomsh/Bomtrace from source, do the following steps:
     $ # if configure fails, try add --disable-mpers or --enable-mpers=check
     $ cp src/strace ../bomsh/bin/bomtrace2
 
-It is suggested to use devcontainer to compile Bomsh/Bomtrace from source.
-The .devcontainter/Dockerfile.bomsh file has been created for your convenience.
-For example, run the below command to automatically create the bombash/bomtrace/bomtrace2 binaries in a Debian container:
+To automatically create the bombash/bomtrace/bomtrace2 binaries run:
 
     $ git clone URL-of-this-git-repo bomsh
-    $ cd bomsh/.devcontainer
-    $ docker run -it --rm $(docker build -q -f Dockerfile.bomsh .) ls -tl /home/vscode/bomsh/bin
+    $ cd bomsh
+    $ docker run -it --rm -v ${PWD}:/out $(cd .devcontainer && docker build -q .)
+
+And you will find the bombash, bomtrace, and bomtrace2 files have been copied into '.' on your host.
 
 Generating gitBOM docs with Bomtrace2
 -------------------------------------
