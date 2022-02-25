@@ -1,2 +1,5 @@
 *.o
 src/hello
+bomsh
+bomtrace
+bomtrace2
