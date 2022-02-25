@@ -9,7 +9,7 @@ RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
     && apt-get -y install --no-install-recommends bison autoconf automake autotools-dev
 
 RUN cd /home/vscode \
-    && git clone https://wwwin-github.cisco.com/Software-Transparency/bomsh \
+    && git clone https://github.com/git-bom/bomsh \
     && git clone https://github.com/bminor/bash.git \
     && cd bash && patch -p1 < ../bomsh/patches/bombash.patch \
     && ./configure && make && cp ./bash ../bomsh/bin/bombash
