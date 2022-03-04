@@ -633,6 +633,25 @@ def read_depend_file(depend_file, pwd):
     return (outfile, depend_files)
 
 
+def replace_output_file_in_shell_command(gcc_cmd, outfile):
+    '''
+    Try to replace the -o output file for the gcc shell command.
+    :param gcc_cmd: the gcc compile command
+    :param outfile: the new output file
+    '''
+    if " -o " in gcc_cmd:
+        tokens = gcc_cmd.split()
+        oindex = tokens.index("-o")
+        output_file = tokens[oindex + 1]
+        if outfile:
+            tokens[oindex + 1] = outfile
+        else:
+            tokens[oindex + 1] = output_file + ".bomsh_hook.o"
+        return ' '.join(tokens)
+    else:
+        return gcc_cmd
+
+
 def escape_shell_command(gcc_cmd):
     '''
     Try to escape some characters for the shell command to run successfully.
@@ -660,12 +679,16 @@ def get_c_file_depend_files(gcc_cmd, pwd):
                     depend_file = os.path.join(pwd, depend_file)
                 return read_depend_file(depend_file, pwd)
         return depends
+    output_file = os.path.join(g_tmpdir, "bomsh_hook_cc_outfile.o")
+    gcc_cmd = replace_output_file_in_shell_command(gcc_cmd, output_file)
     depend_file = os.path.join(g_tmpdir, "bomsh_hook_target_dependency.d")
     cmd = "cd " + pwd + " ; " + escape_shell_command(gcc_cmd) + " -MD -MF " + depend_file + " || true"
     get_shell_cmd_output(cmd)
     if os.path.exists(depend_file):
         depends = read_depend_file(depend_file, pwd)
         os.remove(depend_file)
+    if os.path.exists(output_file):
+        os.remove(output_file)
     return depends
 
 
@@ -973,7 +996,7 @@ def embed_bom_after_cmd(prog, pwddir, argv_str, outfile):
     bomdir = os.path.join(g_tmpdir, "embed_bomdir")
     lseek_lines_file = os.path.join(g_tmpdir, "bomsh_hook_lseek_lines")
     # Invoke the bomsh_create_bom script to generate hash-tree and gitBOM docs
-    cmd = g_create_bom_script + ' -r ' + cmd_quote(g_raw_logfile) + ' --tmpdir ' + g_tmpdir + ' -b ' + bomdir + ' --lseek_lines_file ' + lseek_lines_file + ' || true'
+    cmd = g_create_bom_script + ' --embed_bom_section -r ' + cmd_quote(g_raw_logfile) + ' --tmpdir ' + g_tmpdir + ' -b ' + bomdir + ' --lseek_lines_file ' + lseek_lines_file + ' || true'
     #cmd = g_create_bom_script + ' --new_gitbom_doc_for_unary_transform -r ' + cmd_quote(g_raw_logfile) + ' --tmpdir ' + g_tmpdir + ' -b ' + bomdir + ' --lseek_lines_file ' + lseek_lines_file + ' || true'
     get_shell_cmd_output(cmd)
     # find the bom-embedded outfile in bomdir

@@ -740,4 +740,4 @@ References
 
 1. Towards a GitBOM Specification : https://hackmd.io/@aeva/draft-gitbom-spec
 
-2. [Bomsh/Bomtrace: Tools to Generate gitBOM Artifact Trees and Search CVE for Software Build](https://docs.google.com/presentation/d/13lnf1cHRqgj9qmDtDOeCE3eY13Brx-OQ)
+2. [Bomsh/Bomtrace: Tools to Generate gitBOM Artifact Trees and Search CVE for Software Build](https://docs.google.com/presentation/d/14HuQ2_4kJYkDNumd7w7WgXJTOup0tp-AkCY7jtBNHjg)
