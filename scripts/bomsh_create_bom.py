@@ -318,7 +318,7 @@ def update_gitbom_dir(bomdir, infiles, checksum, outfile):
         verbose("Created gitBOM file " + gitbom_doc_hash + " for outfile " + outfile)
     # record the checksum => gitbom_doc_hash/bom_id mapping
     g_bomdb[checksum] = gitbom_doc_hash
-    if args.not_embed_bom_section:
+    if not args.embed_bom_section:
         return
     if not os.path.isfile(outfile) or get_git_file_hash(outfile) != checksum:
         verbose("Warning: outfile with checksum " + checksum + " does not exist, skip embedding gitBOM for outfile " + outfile)
@@ -598,7 +598,7 @@ def unbundle_package(pkgfile, destdir=''):
         destdir = os.path.join(g_tmpdir, "bomsh-" + os.path.basename(pkgfile))
     if pkgfile[-4:] == ".rpm":
         cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; cd " + destdir + " ; rpm2cpio " + pkgfile + " | cpio -idm || true"
-    elif pkgfile[-4:] == ".deb":
+    elif pkgfile[-4:] == ".deb" or pkgfile[-5:] == ".udeb":
         cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; dpkg-deb -xv " + pkgfile + " " + destdir + " || true"
     else:
         print("Unsupported package format in " + pkgfile + " file, skipping it.")
@@ -660,7 +660,8 @@ def is_archive_file(afile):
     :param afile: String, name of file to be checked
     :returns True if the file is archive file. Otherwise, return False.
     """
-    return get_filetype(afile) == "current ar archive"
+    filetype = get_filetype(afile)
+    return filetype == "current ar archive" or filetype[:22] == "Debian binary package "
 
 
 def is_elf_file(afile):
@@ -713,9 +714,9 @@ def rtd_parse_options():
     parser.add_argument("--not_generate_gitbom_doc",
                     action = "store_true",
                     help = "do not generate gitBOM docs")
-    parser.add_argument("-m", "--not_embed_bom_section",
+    parser.add_argument("--embed_bom_section",
                     action = "store_true",
-                    help = "do not embed the .bom ELF section or archive entry")
+                    help = "embed the .bom ELF section or archive entry")
     parser.add_argument("-v", "--verbose",
                     action = "count",
                     default = 0,
@@ -752,7 +753,10 @@ def rtd_parse_options():
         g_bomdir = get_or_create_dir(g_bomdir)
         g_object_bomdir = get_or_create_dir(os.path.join(g_bomdir, "objects"))
         g_bomsh_bomdir = os.path.join(g_bomdir, "metadata", "bomsh")
-        g_with_bom_dir = get_or_create_dir(os.path.join(g_bomsh_bomdir, "with_bom_files"))
+        if args.embed_bom_section:
+            g_with_bom_dir = get_or_create_dir(os.path.join(g_bomsh_bomdir, "with_bom_files"))
+        else:
+            g_bomsh_bomdir = get_or_create_dir(g_bomsh_bomdir)
     if args.raw_logfile:
         g_raw_logfile = args.raw_logfile
     if args.logfile:
