@@ -12,6 +12,7 @@
 /usr/bin/gold
 /usr/bin/install
 /usr/bin/ranlib
+/usr/bin/dwz
 /usr/bin/rustc
 /usr/lib/rpm/debugedit
 /usr/lib/rpm/sepdebugcrcfix
@@ -25,6 +26,7 @@ arch/x86/boot/tools/build
 /usr/bin/strip
 /usr/bin/eu-strip
 /usr/bin/ranlib
+/usr/bin/dwz
 /usr/lib/rpm/debugedit
 /usr/lib/rpm/sepdebugcrcfix
 ./scripts/sortextable
