@@ -48,10 +48,12 @@ args = None
 BOM_HOOK_STR = "### BOM-HOOK ###"
 BOM_HOOK_END_STR = "### BOM-HOOK-END ###\n"
 
+g_tmpdir = "/tmp"
 g_trace_logfile = "/tmp/bomsh_hook_trace_logfile"
 g_logfile = "/tmp/bomsh_hook_logfile"
 g_jsonfile = "/tmp/bomsh_hook_jsonfile"
 g_bomdir = os.path.join(os.getcwd(), ".gitbom")
+g_object_bomdir = os.path.join(g_bomdir, "objects")
 g_bomsh_bomdir = os.path.join(g_bomdir, "metadata", "bomsh")
 g_with_bom_dir = os.path.join(g_bomsh_bomdir, "with-bom-files")
 g_cc_compilers = ["/usr/bin/gcc", "/usr/bin/clang", "/usr/bin/cc", "/usr/bin/g++"]
@@ -168,6 +170,25 @@ def get_or_create_dir(destdir):
 #### Start of gitbom routines ####
 ############################################################
 
+def save_gitbom_doc(gitbom_doc_file, destdir, checksum=''):
+    '''
+    Save the generated gitBOM doc file to destdir.
+    :param gitbom_doc_file: the generated gitBOM doc file to save
+    :param destdir: destination directory to store the created gitBOM doc file
+    :param checksum: the githash of gitbom_doc_file
+    '''
+    if checksum:
+        ahash = checksum
+    else:
+        ahash = get_git_file_hash(gitbom_doc_file)
+    subdir = os.path.join(destdir, ahash[:2])
+    object_file = os.path.join(subdir, ahash[2:])
+    if os.path.exists(object_file):
+        return
+    cmd = 'mkdir -p ' + subdir + ' && /usr/bin/cp ' + gitbom_doc_file + ' ' + object_file + ' || true'
+    os.system(cmd)
+
+
 def create_gitbom_doc_text(infile_hashes, db):
     """
     Create the gitBOM doc text contents
@@ -200,13 +221,7 @@ def create_gitbom_doc(infile_hashes, db, destdir):
     output_file = os.path.join(g_tmpdir, "bomsh_temp_gitbom_file")
     write_text_file(output_file, lines)
     ahash = get_git_file_hash(output_file)
-    newfile = os.path.join(destdir, ahash)
-    if os.path.exists(newfile):
-        if infile_hashes:
-            verbose("Warning: gitBOM file " + newfile + " already exists for infiles " + str(infile_hashes.keys()))
-            verbose("Warning: gitBOM file " + newfile + " already exists, file contents: " + lines, LEVEL_4)
-    else:
-        shutil.move(output_file, newfile)
+    save_gitbom_doc(output_file, destdir, ahash)
     return ahash
 
 
@@ -531,7 +546,7 @@ def update_hash_tree_db(hashes, outfile, argv_str):
                 afile_db["file_paths"] = [afile_db["file_path"], afile]
         if afile == outfile:  # hash tree update for outfile only
             input_files = get_input_files_from_subfiles(hashes.keys(), outfile)
-            hash_tree = [hashes[f] for f in input_files]
+            hash_tree = sorted([hashes[f] for f in input_files])
             if "hash_tree" in afile_db:
                 verbose("Warning: checksum " + ahash + " already has hash tree. new file path: " + afile)
                 set1 = set(afile_db["hash_tree"])
@@ -590,17 +605,15 @@ def update_gitbom_dir(bomdir, hashes, outfile, prog, pwd, argv_str):
     db[hashes[outfile]] = gitbom_doc_hash
     # Finally save the updated DB to the JSON file
     save_json_db(jsonfile, db)
-    if args.not_embed_bom_section:
+    if not args.embed_bom_section:
         return
     # Try to embed the .bom ELF section or archive entry
+    gitbom_doc = os.path.join(bomdir, gitbom_doc_hash[:2], gitbom_doc_hash[2:])
+    with_bom_file = os.path.join(g_with_bom_dir, hashes[outfile] + "-with_bom-" + gitbom_doc_hash + "-" + os.path.basename(outfile))
     if is_cc_compiler(prog) or is_cc_linker(prog):
-        gitbom_doc = os.path.join(bomdir, gitbom_doc_hash)
-        with_bom_file = os.path.join(g_with_bom_dir, hashes[outfile] + "-with_bom-" + os.path.basename(outfile))
         verbose("Create ELF with_bom file: " + with_bom_file)
         embed_gitbom_hash_elf_section(outfile, gitbom_doc, with_bom_file)
     elif prog == "/usr/bin/ar":
-        gitbom_doc = os.path.join(bomdir, gitbom_doc_hash)
-        with_bom_file = os.path.join(g_with_bom_dir, hashes[outfile] + "-with_bom-" + os.path.basename(outfile))
         verbose("Create archive with_bom file: " + with_bom_file)
         embed_gitbom_hash_archive_entry(outfile, gitbom_doc, with_bom_file, pwd, argv_str)
 
@@ -628,7 +641,7 @@ def update_hash_tree_and_gitbom(outfile, infiles, prog, argv_str, logfile, pwd):
         verbose("Warning: empty infiles or outfile " + outfile + " is not ELF file, skipping gitBOM doc update")
         return
     if args.bom_dir:
-        update_gitbom_dir(g_bomdir, hashes, outfile, prog, pwd, argv_str)
+        update_gitbom_dir(g_object_bomdir, hashes, outfile, prog, pwd, argv_str)
 
 
 ############################################################
@@ -800,7 +813,7 @@ def shell_command_update_same_file(prog, pwddir, argv_str, logfile, cmdname):
         verbose("Warning: outfile " + outfile + " is not ELF file, skipping gitBOM doc update")
         return
     if args.bom_dir:
-        update_gitbom_dir(g_bomdir, hashes, outfile, prog, pwddir, argv_str)
+        update_gitbom_dir(g_object_bomdir, hashes, outfile, prog, pwddir, argv_str)
 
 
 def process_objtool_command(prog, pwddir, argv_str):
@@ -1086,9 +1099,9 @@ def rtd_parse_options():
     parser.add_argument("-n", "--no_dependent_headers",
                     action = "store_true",
                     help = "not include C header files for hash tree dependency")
-    parser.add_argument("-m", "--not_embed_bom_section",
+    parser.add_argument("--embed_bom_section",
                     action = "store_true",
-                    help = "not embed the .bom ELF section or archive entry")
+                    help = "embed the .bom ELF section or archive entry")
     parser.add_argument("-v", "--verbose",
                     action = "count",
                     default = 0,
@@ -1105,6 +1118,7 @@ def rtd_parse_options():
         sys.exit()
 
     global g_bomdir
+    global g_object_bomdir
     global g_bomsh_bomdir
     global g_with_bom_dir
     global g_logfile
@@ -1119,8 +1133,12 @@ def rtd_parse_options():
     if args.bom_dir:
         g_bomdir = args.bom_dir
     g_bomdir = get_or_create_dir(g_bomdir)
+    g_object_bomdir = get_or_create_dir(os.path.join(g_bomdir, "objects"))
     g_bomsh_bomdir = os.path.join(g_bomdir, "metadata", "bomsh")
-    g_with_bom_dir = get_or_create_dir(os.path.join(g_bomsh_bomdir, "with_bom_files"))
+    if args.embed_bom_section:
+        g_with_bom_dir = get_or_create_dir(os.path.join(g_bomsh_bomdir, "with_bom_files"))
+    else:
+        g_bomsh_bomdir = get_or_create_dir(g_bomsh_bomdir)
     if args.logfile:
         g_logfile = args.logfile
     if args.jsonfile:

@@ -546,22 +546,24 @@ def create_hash_tree_for_checksum(checksum, ancestors, checksum_db, checksum_lin
         node_id = get_node_id_from_checksum_line(ahash)
         # recursion
         ret[ahash] = create_hash_tree_for_checksum(node_id, ancestors, checksum_db, ahash)
+    # update metadata for this non-leaf node, based on blob_id
+    blob_id, bom_id = get_blob_bom_id_from_checksum_line(checksum_line)
     for which_list in ("CVElist", "FixedCVElist"):
-        cvelist = get_metadata_for_checksum_from_db(g_cvedb, checksum, which_list)
+        cvelist = get_metadata_for_checksum_from_db(g_cvedb, blob_id, which_list)
         if cvelist:
             ret[which_list] = cvelist
     for key in ("file_path", "file_paths", "build_cmd"):  # try to save more metadata in the result
         if key in entry:
             ret[key] = entry[key]
     if ("CVElist" in ret or "FixedCVElist" in ret) and "file_path" not in ret:
-        file_path = get_metadata_for_checksum_from_db(g_cvedb, checksum, "file_path")
+        file_path = get_metadata_for_checksum_from_db(g_cvedb, blob_id, "file_path")
         if file_path:
             ret["file_path"] = file_path
     if g_metadata_db:
         for which_list in ("file_path", "build_cmd"):
             if which_list in ret:
                 continue
-            metadata = get_metadata_for_checksum_from_db(g_metadata_db, checksum, which_list)
+            metadata = get_metadata_for_checksum_from_db(g_metadata_db, blob_id, which_list)
             if metadata:
                 ret[which_list] = metadata
     # checksum_line contains both blob_id and bom_id, more accurate/representative than blob_id/bom_id alone

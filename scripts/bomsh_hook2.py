@@ -307,14 +307,15 @@ Leyd8dwY/ay67G1S8EmRKLeyd8dwY -goversion go1.13.8 -D _/home/gohello -importcfg /
     return infiles
 
 
-def get_all_subfiles_in_gcc_cmdline(gccline, pwd, prog):
+def get_all_subfiles_in_gcc_cmdline(gccline, pwd, prog, check_empty_outfile=True):
     """
     Returns the input/output files of the gcc shell command line.
     :param gccline: the gcc command line
     :param pwd: the present working directory for this gcc command
     :param prog: the program binary
+    :param check_empty_outfile: if this flag is True and no output file in command line, then return ('', [])
     """
-    if " -o " not in gccline and " -c " not in gccline:
+    if check_empty_outfile and " -o " not in gccline and " -c " not in gccline:
         verbose("Warning: no output file for gcc line: " + gccline)
         return ('', [])
     tokens = gccline.split()
@@ -747,7 +748,7 @@ def process_ld_command(prog, pwddir, argv_str):
     '''
     ld_logfile = os.path.join(g_tmpdir, "bomsh_hook_gcc_logfile")
     verbose("\npwd: " + pwddir + " Found one ld command: " + argv_str, LEVEL_0, ld_logfile)
-    # ld command can be handled the same way as gcc command, for ouptfile,infiles
+    # ld command can be handled the same way as gcc command, for outfile,infiles
     (outfile, infiles) = get_all_subfiles_in_gcc_cmdline(argv_str, pwddir, prog)
     if not infiles:  # if infiles is empty, no need to record info for this ld cmd
         return ''
@@ -780,11 +781,30 @@ def process_golang_command(prog, pwddir, argv_str):
     '''
     golang_logfile = os.path.join(g_tmpdir, "bomsh_hook_gcc_logfile")
     verbose("\npwd: " + pwddir + " Found one golang compile/link command: " + argv_str, LEVEL_0, golang_logfile)
-    # golang link command can be handled the same way as golang compile command, for ouptfile,infiles
+    # golang link command can be handled the same way as golang compile command, for outfile,infiles
     (outfile, infiles) = get_all_subfiles_in_golang_cmdline(argv_str, pwddir, prog)
-    if not infiles:  # if infiles is empty, no need to record info for this rustc cmd
+    if not infiles:  # if infiles is empty, no need to record info for this golang cmd
         return ''
     record_raw_info(outfile, infiles, pwddir, argv_str)
+    return outfile
+
+
+def process_dwz_command(prog, pwddir, argv_str, pid):
+    '''
+    Process the dwz command.
+    dwz -mdebian/libssl1.1/usr/lib/debug/.dwz/x86_64-linux-gnu/libssl1.1.debug -- debian/libcrypto1.1-udeb/usr/lib/libcrypto.so.1.1 debian/libssl1.1/usr/lib/x86_64-linux-gnu/libssl.so.1.1
+    :param prog: the program binary
+    :param pwddir: the present working directory for the command
+    :param argv_str: the full command with all its command line options/parameters
+    :param pid: PID of the shell command, this is a str, not integer
+    '''
+    # dwz command can be handled the same way as gcc compile command, for outfile,infiles
+    (outfile, infiles) = get_all_subfiles_in_gcc_cmdline(argv_str, pwddir, prog, False)
+    verbose("dwz outfile: " + outfile + " infiles: " + str(infiles), LEVEL_3)
+    if not infiles:  # if infiles is empty, no need to record info for this dwz cmd
+        return ''
+    for infile in infiles:
+        record_raw_info(infile, [], pwddir, argv_str, pid)
     return outfile
 
 
@@ -1062,6 +1082,8 @@ def process_shell_command(prog, pwddir, argv_str, pid_str):
         outfile = process_install_command(prog, pwddir, argv_str)
     elif prog == "/usr/bin/rustc":
         outfile = process_rustc_command(prog, pwddir, argv_str)
+    elif prog == "/usr/bin/dwz":
+        outfile = process_dwz_command(prog, pwddir, argv_str, pid)
     elif prog == "bomsh_openat_file":
         outfile = process_samefile_converter_command(prog, pwddir, argv_str, pid)
     elif prog == "/usr/bin/javac":
@@ -1179,12 +1201,12 @@ def main():
 
     if args.pre_exec:
         # Fewer number of programs to watch in pre_exec mode
-        progs_to_watch = g_samefile_converters + ["/usr/bin/objcopy", "bomsh_openat_file"]
+        progs_to_watch = g_samefile_converters + ["/usr/bin/objcopy", "/usr/bin/dwz", "bomsh_openat_file"]
         if args.watched_pre_exec_programs:
             progs_to_watch.extend(args.watched_pre_exec_programs.split(","))
     else:
         progs_to_watch = g_cc_compilers + g_cc_linkers + g_samefile_converters + ["/usr/bin/ar", "/usr/bin/objcopy", "arch/x86/boot/tools/build",
-                     "/usr/bin/rustc", "bomsh_openat_file", "/usr/bin/javac", "/usr/bin/jar"]
+                     "/usr/bin/rustc", "/usr/bin/dwz", "bomsh_openat_file", "/usr/bin/javac", "/usr/bin/jar"]
         if args.watched_programs:
             progs_to_watch.extend(args.watched_programs.split(","))
     if prog in progs_to_watch:
