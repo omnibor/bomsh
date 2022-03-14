@@ -633,6 +633,8 @@ def process_package_files(pkgfiles):
     Process a list of package files.
     '''
     for pkgfile in pkgfiles:
+        if pkgfile[0] != "/":
+            pkgfile = os.path.abspath(pkgfile)
         process_package_file(pkgfile)
 
 ############################################################

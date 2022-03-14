@@ -744,6 +744,9 @@ The created bomsh_gitbom_doc_mapping file can be signed for trust and distribute
 This makes gitBOM immediately ready for use by people for >90% of official Debian Linux packages, not only for newly built Linux packages.
 This holds true for other build-reproducible software like RPM packages, etc.
 
+For reproducible build, the -n option must be specified when running bomsh_hook2.py script, in order to not embed any .bom section into the generated binary files.
+This requires the use of "-c bomtrace.conf" option when running bomtrace2.
+
 Using bomsh, we have successfully reproduced the build for some officially released versions of Debian packages: hostname, linux (Linux-kernel), openssl, sysstat, etc.
 We also created a repo to store these gitBOM docs.
 Please check the [gitbom-repo](https://github.com/yonhan3/gitbom-repo) for some examples.

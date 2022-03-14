@@ -1,8 +1,8 @@
 diff --git a/src/execve.c b/src/execve.c
-index a9224543b..fe95b3270 100644
+index a9224543b..817c94a66 100644
 --- a/src/execve.c
 +++ b/src/execve.c
-@@ -14,6 +14,351 @@
+@@ -14,6 +14,425 @@
  
  #include "defs.h"
  
@@ -193,17 +193,32 @@ index a9224543b..fe95b3270 100644
 +	return strdup(path);
 +}
 +
++char * bomsh_get_rootdir(struct tcb *tcp);
++
++// get root directory for a traced process.
++char * bomsh_get_rootdir(struct tcb *tcp)
++{
++	char cwd_file[32] = "";
++	static char rootdir[PATH_MAX] = "";
++	sprintf(cwd_file, "/proc/%d/root", tcp->pid);
++	int bytes = readlink(cwd_file, rootdir, PATH_MAX);
++	if (bytes == -1) {
++		return NULL;
++	}
++	rootdir[bytes] = 0;
++	return strdup(rootdir);
++}
++
 +char * bomsh_get_pwd(struct tcb *tcp);
 +
 +// get current working directory for a traced process.
 +char * bomsh_get_pwd(struct tcb *tcp)
 +{
-+	static char pwddir[PATH_MAX] = "";
 +	char cwd_file[32] = "";
++	static char pwddir[PATH_MAX] = "";
 +	sprintf(cwd_file, "/proc/%d/cwd", tcp->pid);
 +	int bytes = readlink(cwd_file, pwddir, PATH_MAX);
 +	if (bytes == -1) {
-+		tprintf("Bomtrace failed to readlink cwd\n");
 +		return NULL;
 +	}
 +	pwddir[bytes] = 0;
@@ -228,6 +243,7 @@ index a9224543b..fe95b3270 100644
 +        char *shell_cmd_file;
 +        char *logfile;
 +        char *syscalls;
++        int skip_checking_prog_access;
 +} g_bomsh_config;
 +
 +extern int bomsh_detach_on_pid;
@@ -236,76 +252,134 @@ index a9224543b..fe95b3270 100644
 +extern int bomsh_is_detach_on_pid_program(char *prog);
 +extern void bomsh_hook_program(int pid, int pre_exec_mode, const char *suffix);
 +
++int bomsh_check_file_permission(char *path, char *pwd, char *root, int amode);
++
++// Check the access permission of a file
++// return 1 for success, and 0 for failure
++int bomsh_check_file_permission(char *path, char *pwd, char *root, int amode)
++{
++	// Convert to absolute path if necessary, taking into account pwd and root
++	char *abs_path = path;
++	int strlen_root = strlen(root);
++	if (path[0] != '/') {
++		if ((strlen_root == 1 && root[0] == '/') || strncmp(pwd, root, strlen_root) == 0) {
++			// root dir is "/", or pwd already starts with root dir
++			abs_path = malloc(strlen(pwd) + strlen(path) + 2);
++			if (!abs_path) {
++				return 0;
++			}
++			abs_path[0] = 0;
++		} else {  // root dir is not "/", and pwd does not start with root dir
++			abs_path = malloc(strlen_root + strlen(pwd) + strlen(path) + 2);
++			if (!abs_path) {
++				return 0;
++			}
++			strcpy(abs_path, root);
++		}
++		strcat(abs_path, pwd);
++		strcat(abs_path, "/");
++		strcat(abs_path, path);
++	} else {
++		if (strncmp(path, root, strlen_root) != 0) {
++			// path does not start with root dir
++			abs_path = malloc(strlen_root + strlen(path) + 2);
++			if (!abs_path) {
++				return 0;
++			}
++			strcpy(abs_path, root);
++			strcat(abs_path, path);
++		}
++	}
++	// strace's pwd may be different from command's pwd, so must use absolute path to check file existence
++	if( access( abs_path, amode ) != 0 ) {
++		// file cannot read or execute
++		if (abs_path && abs_path != path) { free(abs_path); }
++		return 0;
++	}
++	if (abs_path && abs_path != path) { free(abs_path); }
++	return 1;
++}
++
 +// record the command data for the command to execute next: write it to bomsh_cmd_file for later use by bomsh_run_hook.
 +// returns 1 when record the command successfully and need to run pre-exec hookup
 +// returns 2 when record the command successfully and no need to run pre-exec hookup
 +// otherwise, recording fails, returns 0
 +static int bomsh_record_command(struct tcb *tcp, const unsigned int index)
 +{
-+	char *abs_path = NULL;
++	char *rootdir = bomsh_get_rootdir(tcp);
++	if (!rootdir) {
++		return 0;
++	}
 +	char *pwd = bomsh_get_pwd(tcp);
 +	if (!pwd) {
++                free(rootdir);
 +		return 0;
 +	}
 +	char *path = copy_path(tcp, tcp->u_arg[index + 0]);
 +        if (!path) {
++                free(rootdir);
 +                free(pwd);
 +                return 0;
 +        }
 +	if (bomsh_is_detach_on_pid_program(path)) {
 +		// no need to record this command or follow its child processes
 +		bomsh_detach_on_pid = tcp->pid;
++                free(rootdir);
 +		free(pwd);
 +		free(path);
 +		return 0;
 +	}
 +	if( !bomsh_is_watched_program(path) ) {
-+		// file cannot read or execute, or not watched
++		// file is not watched
++                free(rootdir);
 +		free(pwd);
 +		free(path);
 +		return 0;
 +	}
-+	// Convert to absolute path if necessary
-+	abs_path = path;
-+	if (path[0] != '/') {
-+		abs_path = malloc(strlen(pwd) + strlen(path) + 2);
-+		if (!abs_path) {
++	if (!g_bomsh_config.skip_checking_prog_access && !bomsh_check_file_permission(path, pwd, rootdir, R_OK|X_OK)) {
++		// file cannot read or execute
++                free(rootdir);
++		free(pwd);
++		free(path);
++		return 0;
++	}
++	//tprintf("yongkui pid: %d pwd: %s root: %s path: %s argv: %s\n", tcp->pid, pwd, rootdir, path, argv_str);
++        int len1 = strlen(pwd);
++        int len2 = strlen(rootdir);
++	char *pwd_line = pwd;
++	if ( !(len2 == 1 && rootdir[0] == '/') ) {  // rootdir is not the default "/"
++		pwd_line = malloc(len1 + len2 + 2);
++		if (!pwd_line) {
++			free(rootdir);
 +			free(pwd);
 +			free(path);
 +			return 0;
 +		}
-+		strcpy(abs_path, pwd);
-+		strcat(abs_path, "/");
-+		strcat(abs_path, path);
-+	}
-+	// strace's pwd may be different from command's pwd, so must use absolute path to check file existence
-+	if( access( abs_path, R_OK|X_OK ) != 0 ) {
-+		// file cannot read or execute, or not watched
++		strcpy(pwd_line, pwd);
++		pwd_line[len1] = ' ';  // use space character as separator between pwd and rootdir
++		strcpy(pwd_line + len1 + 1, rootdir);
 +		free(pwd);
-+		free(path);
-+		if (abs_path && abs_path != path) { free(abs_path); }
-+		return 0;
 +	}
-+	if (abs_path && abs_path != path) { free(abs_path); }
++	free(rootdir);
 +	char *argv_str = copy_argv_array(tcp, tcp->u_arg[index + 1]);
 +        if (!argv_str) {
-+		free(pwd);
++		free(pwd_line);
 +		free(path);
 +                return 0;
 +        }
-+	//tprintf("pid: %d pwd: %s path: %s argv: %s\n", tcp->pid, pwd, path, argv_str);
-+        int len1 = strlen(pwd);
-+        int len2 = strlen(path);
++        len1 = strlen(pwd_line);
++        len2 = strlen(path);
 +        int len = len1 + len2 + strlen(argv_str) + 3;
 +        char * cmd_data = malloc(len + 1);  // allocate the memory
 +        if (!cmd_data) {
++                free(rootdir);
 +                free(pwd);
 +                free(path);
 +                free(argv_str);
 +                return 0;
 +        }
-+        // now concatenate the 3 strings.
-+        strcpy(cmd_data, pwd);
++        // now concatenate the 3 strings: pwd_line (pwd + rootdir), prog_path, argv_str
++        strcpy(cmd_data, pwd_line);
 +        cmd_data[len1] = '\n';  // use newline character as separator
 +        strcpy(cmd_data + len1 + 1, path);
 +        cmd_data[len1 + 1 + len2] = '\n';  // use newline character as separator
@@ -324,7 +398,7 @@ index a9224543b..fe95b3270 100644
 +		if (g_bomsh_config.logfile) {
 +			bomsh_write_file(g_bomsh_config.logfile, "\nError: bomsh cmd file name too long\n", "a");
 +		}
-+                free(pwd);
++                free(pwd_line);
 +                free(path);
 +                free(argv_str);
 +		return 0;
@@ -346,7 +420,7 @@ index a9224543b..fe95b3270 100644
 +        // need to free the malloc'ed memory
 +	free(argv_str);
 +	free(path);
-+	free(pwd);
++	free(pwd_line);
 +	free(cmd_data);
 +	return rc;
 +}
@@ -354,7 +428,7 @@ index a9224543b..fe95b3270 100644
  static void
  printargv(struct tcb *const tcp, kernel_ulong_t addr)
  {
-@@ -96,6 +441,12 @@ printargc(struct tcb *const tcp, kernel_ulong_t addr)
+@@ -96,6 +515,12 @@ printargc(struct tcb *const tcp, kernel_ulong_t addr)
  static void
  decode_execve(struct tcb *tcp, const unsigned int index)
  {
@@ -368,10 +442,10 @@ index a9224543b..fe95b3270 100644
  	printpath(tcp, tcp->u_arg[index + 0]);
  	tprint_arg_next();
 diff --git a/src/open.c b/src/open.c
-index d7654d7e8..5cfe94977 100644
+index d7654d7e8..4e7255121 100644
 --- a/src/open.c
 +++ b/src/open.c
-@@ -110,9 +110,135 @@ tprint_open_modes(unsigned int flags)
+@@ -110,9 +110,147 @@ tprint_open_modes(unsigned int flags)
  	tprint_open_modes64(flags);
  }
  
@@ -381,6 +455,7 @@ index d7654d7e8..5cfe94977 100644
 +        char *shell_cmd_file;
 +        char *logfile;
 +        char *syscalls;
++        int skip_checking_prog_access;
 +} g_bomsh_config;
 +
 +extern int bomsh_openat_mode;
@@ -388,58 +463,69 @@ index d7654d7e8..5cfe94977 100644
 +extern int bomsh_openat_fd_pid;
 +extern char *copy_path(struct tcb *const tcp, const kernel_ulong_t addr);
 +extern char * bomsh_get_pwd(struct tcb *tcp);
++extern char * bomsh_get_rootdir(struct tcb *tcp);
 +extern void bomsh_write_file(const char *filepath, const char *data, const char *mode);
++extern int bomsh_check_file_permission(char *path, char *pwd, char *root, int amode);
 +
 +// record the openat_file command data for the openat syscall next: write it to bomsh_cmd_file for later use by bomsh_run_hook.
 +// returns 1 when record the command successfully, and always run pre-exec hookup if successful
 +// otherwise, recording failes, returns 0
 +static int bomsh_record_openat_file_command(struct tcb *tcp, const unsigned int index)
 +{
-+	char *abs_path = NULL;
++	char *rootdir = bomsh_get_rootdir(tcp);
++	if (!rootdir) {
++		return 0;
++	}
 +	char *pwd = bomsh_get_pwd(tcp);
 +	if (!pwd) {
++		free(rootdir);
 +		return 0;
 +	}
 +	// this is the file to open
 +	char *path = copy_path(tcp, tcp->u_arg[index + 0]);
 +        if (!path) {
++		free(rootdir);
 +                free(pwd);
 +                return 0;
 +        }
-+	// Convert to absolute path if necessary
-+	abs_path = path;
-+	if (path[0] != '/') {
-+		abs_path = malloc(strlen(pwd) + strlen(path) + 2);
-+		if (!abs_path) {
++	// strace's pwd may be different from command's pwd, so must use absolute path to check file existence
++	if( !bomsh_check_file_permission(path, pwd, rootdir, R_OK) ) {
++		// file cannot read
++		free(rootdir);
++		free(pwd);
++		free(path);
++		return 0;
++	}
++        int len1 = strlen(pwd);
++        int len2 = strlen(rootdir);
++	char *pwd_line = pwd;
++	if ( !(len2 == 1 && rootdir[0] == '/') ) {  // rootdir is not the default "/"
++		pwd_line = malloc(len1 + len2 + 2);
++		if (!pwd_line) {
++			free(rootdir);
 +			free(pwd);
 +			free(path);
 +			return 0;
 +		}
-+		strcpy(abs_path, pwd);
-+		strcat(abs_path, "/");
-+		strcat(abs_path, path);
-+	}
-+	// strace's pwd may be different from command's pwd, so must use absolute path to check file existence
-+	if( access( abs_path, R_OK ) != 0 ) {
-+		// file cannot read
++		strcpy(pwd_line, pwd);
++		pwd_line[len1] = ' ';
++		strcpy(pwd_line + len1 + 1, rootdir);
++		pwd_line[len1 + len2 + 1] = 0;
 +		free(pwd);
-+		free(path);
-+		if (abs_path && abs_path != path) { free(abs_path); }
-+		return 0;
 +	}
-+	if (abs_path && abs_path != path) { free(abs_path); }
++	free(rootdir);
 +	const char *prog = "bomsh_openat_file";
-+        int len1 = strlen(pwd);
-+        int len2 = strlen(prog);
++        len1 = strlen(pwd_line);
++        len2 = strlen(prog);
 +        int len = len1 + 2*len2 + strlen(path) + 4;
 +        char * cmd_data = malloc(len + 1);  // allocate the memory
 +        if (!cmd_data) {
-+                free(pwd);
++                free(pwd_line);
 +                free(path);
 +                return 0;
 +        }
-+        // now concatenate the 4 strings.
-+        strcpy(cmd_data, pwd);
++        // now concatenate the 4 strings: pwd_line, prog, prog + file_path
++        strcpy(cmd_data, pwd_line);
 +        cmd_data[len1] = '\n';  // use newline character as separator
 +        strcpy(cmd_data + len1 + 1, prog);
 +        cmd_data[len1 + 1 + len2] = '\n';  // use newline character as separator
@@ -459,7 +545,7 @@ index d7654d7e8..5cfe94977 100644
 +		if (g_bomsh_config.logfile) {
 +			bomsh_write_file(g_bomsh_config.logfile, "\nError: bomsh cmd file name too long\n", "a");
 +		}
-+                free(pwd);
++                free(pwd_line);
 +                free(path);
 +		return 0;
 +	}
@@ -477,7 +563,7 @@ index d7654d7e8..5cfe94977 100644
 +	bomsh_openat_fd_pid = tcp->pid;
 +        // need to free the malloc'ed memory
 +	free(path);
-+	free(pwd);
++	free(pwd_line);
 +	free(cmd_data);
 +        return 1;
 +}
@@ -508,10 +594,10 @@ index d7654d7e8..5cfe94977 100644
  	printpath(tcp, tcp->u_arg[offset]);
  	tprint_arg_next();
 diff --git a/src/strace.c b/src/strace.c
-index 6e4f8221f..e5ef69982 100644
+index 6e4f8221f..4c8a4db7f 100644
 --- a/src/strace.c
 +++ b/src/strace.c
-@@ -2848,6 +2848,479 @@ init(int argc, char *argv[])
+@@ -2848,6 +2848,492 @@ init(int argc, char *argv[])
  		((followfork && !output_separately) || nprocs > 1);
  }
  
@@ -553,34 +639,26 @@ index 6e4f8221f..e5ef69982 100644
 +int bomsh_is_watched_program(char *prog);
 +int bomsh_is_detach_on_pid_program(char *prog);
 +
-+// write some data to a file
-+static void bomsh_write_file(const char *filepath, const char *data, const char *mode)
-+{
-+        FILE *fp = fopen(filepath, mode);
-+        if (fp != NULL) {
-+                fputs(data, fp);
-+                fclose(fp);
-+        }
-+}
++extern void bomsh_write_file(const char *filepath, const char *data, const char *mode);
 +
-+#if 0
-+static const char *bomsh_tracefile = "/tmp/bomsh_tracefile";
-+static void bomsh_print_programs(char **progs, int num_progs)
++//#define BOMSH_PRINT_CONFIGS
++#ifdef BOMSH_PRINT_CONFIGS
++static void bomsh_print_programs(char **progs, int num_progs, const char *which_progs)
 +{
 +	if (!progs) {
 +		return;
 +	}
-+	fprintf(stderr, "\n start printing programs:\n");
-+	//bomsh_write_file(bomsh_tracefile, "\n start printing programs:\n", "a");
++	fprintf(stderr, "\n start printing %s programs:\n", which_progs);
 +	for (int i=0; i<num_progs; i++) {
 +		if (!progs[i]) {
 +			break;
 +		}
 +		fprintf(stderr, "%s\n", progs[i]);
-+		//bomsh_write_file(bomsh_tracefile, progs[i], "a");
 +	}
 +}
++#endif
 +
++#if 0
 +// find the index of array element that equals path.
 +// return -1 if the element cannot be found
 +static int binary_search_program(char *array[], char *path, int low, int high) {
@@ -715,9 +793,11 @@ index 6e4f8221f..e5ef69982 100644
 +		free(bomsh_watched_programs_str);
 +		return NULL;
 +	}
-+	//bomsh_print_programs(watched_progs, bomsh_num_watched_programs);
-+	//bomsh_print_programs(bomsh_pre_exec_programs, bomsh_num_pre_exec_programs);
-+	//bomsh_print_programs(bomsh_detach_on_pid_programs, bomsh_num_detach_on_pid_programs);
++#ifdef BOMSH_PRINT_CONFIGS
++	bomsh_print_programs(watched_progs, bomsh_num_watched_programs, "watched_progs");
++	bomsh_print_programs(bomsh_pre_exec_programs, bomsh_num_pre_exec_programs, "pre_exec_progs");
++	bomsh_print_programs(bomsh_detach_on_pid_programs, bomsh_num_detach_on_pid_programs, "detach_on_pid");
++#endif
 +	return watched_progs;
 +}
 +
@@ -727,6 +807,7 @@ index 6e4f8221f..e5ef69982 100644
 +	char *shell_cmd_file;
 +	char *logfile;
 +	char *syscalls;
++	int skip_checking_prog_access;
 +};
 +struct bomsh_configs g_bomsh_config;
 +
@@ -814,7 +895,7 @@ index 6e4f8221f..e5ef69982 100644
 +	}
 +}
 +
-+#if 0
++#ifdef BOMSH_PRINT_CONFIGS
 +static void
 +bomsh_print_configs(void)
 +{
@@ -823,6 +904,7 @@ index 6e4f8221f..e5ef69982 100644
 +	fprintf(stderr, "shell_cmd_file: %s\n", g_bomsh_config.shell_cmd_file);
 +	fprintf(stderr, "logfile: %s\n", g_bomsh_config.logfile);
 +	fprintf(stderr, "syscalls: %s\n", g_bomsh_config.syscalls);
++	fprintf(stderr, "skip_checking_prog_access: %d\n", g_bomsh_config.skip_checking_prog_access);
 +}
 +#endif
 +
@@ -830,13 +912,16 @@ index 6e4f8221f..e5ef69982 100644
 +static void
 +bomsh_read_value_for_keys(char *line_start, char *value_equal, char *value_newline)
 +{
-+	static const char *bomsh_config_keys[] = {"hook_script_file", "hook_script_cmdopt", "shell_cmd_file", "logfile", "syscalls"};
-+	static char ** bomsh_config_fields[] = {
++	char *skip_checking_prog_access_str = NULL;
++	static const char *bomsh_config_keys[] = {"hook_script_file", "hook_script_cmdopt", "shell_cmd_file",
++						"logfile", "syscalls", "skip_checking_prog_access"};
++	char ** bomsh_config_fields[] = {
 +		&g_bomsh_config.hook_script_file,
 +		&g_bomsh_config.hook_script_cmdopt,
 +		&g_bomsh_config.shell_cmd_file,
 +		&g_bomsh_config.logfile,
-+		&g_bomsh_config.syscalls
++		&g_bomsh_config.syscalls,
++		&skip_checking_prog_access_str
 +	};
 +	int num_keys = sizeof(bomsh_config_keys)/sizeof(char *);
 +        const char *key; unsigned long len;
@@ -854,9 +939,21 @@ index 6e4f8221f..e5ef69982 100644
 +			}
 +			strncpy(buf, value_equal + 1, len - 1);
 +			buf[len - 1] = 0;
++			if (*(bomsh_config_fields[i])) {
++				free(*(bomsh_config_fields[i]));
++			}
 +			*(bomsh_config_fields[i]) = buf;
 +			//fprintf(stderr, "Read key: %s value: %s\n", key, buf);
++			break;
 +		}
++	}
++	if (skip_checking_prog_access_str) {
++		if (strcmp(skip_checking_prog_access_str, "1") == 0) {
++			g_bomsh_config.skip_checking_prog_access = 1;
++		} else {
++			g_bomsh_config.skip_checking_prog_access = 0;
++		}
++		free(skip_checking_prog_access_str);
 +	}
 +}
 +
@@ -927,7 +1024,9 @@ index 6e4f8221f..e5ef69982 100644
 +		case 'c':
 +			// read the configuration items from the file
 +			bomsh_read_configs(optarg);
-+			//bomsh_print_configs();
++#ifdef BOMSH_PRINT_CONFIGS
++			bomsh_print_configs();
++#endif
 +			break;
 +		case 'w':
 +			// read the list of programs from the file
@@ -991,7 +1090,7 @@ index 6e4f8221f..e5ef69982 100644
  static struct tcb *
  pid2tcb(const int pid)
  {
-@@ -3586,6 +4059,10 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3586,6 +4072,10 @@ dispatch_event(const struct tcb_wait_data *wd)
  		ATTRIBUTE_FALLTHROUGH;
  
  	case TE_SYSCALL_STOP:
@@ -1002,7 +1101,7 @@ index 6e4f8221f..e5ef69982 100644
  		if (trace_syscall(current_tcp, &restart_sig) < 0) {
  			/*
  			 * ptrace() failed in trace_syscall().
-@@ -3664,6 +4141,9 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3664,6 +4154,9 @@ dispatch_event(const struct tcb_wait_data *wd)
  		break;
  
  	case TE_EXITED:
@@ -1012,7 +1111,7 @@ index 6e4f8221f..e5ef69982 100644
  		print_exited(current_tcp, current_tcp->pid, status);
  		droptcb(current_tcp);
  		return true;
-@@ -3696,6 +4176,13 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3696,6 +4189,13 @@ dispatch_event(const struct tcb_wait_data *wd)
  			}
  		}
  
@@ -1026,7 +1125,7 @@ index 6e4f8221f..e5ef69982 100644
  		if (detach_on_execve) {
  			if (current_tcp->flags & TCB_SKIP_DETACH_ON_FIRST_EXEC) {
  				current_tcp->flags &= ~TCB_SKIP_DETACH_ON_FIRST_EXEC;
-@@ -3862,7 +4349,8 @@ int
+@@ -3862,7 +4362,8 @@ int
  main(int argc, char *argv[])
  {
  	setlocale(LC_ALL, "");
