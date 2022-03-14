@@ -26,6 +26,7 @@ import argparse
 import sys
 import os
 import subprocess
+import json
 
 # for special filename handling with shell
 try:
@@ -49,14 +50,17 @@ g_create_bom_script = "/tmp/bomsh_create_bom.py"
 g_raw_logfile = "/tmp/bomsh_hook_raw_logfile"
 g_trace_logfile = "/tmp/bomsh_hook_trace_logfile"
 g_logfile = "/tmp/bomsh_hook_logfile"
-g_cc_compilers = ["/usr/bin/gcc", "/usr/bin/clang", "/usr/bin/cc", "/usr/bin/g++"]
+g_cc_compilers = ["/usr/bin/gcc", "/usr/bin/clang", "/usr/bin/cc", "/usr/bin/g++", "/usr/bin/gcc-10"]
 g_cc_linkers = ["/usr/bin/ld", "/usr/bin/ld.bfd", "/usr/bin/gold"]
+g_strip_progs = ["/usr/bin/strip", "/usr/bin/eu-strip"]
 # list of binary converting programs of the same file
-g_samefile_converters = ["/usr/bin/strip", "/usr/bin/ranlib", "/usr/bin/eu-strip", "./tools/objtool/objtool", "/usr/lib/rpm/debugedit", "/usr/lib/rpm/sepdebugcrcfix", "./scripts/sortextable"]
+g_samefile_converters = ["/usr/bin/ranlib", "./tools/objtool/objtool", "/usr/lib/rpm/debugedit", "/usr/lib/rpm/sepdebugcrcfix",
+                         "./scripts/sortextable", "./scripts/sorttable", "./tools/bpf/resolve_btfids/resolve_btfids"]
 g_embed_bom_after_commands = g_cc_compilers + g_cc_linkers + ["/usr/bin/eu-strip",]
 g_last_embed_outfile_checksum = ''
 # a flag to skip bom-id-embedding for a shell command
 g_not_embed_bom_flag = False
+g_shell_cmd_rootdir = "/"
 
 #
 # Helper routines
@@ -143,6 +147,141 @@ def find_specific_file(builddir, filename):
     return files
 
 
+def get_filetype(afile):
+    """
+    Returns the output of the shell command "file afile".
+
+    :param afile: the file to check its file type
+    """
+    cmd = "file " + cmd_quote(afile) + " || true"
+    #print (cmd)
+    output = subprocess.check_output(cmd, shell=True, universal_newlines=True)
+    res = output.strip().split(": ")
+    if len(res) > 1:
+        return ": ".join(res[1:])
+    return "empty"
+
+
+def is_archive_file(afile):
+    """
+    Check if a file is an archive file.
+
+    :param afile: String, name of file to be checked
+    :returns True if the file is archive file. Otherwise, return False.
+    """
+    return get_filetype(afile) == "current ar archive"
+
+
+def is_jar_file(afile):
+    """
+    Check if a file is a Java archive file.
+
+    :param afile: String, name of file to be checked
+    :returns True if the file is JAR file. Otherwise, return False.
+    """
+    return " archive data" in get_filetype(afile)
+
+
+def get_embedded_bom_id_of_archive(afile):
+    '''
+    Get the embedded 20bytes githash of the associated gitBOM doc for an archive file.
+    :param afile: the file to extract the 20-bytes embedded .bom archive entry.
+    '''
+    abspath = os.path.abspath(afile)
+    cmd = 'cd ' + g_tmpdir + ' ; rm -rf .bom ; ar x ' + cmd_quote(abspath) + ' .bom 2>/dev/null || true'
+    #print(cmd)
+    output = get_shell_cmd_output(cmd)
+    bomfile = os.path.join(g_tmpdir, ".bom")
+    if os.path.exists(bomfile):
+        return get_shell_cmd_output('xxd -p ' + bomfile + ' || true').strip()
+    return ''
+
+
+def get_embedded_bom_id_of_jar_file(afile):
+    '''
+    Get the embedded 20bytes githash of the associated gitBOM doc for a .jar file.
+    :param afile: the file to extract the 20-bytes embedded .bom archive entry.
+    '''
+    abspath = os.path.abspath(afile)
+    cmd = 'cd ' + g_tmpdir + ' ; rm -rf .bom ; jar xf ' + cmd_quote(abspath) + ' .bom 2>/dev/null || true'
+    #print(cmd)
+    output = get_shell_cmd_output(cmd)
+    bomfile = os.path.join(g_tmpdir, ".bom")
+    if os.path.exists(bomfile):
+        return get_shell_cmd_output('xxd -p ' + bomfile + ' || true').strip()
+    return ''
+
+
+def get_embedded_bom_id_of_elf_file(afile):
+    '''
+    Get the embedded 20bytes githash of the associated gitBOM doc for an ELF file.
+    :param afile: the file to extract the 20-bytes embedded .bom ELF section.
+    '''
+    abspath = os.path.abspath(afile)
+    cmd = 'readelf -x .bom ' + cmd_quote(afile) + ' 2>/dev/null || true'
+    output = get_shell_cmd_output(cmd)
+    if not output:
+        return ''
+    lines = output.splitlines()
+    if len(lines) < 3:
+        return ''
+    result = []
+    for line in lines:
+        tokens = line.strip().split()
+        if len(tokens) > 5 and tokens[0] == "0x00000000":
+            result.extend( (tokens[1], tokens[2], tokens[3], tokens[4]) )
+        elif len(tokens) > 2 and tokens[0] == "0x00000010":
+            result.append(tokens[1])
+            break
+    return ''.join(result)
+
+
+def get_embedded_bom_id(afile):
+    '''
+    Get the embedded 20bytes githash of the associated gitBOM doc for a binary file.
+    :param afile: the file to extract the 20-bytes embedded .bom section.
+    returns a string of 40 characters
+    '''
+    if is_archive_file(afile):
+        return get_embedded_bom_id_of_archive(afile)
+    elif is_jar_file(afile):
+        return get_embedded_bom_id_of_jar_file(afile)
+    else:
+        return get_embedded_bom_id_of_elf_file(afile)
+
+
+def load_json_db(db_file):
+    """ Load the the data from a JSON file
+
+    :param db_file: the JSON database file
+    :returns a dictionary that contains the data
+    """
+    db = dict()
+    with open(db_file, 'r') as f:
+        db = json.load(f)
+    return db
+
+
+def save_json_db(db_file, db, indentation=4):
+    """ Save the dictionary data to a JSON file
+
+    :param db_file: the JSON database file
+    :param db: the python dict struct
+    :returns None
+    """
+    if not db:
+        return
+    verbose("save_json_db: db_size: " + str(len(db)) + " db_file is " + db_file, LEVEL_3)
+    try:
+        f = open(db_file, 'w')
+    except IOError as e:
+        verbose("I/O error({0}): {1}".format(e.errno, e.strerror))
+        verbose("Error in save_json_db, skipping it.")
+    else:
+        with f:
+            json.dump(db, f, indent=indentation, sort_keys=True)
+
+
 ############################################################
 #### Start of shell command read/parse routines ####
 ############################################################
@@ -150,7 +289,7 @@ def find_specific_file(builddir, filename):
 '''
 Format of /tmp/bomsh_cmd file, which records shell command info:
 pid: 75627 ppid: 75591 pgid: 73910
-/home/OpenOSC/src
+/home/OpenOSC/src /tmp/chroot
 /usr/bin/gcc
 gcc -DHAVE_CONFIG_H -I. -I.. -Wsign-compare -U_FORTIFY_SOURCE -fno-stack-protector -g -O2 -MT libopenosc_la-openosc_fortify_map.lo -MD -MP -MF .deps/libopenosc_la-openosc_fortify_map.Tpo -c openosc_fortify_map.c -fPIC -DPIC -o .libs/libopenosc_la-openosc_fortify_map.o
 '''
@@ -166,6 +305,7 @@ def read_shell_command(shell_cmd_file):
     lines = contents.splitlines()
     pid = ''
     pwd = ''
+    rootdir = '/'
     prog = ''
     # omitting the pid line should still work
     if lines and contents[:5] == "pid: ":
@@ -218,6 +358,20 @@ def get_input_files_from_subfiles(subfiles, outfile):
     return [f for f in subfiles if f != outfile]
 
 
+def get_real_path(afile, pwd):
+    """
+    Get the real file path, taking into account pwd and rootdir.
+    :param afile: the file path, either relative path or absolute path
+    :param pwd: current working directory of the shell command
+    """
+    if afile[0] != '/':
+        afile = os.path.join(pwd, afile)
+    afile = os.path.normpath(afile)
+    if not afile.startswith(g_shell_cmd_rootdir):
+        afile = g_shell_cmd_rootdir + afile
+    return afile
+
+
 '''
 root@c1931bdfd4e8:/home/linux-kernel-gitdir# more arch/x86/boot/compressed/piggy.S
 .section ".rodata..compressed","a",@progbits
@@ -240,12 +394,13 @@ def handle_linux_kernel_piggy_object(outfile, infiles, pwd):
     :param infiles: the list of input files
     :param pwd: the present working directory for this gcc command
     """
+    #verbose("handle_linux_kernel_piggy_object pwd: " + pwd + " outfile: " + outfile + " infiles: " + str(infiles))
     if not infiles or outfile[-7:] != "piggy.o":
         return infiles
     piggy_S_file = ''
     for afile in infiles:
         if afile[-7:] == "piggy.S":
-            piggy_S_file = os.path.abspath(os.path.join(pwd, afile))
+            piggy_S_file = afile
             break
     if not piggy_S_file or not os.path.isfile(piggy_S_file):
         return infiles
@@ -253,8 +408,11 @@ def handle_linux_kernel_piggy_object(outfile, infiles, pwd):
     vmlinux_bin = ''
     for line in lines:
         if line[:9] == '.incbin "':
-            vmlinux_bin = line[9: len(line)-4]  # directly get vmlinux.bin instead of vmlinux.bin.gz
-            vmlinux_bin = os.path.abspath(os.path.join(pwd, vmlinux_bin))
+            vmlinux_bin = line[9: len(line)-1]  # this is vmlinux.bin.gz or vmlinux.bin.xz or vmlinux.bin.lz4 or piggy_data
+            tokens = vmlinux_bin.split(".")
+            if len(tokens) > 1:
+                vmlinux_bin = ".".join(tokens[:-1])
+            vmlinux_bin = get_real_path(vmlinux_bin, pwd)
             break
     if vmlinux_bin and os.path.isfile(vmlinux_bin):
         return infiles + [vmlinux_bin,]  # add vmlinux.bin file to the list of input files
@@ -291,9 +449,7 @@ Leyd8dwY/ay67G1S8EmRKLeyd8dwY -goversion go1.13.8 -D _/home/gohello -importcfg /
         # only add it for link, not for compile, otherwise, the search_cve result is too redundant
         if afile[-14:] == "importcfg.link":
         #if afile[-9:] == "importcfg" or afile[-14:] == "importcfg.link":
-            if afile[0] != '/':
-                afile = os.path.join(pwd, afile)
-            importcfg_file = os.path.abspath(afile)
+            importcfg_file = afile
             break
     if not importcfg_file or not os.path.isfile(importcfg_file):
         return infiles
@@ -303,19 +459,67 @@ Leyd8dwY/ay67G1S8EmRKLeyd8dwY -goversion go1.13.8 -D _/home/gohello -importcfg /
         if line[:12] == 'packagefile ':
             tokens = line.split("=")
             packages.append(tokens[1])
-    infiles.extend(packages)  # add packages to the list of infiles
+    infiles.extend(get_real_path(packages, pwd))  # add packages to the list of infiles
     return infiles
 
 
-def get_all_subfiles_in_gcc_cmdline(gccline, pwd, prog, check_empty_outfile=True):
+# a list of skip tokens for some shell commands
+g_cmd_skip_token_list = {
+    "/usr/bin/strip": ("-F", "--target", "-I", "--input-target", "-O", "--output-target",
+                       "-K", "--keep-symbol", "-N", "--strip-symbol", "-R", "--remove-section",
+                       "--keep-section", "--remove-relocations"),
+    "/usr/bin/eu-strip": ("-F", "-f", "-R", "--remove-section"),
+    "/usr/bin/dwz": ("-m", "--multifile", "-M", "--multifile-name", "-l", "--low-mem-die-limit", "-L", "--max-die-limit"),
+}
+
+def get_all_subfiles_in_shell_cmdline(cmdline, pwd, prog):
+    """
+    Returns the input/output files of a generic shell command line.
+    :param cmdline: the shell command line
+    :param pwd: the present working directory for this shell command
+    :param prog: the program binary
+    """
+    output_file = ''
+    tokens = cmdline.split()
+    outfile_token = False
+    subfiles = []
+    skip_token = False
+    skip_token_list = []
+    if prog in g_cmd_skip_token_list:
+        skip_token_list = g_cmd_skip_token_list[prog]
+    for token in tokens[1:]:
+        if token in skip_token_list:
+            # the next token must be skipped
+            skip_token = True
+            continue
+        if skip_token:
+            skip_token = False  # turn off this flag after skipping this token
+            continue
+        if token == '-o' or token == '--output':
+            outfile_token = True
+            continue
+        if outfile_token:
+            outfile_token = False
+            output_file = get_real_path(token, pwd)
+            continue
+        if token[0] == '-':
+            continue
+        subfile = get_real_path(token, pwd)
+        if os.path.isfile(subfile):
+            subfiles.append(subfile)
+        else:
+            verbose("Warning: this subfile is not file: " + subfile)
+    return (output_file, subfiles)
+
+
+def get_all_subfiles_in_gcc_cmdline(gccline, pwd, prog):
     """
     Returns the input/output files of the gcc shell command line.
     :param gccline: the gcc command line
     :param pwd: the present working directory for this gcc command
     :param prog: the program binary
-    :param check_empty_outfile: if this flag is True and no output file in command line, then return ('', [])
     """
-    if check_empty_outfile and " -o " not in gccline and " -c " not in gccline:
+    if " -o " not in gccline and " -c " not in gccline:
         verbose("Warning: no output file for gcc line: " + gccline)
         return ('', [])
     tokens = gccline.split()
@@ -327,15 +531,18 @@ def get_all_subfiles_in_gcc_cmdline(gccline, pwd, prog, check_empty_outfile=True
         tokens2 = compile_file.split(".")
         tokens2[-1] = "o"
         output_file = ".".join(tokens2)
-    if output_file[0] != '/':
-        output_file = os.path.join(pwd, output_file)
-    output_file = os.path.abspath(output_file)
-    skip_token_list = ("-MT", "-MF", "-x", "-I", "-B", "-L", "-isystem", "-iquote", "-idirafter", "-iprefix", "-isysroot", "-iwithprefix", "-iwithprefixbefore", "-imultilib", "-include")
+    if output_file == "/dev/null":
+        return ('', [])
+    output_file = get_real_path(output_file, pwd)
+    skip_token_list = set(("-MT", "-MF", "-x", "-I", "-B", "-L", "-isystem", "-iquote", "-idirafter", "-iprefix", "-isysroot", "-iwithprefix", "-iwithprefixbefore", "-imultilib", "-include"))
+    linker_skip_tokens = set(("-m", "-z", "-a", "-A", "-b", "-c", "-e", "-f", "-F", "-G", "-u", "-y", "-Y", "-soname", "--wrap",
+                          "--architecture", "--format", "--mri-script", "--entry", "--auxiliary", "--filter", "--gpsize", "--oformat",
+                          "--defsym", "--split-by-reloc", "-rpath", "-rpath-link", "--dynamic-linker", "-dynamic-linker"))
     subfiles = []
     skip_token = False  # flag for skipping one single token
     for token in tokens[1:]:
         # C linker ld has a few more options that come with next token
-        if token in skip_token_list or (is_cc_linker(prog) and token in ("-m", "-z", "-y", "-Y", "-soname")):
+        if token in skip_token_list or (is_cc_linker(prog) and token in linker_skip_tokens):
             # the next token must be skipped
             skip_token = True
             continue
@@ -344,15 +551,12 @@ def get_all_subfiles_in_gcc_cmdline(gccline, pwd, prog, check_empty_outfile=True
         if skip_token:
             skip_token = False  # turn off this flag after skipping this token
             continue
-        subfile = token
-        if token[0] != '/':
-            subfile = os.path.join(pwd, subfile)
+        subfile = get_real_path(token, pwd)
         if os.path.isfile(subfile):
             subfiles.append(subfile)
         else:
             verbose("Warning: this subfile is not file: " + subfile)
     # subfiles contain both input files and the output file
-    subfiles = [os.path.abspath(afile) for afile in subfiles]
     infiles = [afile for afile in subfiles if afile != output_file]
     infiles = handle_linux_kernel_piggy_object(output_file, infiles, pwd)
     return (output_file, infiles)
@@ -374,10 +578,7 @@ def get_all_subfiles_in_rustc_cmdline(gccline, pwd, prog):
     tokens = gccline.split()
     if " -o " in gccline:
         oindex = tokens.index("-o")
-        output_file = tokens[oindex + 1]
-        if output_file[0] != '/':
-            output_file = os.path.join(pwd, output_file)
-        output_file = os.path.abspath(output_file)
+        output_file = get_real_path(tokens[oindex + 1], pwd)
     skip_token_list = ("-C", "-F", "-L", "-W", "-A", "-D", "--out-dir", "--target", "--explain", "--crate-type", "--crate-name", "--edition", "--emit", "--print", "--extern", "--cfg")
     subfiles = []
     skip_token = False  # flag for skipping one single token
@@ -406,22 +607,18 @@ def get_all_subfiles_in_rustc_cmdline(gccline, pwd, prog):
             continue
         if token[0] == '-':
             continue
-        subfile = token
-        if token[0] != '/':
-            subfile = os.path.join(pwd, subfile)
+        subfile = get_real_path(token, pwd)
         if os.path.isfile(subfile):
             subfiles.append(subfile)
         else:
             verbose("Warning: this subfile is not file: " + subfile)
     # subfiles contain both input files and the output file
-    subfiles = [os.path.abspath(afile) for afile in subfiles]
     if crate_name:
         if not output_dir:
             output_dir = pwd
-        if output_dir[0] != '/':
-            output_dir = os.path.abspath(os.path.join(pwd, output_dir))
+        output_dir = get_real_path(output_dir, pwd)
         output_file = os.path.join(output_dir, crate_prefix + crate_name + extra_filename + crate_suffix)
-    elif len(subfiles) == 1:
+    elif len(subfiles) == 1 and not output_file:
         output_file = subfiles[0].rstrip(".rs")
     infiles = [afile for afile in subfiles if afile != output_file]
     #verbose("rustc subfiles: " + str(subfiles) + " outfile: " + output_file)
@@ -440,10 +637,7 @@ def get_all_subfiles_in_golang_cmdline(gccline, pwd, prog):
         return ('', [])
     tokens = gccline.split()
     oindex = tokens.index("-o")
-    output_file = tokens[oindex + 1]
-    if output_file[0] != '/':
-        output_file = os.path.join(pwd, output_file)
-    output_file = os.path.abspath(output_file)
+    output_file = get_real_path(tokens[oindex + 1], pwd)
     skip_token_list = ("-D", "-goversion", "-p", "-buildid", "-trimpath")
     subfiles = []
     skip_token = False  # flag for skipping one single token
@@ -467,15 +661,12 @@ def get_all_subfiles_in_golang_cmdline(gccline, pwd, prog):
             continue
         if token[0] == '-':
             continue
-        subfile = token
-        if token[0] != '/':
-            subfile = os.path.join(pwd, subfile)
+        subfile = get_real_path(token, pwd)
         if os.path.isfile(subfile):
             subfiles.append(subfile)
         else:
             verbose("Warning: this subfile is not file: " + subfile)
     # subfiles contain both input files and the output file
-    subfiles = [os.path.abspath(afile) for afile in subfiles]
     infiles = [afile for afile in subfiles if afile != output_file]
     infiles = handle_golang_importcfg(output_file, infiles, pwd)
     return (output_file, infiles)
@@ -490,43 +681,12 @@ def get_all_subfiles_in_ar_cmdline(arline, pwd):
     tokens = arline.split()
     if len(tokens) < 3:
         return ('', [])
-    output_file = tokens[2]
-    if output_file[0] != '/':
-        output_file = os.path.join(pwd, output_file)
-    output_file = os.path.abspath(output_file)
+    output_file = get_real_path(tokens[2], pwd)
     subfiles = []
     for token in tokens[3:]:
-        subfile = token
-        if token[0] != '/':
-            subfile = os.path.join(pwd, subfile)
-        subfiles.append(subfile)
-    # subfiles contain only input files
-    subfiles = [os.path.abspath(afile) for afile in subfiles]
-    return (output_file, subfiles)
-
-
-def get_all_subfiles_in_jar_cmdline(jarline, pwd):
-    """
-    Returns the input/output files of the jar shell command line.
-    :param jarline: the jar command line
-    :param pwd: the present working directory for this ar command
-    """
-    tokens = jarline.split()
-    if len(tokens) < 3:
-        return ('', [])
-    output_file = tokens[2]
-    if output_file[0] != '/':
-        output_file = os.path.join(pwd, output_file)
-    output_file = os.path.abspath(output_file)
-    subfiles = []
-    for token in tokens[3:]:
-        subfile = token
-        if token[0] != '/':
-            subfile = os.path.join(pwd, subfile)
-        if os.path.exists(subfile):
+        subfile = get_real_path(token, pwd)
+        if os.path.isfile(subfile):
             subfiles.append(subfile)
-    # subfiles contain only input files
-    subfiles = [os.path.abspath(afile) for afile in subfiles]
     return (output_file, subfiles)
 
 
@@ -548,15 +708,37 @@ def get_git_file_hash(afile):
     return ''
 
 
-def get_git_files_hash(afiles):
+def get_noroot_path(afile):
     '''
-    Get the git hash of a list of files.
-    :param afiles: the files to calculate the git hash or digest.
+    Get the path without rootdir prefix.
+    :param afile: the file path to simplify
     '''
-    hashes = {}
-    for afile in afiles:
-        hashes[afile] = get_git_file_hash(afile)
-    return hashes
+    if g_shell_cmd_rootdir != "/" and afile.startswith(g_shell_cmd_rootdir):
+        return afile[len(g_shell_cmd_rootdir):]
+    return afile
+
+
+# save githash of header files in a cache file for performance
+g_githash_cache_file = os.path.join(g_tmpdir, "bomsh_hook_githash_file")
+g_githash_cache = {}
+g_githash_cache_initial_size = 0
+# the below ld linker implicit object files are also cached
+g_githash_link_objects_list = ("crtbeginS.o", "crtendS.o", "liblto_plugin.so", "Scrt1.o", "crti.o", "crtn.o")
+
+def get_git_file_hash_with_cache(afile):
+    '''
+    Check the githash cache before calling "git hash-object".
+    Also update the githash cache after calling "git hash-object".
+    :param afile: the file to get git-hash
+    '''
+    if g_githash_cache and afile in g_githash_cache:
+        return g_githash_cache[afile]
+    ahash = get_git_file_hash(afile)
+    if not args.no_githash_cache_file and afile[-2:] == ".h" or os.path.basename(afile) in g_githash_link_objects_list:
+        # only cache header files or the ld linker implicit object files
+        verbose("Saving header githash cache, hash: " + ahash + " afile: " + afile, LEVEL_3)
+        g_githash_cache[afile] = ahash
+    return ahash
 
 
 def record_raw_info(outfile, infiles, pwd, argv_str, pid='', outfile_checksum='', ignore_this_record=False):
@@ -574,12 +756,30 @@ def record_raw_info(outfile, infiles, pwd, argv_str, pid='', outfile_checksum=''
     # infiles can be empty, but outfile must not be empty
     if not outfile:
         return
-    if outfile_checksum:
-        lines = ["\noutfile: " + outfile_checksum + " path: " + outfile,]
+    if not args.no_githash_cache_file:
+        global g_githash_cache
+        global g_githash_cache_initial_size
+        if len(infiles) > 1 and not g_githash_cache and os.path.exists(g_githash_cache_file):
+            g_githash_cache = load_json_db(g_githash_cache_file)
+            g_githash_cache_initial_size = len(g_githash_cache)
+            verbose("load_json_db githash cache db, initial_size: " + str(g_githash_cache_initial_size), LEVEL_3)
+    if not outfile_checksum:
+        outfile_checksum = get_git_file_hash(outfile)
+    bomid = ''
+    if args.record_raw_bomid:
+        bomid = get_embedded_bom_id(outfile)
+    if bomid:
+        lines = ["\noutfile: " + outfile_checksum + " path: " + get_noroot_path(outfile) + " bomid: " + bomid,]
     else:
-        lines = ["\noutfile: " + get_git_file_hash(outfile) + " path: " + outfile,]
+        lines = ["\noutfile: " + outfile_checksum + " path: " + get_noroot_path(outfile),]
     for infile in infiles:
-        lines.append("infile: " + get_git_file_hash(infile) + " path: " + infile)
+        bomid = ''
+        if args.record_raw_bomid:
+            bomid = get_embedded_bom_id(infile)
+        if bomid:
+            lines.append("infile: " + get_git_file_hash_with_cache(infile) + " path: " + get_noroot_path(infile) + " bomid: " + bomid)
+        else:
+            lines.append("infile: " + get_git_file_hash_with_cache(infile) + " path: " + get_noroot_path(infile))
     #lines.append("working_dir: " + pwd)
     if pid:
         if args.pre_exec:
@@ -622,15 +822,11 @@ def read_depend_file(depend_file, pwd):
     contents = read_text_file(depend_file)
     all_parts = contents.split("\n\n")  # get the first part only, due to -MP option.
     all_files = all_parts[0].split(": ")
-    outfile = all_files[0].strip()
-    if outfile[0] != '/':
-        outfile = os.path.join(pwd, outfile)
-    outfile = os.path.abspath(outfile)
+    outfile = get_real_path(all_files[0].strip(), pwd)
     afiles = all_files[1].strip()
     afiles = ' '.join(afiles.split("\\\n"))  # each continuation line by "\\\n"
     afiles = afiles.split()
-    depend_files = [afile if afile[0] == '/' else os.path.join(pwd, afile) for afile in afiles]
-    depend_files = [os.path.abspath(afile) for afile in depend_files]
+    depend_files = [get_real_path(afile, pwd) for afile in afiles]
     return (outfile, depend_files)
 
 
@@ -675,21 +871,37 @@ def get_c_file_depend_files(gcc_cmd, pwd):
         tokens = gcc_cmd.split()
         for i in range(len(tokens)):
             if tokens[i] == "-MF":
-                depend_file = tokens[i+1]
-                if depend_file[0] != '/':
-                    depend_file = os.path.join(pwd, depend_file)
+                depend_file = get_real_path(tokens[i+1], pwd)
+                return read_depend_file(depend_file, pwd)
+        return depends
+    if " -Wp,-MD," in gcc_cmd or " -Wp,-MMD," in gcc_cmd:
+        tokens = gcc_cmd.split()
+        for token in tokens:
+            if token.startswith("-Wp,-MD,") or token.startswith("-Wp,-MMD,"):
+                tokens2 = token.split(",")
+                depend_file = get_real_path(tokens2[-1], pwd)
+                #verbose("Wp,MMD token: " + token + " depend_file: " + depend_file)
                 return read_depend_file(depend_file, pwd)
         return depends
     output_file = os.path.join(g_tmpdir, "bomsh_hook_cc_outfile.o")
     gcc_cmd = replace_output_file_in_shell_command(gcc_cmd, output_file)
     depend_file = os.path.join(g_tmpdir, "bomsh_hook_target_dependency.d")
-    cmd = "cd " + pwd + " ; " + escape_shell_command(gcc_cmd) + " -MD -MF " + depend_file + " || true"
+    if g_shell_cmd_rootdir != "/":
+        chroot_pwd = pwd
+        if pwd.startswith(g_shell_cmd_rootdir):
+            chroot_pwd = pwd[len(g_shell_cmd_rootdir):]
+        cmd = 'chroot ' + g_shell_cmd_rootdir + ' sh -c "cd ' + chroot_pwd + " ; " + escape_shell_command(gcc_cmd) + " -MD -MF " + depend_file + '" || true'
+    else:
+        cmd = "cd " + pwd + " ; " + escape_shell_command(gcc_cmd) + " -MD -MF " + depend_file + " || true"
+    #verbose("get_c_depend cmd: " + cmd)
     get_shell_cmd_output(cmd)
-    if os.path.exists(depend_file):
-        depends = read_depend_file(depend_file, pwd)
-        os.remove(depend_file)
-    if os.path.exists(output_file):
-        os.remove(output_file)
+    real_depend_file = get_real_path(depend_file, pwd)
+    if os.path.exists(real_depend_file):
+        depends = read_depend_file(real_depend_file, pwd)
+        os.remove(real_depend_file)
+    real_output_file = get_real_path(output_file, pwd)
+    if os.path.exists(real_output_file):
+        os.remove(real_output_file)
     return depends
 
 
@@ -713,8 +925,8 @@ def process_gcc_command(prog, pwddir, argv_str):
     :param pwddir: the present working directory for the command
     :param argv_str: the full command with all its command line options/parameters
     '''
-    gcc_logfile = os.path.join(g_tmpdir, "bomsh_hook_gcc_logfile")
-    verbose("\npwd: " + pwddir + " Found one gcc command: " + argv_str, LEVEL_0, gcc_logfile)
+    #gcc_logfile = os.path.join(g_tmpdir, "bomsh_hook_gcc_logfile")
+    #verbose("\npwd: " + pwddir + " Found one gcc command: " + argv_str, LEVEL_0, gcc_logfile)
     (outfile, infiles) = get_all_subfiles_in_gcc_cmdline(argv_str, pwddir, prog)
     verbose("get_all_subfiles_in_gcc_cmdline, outfile: " + outfile + " infiles: " + str(infiles), LEVEL_4)
     infiles2 = []
@@ -746,8 +958,8 @@ def process_ld_command(prog, pwddir, argv_str):
     :param pwddir: the present working directory for the command
     :param argv_str: the full command with all its command line options/parameters
     '''
-    ld_logfile = os.path.join(g_tmpdir, "bomsh_hook_gcc_logfile")
-    verbose("\npwd: " + pwddir + " Found one ld command: " + argv_str, LEVEL_0, ld_logfile)
+    #ld_logfile = os.path.join(g_tmpdir, "bomsh_hook_gcc_logfile")
+    #verbose("\npwd: " + pwddir + " Found one ld command: " + argv_str, LEVEL_0, ld_logfile)
     # ld command can be handled the same way as gcc command, for outfile,infiles
     (outfile, infiles) = get_all_subfiles_in_gcc_cmdline(argv_str, pwddir, prog)
     if not infiles:  # if infiles is empty, no need to record info for this ld cmd
@@ -763,8 +975,8 @@ def process_rustc_command(prog, pwddir, argv_str):
     :param pwddir: the present working directory for the command
     :param argv_str: the full command with all its command line options/parameters
     '''
-    rustc_logfile = os.path.join(g_tmpdir, "bomsh_hook_gcc_logfile")
-    verbose("\npwd: " + pwddir + " Found one rustc command: " + argv_str, LEVEL_0, rustc_logfile)
+    #rustc_logfile = os.path.join(g_tmpdir, "bomsh_hook_gcc_logfile")
+    #verbose("\npwd: " + pwddir + " Found one rustc command: " + argv_str, LEVEL_0, rustc_logfile)
     (outfile, infiles) = get_all_subfiles_in_rustc_cmdline(argv_str, pwddir, prog)
     if not infiles:  # if infiles is empty, no need to record info for this rustc cmd
         return ''
@@ -779,8 +991,8 @@ def process_golang_command(prog, pwddir, argv_str):
     :param pwddir: the present working directory for the command
     :param argv_str: the full command with all its command line options/parameters
     '''
-    golang_logfile = os.path.join(g_tmpdir, "bomsh_hook_gcc_logfile")
-    verbose("\npwd: " + pwddir + " Found one golang compile/link command: " + argv_str, LEVEL_0, golang_logfile)
+    #golang_logfile = os.path.join(g_tmpdir, "bomsh_hook_gcc_logfile")
+    #verbose("\npwd: " + pwddir + " Found one golang compile/link command: " + argv_str, LEVEL_0, golang_logfile)
     # golang link command can be handled the same way as golang compile command, for outfile,infiles
     (outfile, infiles) = get_all_subfiles_in_golang_cmdline(argv_str, pwddir, prog)
     if not infiles:  # if infiles is empty, no need to record info for this golang cmd
@@ -789,20 +1001,28 @@ def process_golang_command(prog, pwddir, argv_str):
     return outfile
 
 
-def process_dwz_command(prog, pwddir, argv_str, pid):
+def process_generic_shell_command(prog, pwddir, argv_str, pid):
     '''
-    Process the dwz command.
+    Process a generic shell command like strip/eu-strip/dwz
+    strip --strip-debug -o drivers/firmware/efi/libstub/x86-stub.stub.o drivers/firmware/efi/libstub/x86-stub.o
     dwz -mdebian/libssl1.1/usr/lib/debug/.dwz/x86_64-linux-gnu/libssl1.1.debug -- debian/libcrypto1.1-udeb/usr/lib/libcrypto.so.1.1 debian/libssl1.1/usr/lib/x86_64-linux-gnu/libssl.so.1.1
     :param prog: the program binary
     :param pwddir: the present working directory for the command
     :param argv_str: the full command with all its command line options/parameters
     :param pid: PID of the shell command, this is a str, not integer
     '''
-    # dwz command can be handled the same way as gcc compile command, for outfile,infiles
-    (outfile, infiles) = get_all_subfiles_in_gcc_cmdline(argv_str, pwddir, prog, False)
-    verbose("dwz outfile: " + outfile + " infiles: " + str(infiles), LEVEL_3)
-    if not infiles:  # if infiles is empty, no need to record info for this dwz cmd
+    (outfile, infiles) = get_all_subfiles_in_shell_cmdline(argv_str, pwddir, prog)
+    verbose(prog + " outfile: " + outfile + " infiles: " + str(infiles), LEVEL_3)
+    if not infiles:  # if infiles is empty, no need to record info for this cmd
         return ''
+    if outfile and outfile != infiles[0]:
+        if args.pre_exec:
+            # no need to record info for pre-exec mode
+            return ''
+        # outfile is different from infile, record info for post-exec mode only
+        record_raw_info(outfile, infiles, pwddir, argv_str)
+        return outfile
+    # there is no outfile or outfile is same as infile, record info for both pre-exec and post-exec mode.
     for infile in infiles:
         record_raw_info(infile, [], pwddir, argv_str, pid)
     return outfile
@@ -813,9 +1033,7 @@ def shell_command_record_same_file(prog, pwddir, argv_str, pid, cmdname):
     The shell command update the single file, like objtool/strip/ranlib. the last token must the file to update.
     '''
     tokens = argv_str.split()
-    outfile = tokens[-1]
-    if outfile[0] != "/":
-        outfile = os.path.abspath(os.path.join(pwddir, outfile))
+    outfile = get_real_path(tokens[-1], pwddir)
     if not os.path.isfile(outfile):
         verbose("outfile " + outfile + " is not a file, ignore this command", LEVEL_0)
         return ''
@@ -829,6 +1047,8 @@ def process_samefile_converter_command(prog, pwddir, argv_str, pid):
     For example, the below commands in Linux kernel build or rpm build.
     ./tools/objtool/objtool orc generate --no-fp --retpoline kernel/fork.o
     ./scripts/sortextable vmlinux
+    ./scripts/sorttable vmlinux
+    ./tools/bpf/resolve_btfids/resolve_btfids vmlinux
     /usr/lib/rpm/sepdebugcrcfix usr/lib/debug .//usr/lib64/libopenosc.so.0.0.0
     /usr/lib/rpm/debugedit -b /home/OpenOSC/rpmbuild/BUILD/openosc-1.0.5 -d /usr/src/debug/openosc-1.0.5-1.el8.x86_64 -i --build-id-seed=1.0.5-1.el8 -l /home/OpenOSC/rpmbuild/BUILD/openosc-1.0.5/debugsources.list /home/OpenOSC/rpmbuild/BUILDROOT/openosc-1.0.5-1.el8.x86_64/usr/lib64/libopenosc.so.0.0.0
 
@@ -855,12 +1075,8 @@ def process_install_command(prog, pwddir, argv_str):
     if len(tokens) < 3 or tokens[-2][0] == '-':
         verbose("Warning: not yet interested in this install command with the same input/output file", LEVEL_0)
         return ''
-    outfile = tokens[-1]
-    if outfile[0] != "/":
-        outfile = os.path.abspath(os.path.join(pwddir, outfile))
-    infile = tokens[-2]
-    if infile[0] != "/":
-        infile = os.path.abspath(os.path.join(pwddir, infile))
+    outfile = get_real_path(tokens[-1], pwddir)
+    infile = get_real_path(tokens[-2], pwddir)
     if not os.path.isfile(infile):
         verbose("Warning: install command's infile not a file: " + infile, LEVEL_0)
         return ''
@@ -888,12 +1104,8 @@ def process_objcopy_command(prog, pwddir, argv_str, pid):
         # the input and output file are the same file
         return shell_command_record_same_file(prog, pwddir, argv_str, pid, "objcopy")
     # the input and output file are not the same file
-    outfile = tokens[-1]
-    if outfile[0] != "/":
-        outfile = os.path.abspath(os.path.join(pwddir, outfile))
-    infile = tokens[-2]
-    if infile[0] != "/":
-        infile = os.path.abspath(os.path.join(pwddir, infile))
+    outfile = get_real_path(tokens[-1], pwddir)
+    infile = get_real_path(tokens[-2], pwddir)
     if not os.path.isfile(infile):
         verbose("Warning: this infile is not a file: " + infile, LEVEL_0)
         return outfile
@@ -920,9 +1132,9 @@ def process_bzImage_build_command(prog, pwddir, argv_str):
     if len(tokens) < 5:
         verbose("Warning: not well-formated bzImage build command", LEVEL_0)
         return ''
-    outfile = os.path.abspath(os.path.join(pwddir, tokens[-1]))
+    outfile = get_real_path(tokens[-1], pwddir)
     infiles = tokens[1 : len(tokens)-1]
-    infiles = [os.path.abspath(os.path.join(pwddir, afile)) for afile in infiles]
+    infiles = [get_real_path(afile, pwddir) for afile in infiles]
     record_raw_info(outfile, infiles, pwddir, argv_str)
     return outfile
 
@@ -960,12 +1172,8 @@ def process_javac_command(prog, pwddir, argv_str):
             java_file = token
             outfile = token[:-5] + ".class"
             break
-    if java_file[0] != '/':
-        java_file = os.path.join(pwddir, java_file)
-    java_file = os.path.abspath(java_file)
-    if outfile[0] != '/':
-        outfile = os.path.join(pwddir, outfile)
-    outfile = os.path.abspath(outfile)
+    java_file = get_real_path(java_file, pwddir)
+    outfile = get_real_path(outfile, pwddir)
     record_raw_info(outfile, infiles, pwddir, argv_str)
     return outfile
 
@@ -978,7 +1186,8 @@ def process_jar_command(prog, pwddir, argv_str):
     :param argv_str: the full command with all its command line options/parameters
     '''
     verbose("\npwd: " + pwddir + " Found one jar command: " + argv_str)
-    (outfile, infiles) = get_all_subfiles_in_jar_cmdline(argv_str, pwddir)
+    # jar command is exactly like ar command
+    (outfile, infiles) = get_all_subfiles_in_ar_cmdline(argv_str, pwddir)
     record_raw_info(outfile, infiles, pwddir, argv_str)
     return outfile
 
@@ -1047,11 +1256,11 @@ def read_hook_embed_bom_file():
     return read_text_file(afile).strip()
 
 
-def process_shell_command(prog, pwddir, argv_str, pid_str):
+def process_shell_command(prog, pwd_str, argv_str, pid_str):
     '''
     Process the shell command that we are interested in.
     :param prog: the program binary
-    :param pwddir: the present working directory for the command
+    :param pwd_str: the line of present working directory for the command, it can optionally contain rootdir after pwd
     :param argv_str: the full command with all its command line options/parameters
     :param pid_str: the string with process ID, in format of "PID: pid XXX YYY"
     '''
@@ -1059,6 +1268,12 @@ def process_shell_command(prog, pwddir, argv_str, pid_str):
     tokens = pid_str.split()
     if len(tokens) > 1:
         pid = tokens[1]
+    tokens = pwd_str.split()
+    pwddir = tokens[0]
+    # pwd line can optionally add the rootdir of the shell command
+    global g_shell_cmd_rootdir
+    if len(tokens) > 1:
+        g_shell_cmd_rootdir = tokens[1]
     if args.pre_exec:
         verbose("pre_exec run")
     global g_last_embed_outfile_checksum
@@ -1076,14 +1291,14 @@ def process_shell_command(prog, pwddir, argv_str, pid_str):
         outfile = process_objcopy_command(prog, pwddir, argv_str, pid)
     elif prog == "arch/x86/boot/tools/build":
         outfile = process_bzImage_build_command(prog, pwddir, argv_str)
+    elif prog in g_strip_progs or prog == "/usr/bin/dwz":
+        outfile = process_generic_shell_command(prog, pwddir, argv_str, pid)
     elif prog in g_samefile_converters:
         outfile = process_samefile_converter_command(prog, pwddir, argv_str, pid)
     elif prog == "/usr/bin/install":
         outfile = process_install_command(prog, pwddir, argv_str)
     elif prog == "/usr/bin/rustc":
         outfile = process_rustc_command(prog, pwddir, argv_str)
-    elif prog == "/usr/bin/dwz":
-        outfile = process_dwz_command(prog, pwddir, argv_str, pid)
     elif prog == "bomsh_openat_file":
         outfile = process_samefile_converter_command(prog, pwddir, argv_str, pid)
     elif prog == "/usr/bin/javac":
@@ -1096,6 +1311,10 @@ def process_shell_command(prog, pwddir, argv_str, pid_str):
     if not g_not_embed_bom_flag and not args.pre_exec and prog in g_embed_bom_after_commands:
         # only if this command is not redundant, not pre-exec mode
         embed_bom_after_cmd(prog, pwddir, argv_str, outfile)
+    # try to save the githash_cache file
+    if not args.no_githash_cache_file and g_githash_cache:
+        if len(g_githash_cache) > 1 and len(g_githash_cache) > g_githash_cache_initial_size:
+            save_json_db(g_githash_cache_file, g_githash_cache)
 
 
 ############################################################
@@ -1142,6 +1361,12 @@ def rtd_parse_options():
     parser.add_argument("--no_dependent_headers",
                     action = "store_true",
                     help = "not include C header files for hash tree dependency")
+    parser.add_argument("--record_raw_bomid",
+                    action = "store_true",
+                    help = "record raw info for bom_id of input/output files if it exists")
+    parser.add_argument("--no_githash_cache_file",
+                    action = "store_true",
+                    help = "not use a helper cache file to store githash of header files")
     parser.add_argument("-v", "--verbose",
                     action = "count",
                     default = 0,
@@ -1201,11 +1426,11 @@ def main():
 
     if args.pre_exec:
         # Fewer number of programs to watch in pre_exec mode
-        progs_to_watch = g_samefile_converters + ["/usr/bin/objcopy", "/usr/bin/dwz", "bomsh_openat_file"]
+        progs_to_watch = g_samefile_converters + g_strip_progs + ["/usr/bin/objcopy", "/usr/bin/dwz", "bomsh_openat_file"]
         if args.watched_pre_exec_programs:
             progs_to_watch.extend(args.watched_pre_exec_programs.split(","))
     else:
-        progs_to_watch = g_cc_compilers + g_cc_linkers + g_samefile_converters + ["/usr/bin/ar", "/usr/bin/objcopy", "arch/x86/boot/tools/build",
+        progs_to_watch = g_cc_compilers + g_cc_linkers + g_samefile_converters + g_strip_progs + ["/usr/bin/ar", "/usr/bin/objcopy", "arch/x86/boot/tools/build",
                      "/usr/bin/rustc", "/usr/bin/dwz", "bomsh_openat_file", "/usr/bin/javac", "/usr/bin/jar"]
         if args.watched_programs:
             progs_to_watch.extend(args.watched_programs.split(","))

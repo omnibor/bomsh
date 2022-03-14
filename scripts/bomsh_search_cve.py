@@ -265,6 +265,7 @@ def get_embedded_bom_id(afile):
     '''
     Get the embedded 20bytes githash of the associated gitBOM doc for a binary file.
     :param afile: the file to extract the 20-bytes embedded .bom section.
+    returns a string of 40 characters
     '''
     if is_archive_file(afile):
         return get_embedded_bom_id_of_archive(afile)

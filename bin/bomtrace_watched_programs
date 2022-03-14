@@ -17,7 +17,9 @@
 /usr/lib/rpm/debugedit
 /usr/lib/rpm/sepdebugcrcfix
 arch/x86/boot/tools/build
+./tools/bpf/resolve_btfids/resolve_btfids
 ./scripts/sortextable
+./scripts/sorttable
 /usr/lib/golang/pkg/tool/linux_amd64/compile
 /usr/lib/golang/pkg/tool/linux_amd64/link
 ---
@@ -29,7 +31,9 @@ arch/x86/boot/tools/build
 /usr/bin/dwz
 /usr/lib/rpm/debugedit
 /usr/lib/rpm/sepdebugcrcfix
+./tools/bpf/resolve_btfids/resolve_btfids
 ./scripts/sortextable
+./scripts/sorttable
 ===
 ./configure
 /usr/bin/dh_auto_test
