@@ -341,13 +341,14 @@ def update_gitbom_dir(bomdir, infiles, checksum, outfile):
 #### Start of hash tree DB update routines ####
 ############################################################
 
-def update_hash_tree_node_filepath(db, ahash, afile):
+def update_hash_tree_node_filepath(db, ahash, afile, cvehint=None):
     '''
     Update the file_path of a single node in the hash tree
 
     :param db: the hash tree DB to update
     :param ahash: the hash of the afile
     :param afile: a file, either input file or output file
+    :param cvehint: a tuple of (has_cve_list, fixed_cvelist)
     '''
     if ahash not in db:  # not exist, then create this hash entry
         db[ahash] = {"file_path": afile}
@@ -360,32 +361,49 @@ def update_hash_tree_node_filepath(db, ahash, afile):
                 afile_db["file_paths"].append(afile)
         else:
             afile_db["file_paths"] = [afile_db["file_path"], afile]
+    # extra handling of cvehint
+    if not cvehint:
+        return
+    verbose("afile: " + afile + " Processing cvehint: " + str(cvehint))
+    has_cve_list, fixed_cve_list = cvehint
+    if has_cve_list:
+        if "cvehint_CVElist" in afile_db:
+            afile_db["cvehint_CVElist"].extend(has_cve_list)
+        else:
+            afile_db["cvehint_CVElist"] = has_cve_list
+    if fixed_cve_list:
+        if "cvehint_FixedCVElist" in afile_db:
+            afile_db["cvehint_FixedCVElist"].extend(fixed_cve_list)
+        else:
+            afile_db["cvehint_FixedCVElist"] = fixed_cve_list
 
 
-def update_hash_tree_node_buildcmd(afile_db, ahash, outfile, argv_str):
+def update_hash_tree_node_build_info(afile_db, ahash, outfile, key_value, key_str):
     '''
-    Update the build_cmd of a single node in the hash tree
+    Update the build_cmd/build_tool of a single node in the hash tree
 
     :param afile_db: the hash tree DB node to update
     :param ahash: the hash of the outfile
     :param outfile: the output file for the shell command
-    :param argv_str: the full shell command with all its command line options/parameters
+    :param key_value: the value, for example, the full shell command with all its command line options/parameters
+    :param key_str: build_cmd or build_tool, the key string for the dict
     '''
+    key_strs = key_str + "s"
     # First add the build command to the database
-    verbose(outfile + " is outfile, update build_cmd: " + argv_str)
-    if "build_cmd" in afile_db and afile_db["build_cmd"] != argv_str:
-        verbose("Warning: checksum " + ahash + " already has build command. outfile: " + outfile)
+    verbose(outfile + " is outfile, update " + key_str + ": " + key_value)
+    if key_str in afile_db and afile_db[key_str] != key_value:
+        verbose("Warning: checksum " + ahash + " already has " + key_str + " info. outfile: " + outfile)
         # create build_cmds with the list of all build commands
-        if "build_cmds" in afile_db:
-            if argv_str not in afile_db["build_cmds"]:
-                afile_db["build_cmds"].append(argv_str)
+        if key_strs in afile_db:
+            if key_value not in afile_db[key_strs]:
+                afile_db[key_strs].append(key_value)
         else:
-            afile_db["build_cmds"] = [afile_db["build_cmd"], argv_str]
-    if "build_cmd" not in afile_db:
-        afile_db["build_cmd"] = argv_str
+            afile_db[key_strs] = [afile_db[key_str], key_value]
+    if key_str not in afile_db:
+        afile_db[key_str] = key_value
 
 
-def update_hash_tree_node_hashtree(db, ahash, outfile, infiles, argv_str, pid=''):
+def update_hash_tree_node_hashtree(db, ahash, outfile, infiles, argv_str, pid='', build_tool=''):
     '''
     Update the build_cmd and hashtree of a single node in the hash tree
 
@@ -395,19 +413,28 @@ def update_hash_tree_node_hashtree(db, ahash, outfile, infiles, argv_str, pid=''
     :param infiles: the list of (checksum, file_path) for input files
     :param argv_str: the full shell command with all its command line options/parameters
     :param pid: the PID of the shell command
+    :param build_tool: the build_tool info
     returns the newly created hash_tree, empty or not. This is a list of checksums
     '''
     afile_db = db[ahash]
     # First add the build command to the database
-    update_hash_tree_node_buildcmd(afile_db, ahash, outfile, argv_str)
+    update_hash_tree_node_build_info(afile_db, ahash, outfile, argv_str, "build_cmd")
+    if build_tool:
+        update_hash_tree_node_build_info(afile_db, ahash, outfile, build_tool, "build_tool")
     # Next update the hashtree as needed
     hash_tree = [f[0] for f in infiles]
     if pid and pid in g_pre_exec_db:
-        checksum = g_pre_exec_db[pid][1]
-        verbose("Consuming pre_exec record, pid: " + pid + " checksum: " + checksum + " new checksum: " + ahash + " outfile: " + outfile)
-        if checksum != ahash:  # must be different to deserve a hash tree dependency
-            hash_tree = [checksum,]
-        del g_pre_exec_db[pid]
+        pid_db = g_pre_exec_db[pid]
+        if outfile not in pid_db:
+            verbose("Warning: pid: " + pid + " missing old checksum, new checksum: " + ahash + " outfile: " + outfile)
+        else:
+            checksum = g_pre_exec_db[pid][outfile]
+            verbose("Consuming pre_exec record, pid: " + pid + " checksum: " + checksum + " new checksum: " + ahash + " outfile: " + outfile)
+            if checksum != ahash:  # must be different to deserve a hash tree dependency
+                hash_tree = [checksum,]
+            del g_pre_exec_db[pid][outfile]
+            if not g_pre_exec_db[pid]:
+                del g_pre_exec_db[pid]
     if not hash_tree:
         verbose("Warning: checksum " + ahash + " has empty hashtree. outfile: " + outfile)
         return hash_tree
@@ -456,24 +483,29 @@ def update_hash_tree_db_and_gitbom(db, record):
         pid = record["pid"]
     if "exec_mode" in record and record["exec_mode"] == "pre_exec":
         verbose("pre_exec record, pid: " + pid + " checksum: " + checksum + " outfile: " + outfile)
-        if pid:
-            g_pre_exec_db[pid] = (outfile, checksum)
+        if pid in g_pre_exec_db:
+            g_pre_exec_db[pid][outfile] = checksum
+        else:
+            g_pre_exec_db[pid] = {outfile: checksum}
         return
     update_hash_tree_node_filepath(db, checksum, outfile)
     infiles = []
     if "infiles" in record:
         infiles = record["infiles"]
-    for ahash, afile in infiles:
+    for ahash, afile, cvehint in infiles:
         if not ahash:
             continue
-        update_hash_tree_node_filepath(db, ahash, afile)
+        update_hash_tree_node_filepath(db, ahash, afile, cvehint)
     if len(infiles) == 1 and checksum == infiles[0][0]:
         # input and output file have the exact same checksum, skip it
         verbose("Warning: unary transform of same checksum, skip updating hash tree DB.")
         return
     verbose("Updating hash tree DB for outfile " + outfile)
     argv_str = record["build_cmd"]
-    hash_tree = update_hash_tree_node_hashtree(db, checksum, outfile, infiles, argv_str, pid)
+    if "build_tool" in record:
+        hash_tree = update_hash_tree_node_hashtree(db, checksum, outfile, infiles, argv_str, pid, build_tool=record["build_tool"])
+    else:
+        hash_tree = update_hash_tree_node_hashtree(db, checksum, outfile, infiles, argv_str, pid)
     verbose("There are " + str(len(hash_tree)) + " checksums in hash_tree for outfile: " + outfile)
     if g_bomdir:
         update_gitbom_dir(g_bomdir, hash_tree, checksum, outfile)
@@ -505,6 +537,22 @@ def process_lseek_lines_file(lseek_lines_file):
         lseek_lines = int(content)
         verbose("We will read raw_logfile starting at lseek_lines: " + content)
     return lseek_lines
+
+
+def read_cve_hint(tokens):
+    """
+    Read the CVE helpful hint from infile line.
+
+    :param tokens: the list of ["has_cve:CVE-2020-1967,CVE-2020-1971", "fixed_cve:CVE-2014-0160"]
+    """
+    has_cve_list = []
+    fixed_cve_list = []
+    for token in tokens:
+        if token.startswith("has_cve:CVE-"):
+            has_cve_list = token[8:].split(",")
+        elif token.startswith("fixed_cve:CVE-"):
+            fixed_cve_list = token[10:].split(",")
+    return (has_cve_list, fixed_cve_list)
 
 
 def read_raw_logfile(raw_logfile):
@@ -543,12 +591,17 @@ def read_raw_logfile(raw_logfile):
                 elif len(tokens) > 2:
                     checksum = ''
                     file_path = tokens[2]
+                cve_hint = None
+                if len(tokens) > 4 and "_cve:CVE-" in line:
+                    cve_hint = read_cve_hint(tokens[4:])
                 if "infiles" not in record:
-                    record["infiles"] = [(checksum, file_path),]
+                    record["infiles"] = [(checksum, file_path, cve_hint),]
                 else:
-                    record["infiles"].append( (checksum, file_path) )
+                    record["infiles"].append( (checksum, file_path, cve_hint) )
             elif line.startswith("build_cmd: "):
                 record["build_cmd"] = line[11:]
+            elif line.startswith("build_tool: "):
+                record["build_tool"] = line[12:]
             elif line.startswith("==== End of raw info for "):
                 update_hash_tree_db_and_gitbom(g_treedb, record)
                 record = {}  # create the next record
@@ -600,6 +653,8 @@ def unbundle_package(pkgfile, destdir=''):
         cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; cd " + destdir + " ; rpm2cpio " + pkgfile + " | cpio -idm || true"
     elif pkgfile[-4:] == ".deb" or pkgfile[-5:] == ".udeb":
         cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; dpkg-deb -xv " + pkgfile + " " + destdir + " || true"
+    elif pkgfile[-7:] == ".tar.gz" or pkgfile[-7:] == ".tar.xz" or pkgfile[-8:] == ".tar.bz2":
+        cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; tar -xf " + pkgfile + " -C " + destdir + " || true"
     else:
         print("Unsupported package format in " + pkgfile + " file, skipping it.")
         return ''
@@ -621,7 +676,7 @@ def process_package_file(pkgfile):
     record['outfile'] = (get_git_file_hash(pkgfile), pkgfile)
     infiles = []
     for afile in afiles:
-        infiles.append( (get_git_file_hash(afile), afile) )
+        infiles.append( (get_git_file_hash(afile), afile, None) )
     record['infiles'] = infiles
     record['build_cmd'] = "unbundle package"
     update_hash_tree_db_and_gitbom(g_treedb, record)

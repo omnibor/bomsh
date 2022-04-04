@@ -498,6 +498,16 @@ def get_metadata_for_checksum_from_db(db, checksum, which_list):
     return ''
 
 
+# All the CVE lists to store CVEs in the search result tree
+g_cvelist_keys = ("NoCVElist", "CVElist", "FixedCVElist", "cvehint_CVElist", "cvehint_FixedCVElist")
+
+def is_any_cvelist_in_entry(entry):
+    '''
+    Is any CVE list in this dict entry.
+    '''
+    return "NoCVElist" in entry or "CVElist" in entry or "FixedCVElist" in entry or "cvehint_CVElist" in entry or "cvehint_FixedCVElist" in entry
+
+
 g_checksum_cache_db = {}
 def create_hash_tree_for_checksum(checksum, ancestors, checksum_db, checksum_line):
     '''
@@ -521,11 +531,15 @@ def create_hash_tree_for_checksum(checksum, ancestors, checksum_db, checksum_lin
         # Get a shallow copy which should keep metadata like file_path, etc., if it exists
         entry = checksum_db[checksum].copy()
     if "hash_tree" not in entry:  # leaf node
-        for which_list in ("CVElist", "FixedCVElist"):
+        for which_list in g_cvelist_keys:
             cvelist = get_metadata_for_checksum_from_db(g_cvedb, checksum, which_list)
             if cvelist:
                 entry[which_list] = cvelist
-        if ("CVElist" in entry or "FixedCVElist" in entry) and "file_path" not in entry:
+            else:
+                cvelist = get_metadata_for_checksum_from_db(g_metadata_db, checksum, which_list)
+                if cvelist:
+                    entry[which_list] = cvelist
+        if is_any_cvelist_in_entry(entry) and "file_path" not in entry:
             file_path = get_metadata_for_checksum_from_db(g_cvedb, checksum, "file_path")
             if file_path:
                 entry["file_path"] = file_path
@@ -549,14 +563,18 @@ def create_hash_tree_for_checksum(checksum, ancestors, checksum_db, checksum_lin
         ret[ahash] = create_hash_tree_for_checksum(node_id, ancestors, checksum_db, ahash)
     # update metadata for this non-leaf node, based on blob_id
     blob_id, bom_id = get_blob_bom_id_from_checksum_line(checksum_line)
-    for which_list in ("CVElist", "FixedCVElist"):
+    for which_list in g_cvelist_keys:
         cvelist = get_metadata_for_checksum_from_db(g_cvedb, blob_id, which_list)
         if cvelist:
             ret[which_list] = cvelist
+        else:
+            cvelist = get_metadata_for_checksum_from_db(g_metadata_db, blob_id, which_list)
+            if cvelist:
+                ret[which_list] = cvelist
     for key in ("file_path", "file_paths", "build_cmd"):  # try to save more metadata in the result
         if key in entry:
             ret[key] = entry[key]
-    if ("CVElist" in ret or "FixedCVElist" in ret) and "file_path" not in ret:
+    if is_any_cvelist_in_entry(ret) and "file_path" not in ret:
         file_path = get_metadata_for_checksum_from_db(g_cvedb, blob_id, "file_path")
         if file_path:
             ret["file_path"] = file_path
@@ -600,10 +618,9 @@ def collect_cve_list_from_hash_tree(tree_db, which_list):
     if type(tree_db) is not dict:  # for "NOT_FOUND" or "RECURSION_LOOP_DETECTED"
         return []
     ret = []
+    non_checksum_keys = ("file_path", "file_paths") + g_cvelist_keys
     for checksum in tree_db:
-        if checksum in ("file_path", "file_paths", "CVElist", "FixedCVElist"):
-            #if checksum in ("file_path", "file_paths"):
-            #    continue
+        if checksum in non_checksum_keys:
             if checksum == which_list:
                 ret.extend(tree_db[checksum])
             continue
@@ -620,11 +637,15 @@ def find_cve_lists_for_checksums(checksums):
     tree = create_hash_tree_for_checksums(checksums, g_checksum_db)
     if g_jsonfile and args.verbose > 1:
         save_json_db(g_jsonfile + "-details.json", tree)
+    # Check if there are any new blob IDs that do not exist in g_cvedb
+    blobs = check_nonexistent_cve_blob_ids(tree)
+    if blobs:
+        print("Warning: the CVE search result may be inaccurate, since " + str(len(blobs)) + " blob IDs are not found in CVE DB")
     ret = {}
     for checksum in checksums:
         if checksum in tree:
             checksum_result = {}
-            for which_list in ("CVElist", "FixedCVElist"):
+            for which_list in g_cvelist_keys:
                 checksum_result[which_list] = collect_cve_list_from_hash_tree(tree[checksum], which_list)
             ret[checksum] = checksum_result
         else:
@@ -685,6 +706,91 @@ def find_vulnerable_blob_ids_for_cves(cves, cve_db):
         result[cve] = blob_ids
     return result
 
+
+def get_all_src_files_in_cvedb(cve_db):
+    '''
+    Get all the source code files in CVE database.
+    :param cve_db: the CVE database
+    returns a list of src files
+    '''
+    result = set()
+    for blob_id in cve_db:
+        entry = cve_db[blob_id]
+        if "file_path" in entry:
+            result.add(entry["file_path"])
+    return result
+
+
+def get_cve_check_source_file(afile, src_files):
+    """
+    Get the CVE check src_file for a file.
+    :param afile: the file to check
+    :param src_files: a dict with src_file as key
+    """
+    for src_file in src_files:
+        if afile.endswith(src_file):
+            return src_file
+    return ''
+
+
+def get_all_blob_ids_for_src_files_internal(node_key, tree_db, src_files, result):
+    '''
+    Get all the blob IDs for a list of src_files in the search result tree.
+    This function recurses on itself.
+    :param node_key: the key associated with tree_db
+    :param tree_db: the tree database
+    :param src_files: a list of source files to check against
+    :param result: the search result to update
+    '''
+    if not isinstance(tree_db, dict):  # for "NOT_FOUND" or "RECURSION_LOOP_DETECTED"
+        return
+    non_checksum_keys = ("file_path", "file_paths") + g_cvelist_keys
+    for checksum in tree_db:
+        if checksum in non_checksum_keys:
+            if checksum == "file_path":
+                afile = tree_db[checksum]
+                src_file = get_cve_check_source_file(afile, src_files)
+                if src_file:
+                    blob_id, bom_id = get_blob_bom_id_from_checksum_line(node_key)
+                    if blob_id in result:
+                        old_src_file = result[blob_id][0]
+                        if src_file != old_src_file:
+                            verbose("Warning: same blob ID " + blob_id + " for two src_files, old: " + old_src_file + " new: " + src_file)
+                    else:
+                        result[blob_id] = (src_file, afile)
+            continue
+        # recurse on all its child nodes
+        get_all_blob_ids_for_src_files_internal(checksum, tree_db[checksum], src_files, result)
+
+
+def get_all_blob_ids_for_src_files(tree_db, src_files):
+    '''
+    Get all the blob IDs for a list of src_files in the search result tree.
+    :param tree_db: the tree database
+    :param src_files: a list of source files to check against
+    returns a dict of {blob_id => (src_file, afile) }
+    '''
+    result = {}
+    get_all_blob_ids_for_src_files_internal('', tree_db, src_files, result)
+    return result
+
+
+def check_nonexistent_cve_blob_ids(tree):
+    '''
+    Check if there are any blob IDs in the search tree that do not exist in the g_cvedb.
+    :param tree: the CVE search details tree DB
+    returns a dict of {blob_id => (src_file, afile) } for not-found new blob IDs
+    '''
+    src_files = get_all_src_files_in_cvedb(g_cvedb)
+    verbose("All " + str(len(src_files)) + " CVE src_files: " + str(src_files), LEVEL_3)
+    blobs_result = get_all_blob_ids_for_src_files(tree, src_files)
+    verbose("All " + str(len(blobs_result)) + " CVE blobs: " + json.dumps(blobs_result, indent=4, sort_keys=True), LEVEL_3)
+    ret = {}
+    for blob in blobs_result:
+        if blob not in g_cvedb:
+            ret[blob] = blobs_result[blob]
+    verbose("All not-found new CVE blobs: " + json.dumps(ret, indent=4, sort_keys=True), LEVEL_2)
+    return ret
 
 ############################################################
 #### End of CVE finding routines ####

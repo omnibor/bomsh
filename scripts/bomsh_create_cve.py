@@ -30,8 +30,8 @@ import os
 import shutil
 import subprocess
 import json
-import pdb
 import re
+import yaml
 
 # for special filename handling with shell
 try:
@@ -53,6 +53,19 @@ args = None
 g_logfile = "/tmp/bomsh_create_cve_logfile"
 g_jsonfile = "/tmp/bomsh_created_cvedb.json"
 g_all_zero_checksum = '0' * 40
+
+g_tmpdir = "/tmp"
+g_cvebuild_dir = "/tmp/bomsh_cvebuild"
+g_cvedb = {}
+g_cvedb_srcfiles = set()
+g_extra_cvedb = {}
+g_baseline_srcfile_cvedb = {}
+g_cve_check_rules = None
+g_gitdir = ""
+
+g_hobbled_tarball_name = ''
+g_pkg_component_name = ''
+g_pkg_component_version = ''
 
 #
 # Helper routines
@@ -101,15 +114,39 @@ def read_text_file(afile):
          return (f.read())
 
 
+def which_tool_exist(tool):
+    """
+    Check whether tool is on PATH.
+    """
+    rc = subprocess.call(['which', tool], stdout=subprocess.DEVNULL)
+    return rc == 0
+
+
 def get_shell_cmd_output(cmd):
     """
     Returns the output of the shell command "cmd".
 
     :param cmd: the shell command to execute
     """
-    #print (cmd)
-    output = subprocess.check_output(cmd, shell=True, universal_newlines=True)
+    if sys.version_info[0] < 3 or (sys.version_info[0] == 3 and sys.version_info[1] < 6):
+        output = subprocess.check_output(cmd, shell=True, universal_newlines=True)
+    else:
+        output = subprocess.check_output(cmd, shell=True, errors="backslashreplace", universal_newlines=True)
     return output
+
+
+def get_filetype(afile):
+    """
+    Returns the output of the shell command "file afile".
+
+    :param afile: the file to check its file type
+    """
+    cmd = "file " + cmd_quote(afile) + " || true"
+    output = subprocess.check_output(cmd, shell=True, universal_newlines=True)
+    res = output.strip().split(": ")
+    if len(res) > 1:
+        return ": ".join(res[1:])
+    return "empty"
 
 
 def load_json_db(db_file):
@@ -145,6 +182,33 @@ def save_json_db(db_file, db, indentation=4):
     else:
         with f:
             json.dump(db, f, indent=indentation, sort_keys=True)
+
+
+def find_all_suffix_files(builddir, suffix):
+    """
+    Find all files with the specified suffix in the build dir.
+
+    It simply runs the shell's find command and saves the result.
+
+    :param builddir: String, build dir of the workspace
+    :param suffix: the suffix of files to find
+    :returns a list that contains all the file names with the suffix.
+    """
+    findcmd = "find " + cmd_quote(builddir) + ' -type f -name "*' + suffix + '" -print || true'
+    # print(findcmd)
+    output = subprocess.check_output(findcmd, shell=True, universal_newlines=True)
+    files = output.splitlines()
+    #print(len(files))
+    return files
+
+g_excluded_source_code_filenames = ("CHANGES", "README")
+
+def is_source_code_file(afile):
+    """
+    if a file is considered as source code file.
+    """
+    basename = os.path.basename(afile)
+    return basename not in g_excluded_source_code_filenames
 
 
 ############################################################
@@ -467,6 +531,7 @@ def divide_git_blob_ids(checksums, pre_checksum, post_checksum):
     return (pre_blob_ids, post_blob_ids)
 
 
+g_no_cvelist_field = "NoCVElist"
 g_cvelist_field = "CVElist"
 g_fixed_cvelist_field = "FixedCVElist"
 
@@ -657,6 +722,1193 @@ def process_cve_range_blob_ids(cve_blobid_db):
 #### End of CVE range handling routines ####
 ############################################################
 
+def convert_commitcves_to_cvecommits(commit_db):
+    """
+    Convert commit => cveinfo mapping to cve => commit mapping
+    :param commit_db: the dict with commit_id => cveinfo mapping
+    returns a new dict with cve => commit mapping
+    """
+    src_files_key = "src_files"
+    cvedb = {}
+    for commit in commit_db:
+        cveinfo = commit_db[commit]
+        for cvetype in cveinfo:
+            cvelist = cveinfo[cvetype]
+            for cve_id in cvelist:
+                cve = cvelist[cve_id]
+                src_files = []
+                if cve and src_files_key in cve:
+                    src_files = cve[src_files_key]
+                commit_entry = {"commit": commit}
+                if src_files:
+                    commit_entry[src_files_key] = src_files
+                if cve_id not in cvedb:
+                    cvedb[cve_id] = {cvetype: []}
+                # Both added_commits and fixed_commits are now a list of commit_entry
+                if cvetype not in cvedb[cve_id]:
+                    cvedb[cve_id][cvetype] = [commit_entry,]
+                else:
+                    cvedb[cve_id][cvetype].append( commit_entry )
+    return cvedb
+
+
+def get_all_cveinfo_git_tags(git_dir=''):
+    """
+    Scan git repo and get the list of cveinfo.* git tags.
+    :param git_dir: the git directory
+    returns a list of cveinfo.* git tags
+    """
+    if git_dir:
+        cmd = 'cd ' + git_dir + ' ; git tag | grep "^cveinfo\.*" || true'
+    else:
+        cmd = 'git tag | grep "^cveinfo\.*" || true'
+    output = get_shell_cmd_output(cmd)
+    if not output:
+        return ''
+    return output.strip().splitlines()
+
+
+'''
+The below is a sample cveinfo.*.yaml file:
+[root@bfa3292890e0 openssl]# more cveinfo.a87f3fe.yaml
+Fixed:
+ CVE-2020-1967:
+  src_files:
+   - ssl/t1_lib.c
+[root@bfa3292890e0 openssl]#
+
+User can run below command to create an annotated tag in git repo:
+    git tag -a -F cveinfo.a87f3fe.yaml cveinfo.a87f3fe a87f3fe
+'''
+
+def get_git_tag_info(tag, git_dir=''):
+    """
+    Get the object and message associated with the git tag.
+    :param tag: the git tag name
+    :param git_dir: the git directory
+    returns the object and message of the git tag.
+    """
+    if git_dir:
+        cmd = 'cd ' + git_dir + ' ; git tag -v ' + tag + ' 2>/dev/null || true'
+    else:
+        cmd = 'git tag -v ' + tag + ' 2>/dev/null || true'
+    output = get_shell_cmd_output(cmd)
+    if not output:
+        return ''
+    obj = ''
+    objtype = ''
+    message = []
+    lines = output.splitlines()
+    lineno = 1
+    for line in lines:
+        lineno += 1
+        if line[:7] == "object ":
+            obj = line[7:]
+        elif line[:5] == "type ":
+            objtype = line[5:]
+        elif line[:7] == "tagger ":
+            message = lines[lineno:]
+            break
+    msg_obj = yaml.safe_load('\n'.join(message))
+    return (obj, objtype, msg_obj)
+
+
+def get_git_tags_info(tags, git_dir=''):
+    """
+    Get the object and message for a list of tags
+    :param tags: the list of tags
+    :param git_dir: the git directory
+    #returns a dict of tag => (obj, objtype, message)
+    returns a dict of cve => {cve_type : list_of_commits}
+    """
+    commit_db = {}
+    for tag in tags:
+        tag_info = get_git_tag_info(tag, git_dir)
+        obj, objtype, msg_obj = tag_info
+        commit_db[tag] = msg_obj
+    cve_db = convert_commitcves_to_cvecommits(commit_db)
+    if args.verbose > 1:
+        jsonfile = g_jsonfile
+        if jsonfile[-5:] == ".json":
+            jsonfile = jsonfile[:-5]
+        afile = jsonfile + "-commitcves.json"
+        save_json_db(afile, commit_db)
+        verbose("All the commit => CVEs mappings from git-tags are stored in the file " + afile, LEVEL_2)
+        afile = jsonfile + "-cvecommits.json"
+        save_json_db(afile, cve_db)
+        verbose("All the CVE => commits mappings from git-tags are stored in the file " + afile, LEVEL_2)
+    return cve_db
+
+
+def get_cveinfo_tags_info(git_dir=''):
+    """
+    Get all the CVE tags info.
+    :param git_dir: the git directory
+    returns a dict of CVE => commit mapping
+    """
+    return get_git_tags_info(get_all_cveinfo_git_tags(git_dir), git_dir)
+
+
+def get_git_log_raw_output_for_two_commits(commit1, commit2):
+    """
+    Get the git log raw output for a git commit.
+    :param commit1: the first commit, which occurs earlier than commit2
+    :param commit2: the second commit, which occurs later than commit1
+    returns the git command output
+    """
+    if not commit2:
+        commit2 = 'HEAD'
+    if not commit1:
+        cmd = 'git log --raw --no-abbrev --oneline ' + commit2 + ' 2>/dev/null || true'
+    else:
+        cmd = 'git log --raw --no-abbrev --oneline ' + commit1 + '..' + commit2 + ' 2>/dev/null || true'
+    verbose(cmd, LEVEL_2)
+    output = get_shell_cmd_output(cmd)
+    #print(output)
+    return output
+
+
+def get_git_diff_tree_output_for_commit(commit_id):
+    """
+    Get the git diff-tree output for a git commit.
+    :param commit_id: the git commit ID to query
+    returns the git command output
+    """
+    cmd = 'git diff-tree --raw --no-commit-id -r ' + commit_id + ' || true'
+    output = get_shell_cmd_output(cmd)
+    return output
+
+
+def get_git_commit_source_files(commit_id):
+    """
+    Get all the source files in a git commit
+    :param commit_id: the git commit ID
+    """
+    afiles = []
+    output = get_git_diff_tree_output_for_commit(commit_id)
+    lines = output.splitlines()
+    for line in lines:
+        tokens = line.split()
+        afile = tokens[-1]
+        if not is_source_code_file(afile):
+            continue
+        afiles.append(afile)
+    return afiles
+
+
+def get_git_commit_source_blob_ids(commit_id, afiles=[]):
+    """
+    Get all the source file blob IDs in a git commit
+    :param commit_id: the git commit ID
+    :param afiles: a list of source files to check if provided
+    returns a list of blob IDs
+    """
+    blob_ids = []
+    output = get_git_diff_tree_output_for_commit(commit_id)
+    lines = output.splitlines()
+    for line in lines:
+        tokens = line.split()
+        afile = tokens[-1]
+        if (afiles and afile not in afiles) or (not afiles and not is_source_code_file(afile)):
+            continue
+        blob_id = tokens[3]
+        blob_ids.append(blob_id)
+    return blob_ids
+
+
+def extract_blob_ids_for_source_files(output, afiles, commit2):
+    """
+    Extract all blob IDs for a list of source files, in "git log" output
+    :param output: the "git log" output
+    :param afiles: a list of source files
+    :param commit2: the second commit, which occurs later than commit1
+    returns a dict of afile => list of blob IDs
+    """
+    # post_blob_flag is array for all afiles: if True, extract the post_blob ID for the first blob change line
+    post_blob_flag = {afile:False for afile in afiles}
+    if commit2.startswith("origin/"):
+        post_blob_flag = {afile:True for afile in afiles}
+    ret = {afile : [] for afile in afiles}
+    lines = output.splitlines()
+    for line in lines:
+        if not line or line[0] != ":":
+            continue
+        tokens = line.split()
+        if len(tokens) < 6:
+            continue
+        afile = tokens[5]
+        if afile not in afiles:
+            continue
+        if post_blob_flag[afile]:
+            ret[afile].append(tokens[3])
+            post_blob_flag[afile] = False  # only do it for the first blob change line
+        # this is the prev blob ID, the blob ID before this commit
+        ret[afile].append(tokens[2])
+    for afile in ret:
+        blob_ids = ret[afile]
+        if blob_ids and blob_ids[-1] == g_all_zero_checksum:
+            blob_ids.pop()
+        if not blob_ids and post_blob_flag[afile]:
+            verbose("Trying to add possible blob IDs from the HEAD commit....", LEVEL_4)
+            # needs to add the blob IDs in the HEAD commit too if there is any
+            blob_ids = get_git_commit_source_blob_ids(commit2, (afile,))
+        ret[afile] = blob_ids
+    #print(json.dumps(ret, indent=4, sort_keys=True))
+    return ret
+
+
+def get_all_blob_ids_for_cve(cve_db, cve):
+    """
+    Get all the source blob IDs for a CVE.
+    :param cve_db: the dict of CVE => {cve_type: list_of_commits}
+    :param cve: a specific CVE in the cve_db
+    returns all the source blob IDs for this CVE
+    """
+    ret = {}
+    cveinfo = cve_db[cve]
+    verbose("Processing cve: " + cve + " cveinfo: " + str(cveinfo), LEVEL_2)
+    # Both added_commits and fixed_commits are now a list of dict.
+    if "Added" not in cveinfo:
+        for commit2 in cveinfo["Fixed"]:
+            get_all_blob_ids_for_two_commits('', commit2, ret)
+        return ret
+    if "Fixed" not in cveinfo:
+        for commit1 in cveinfo["Added"]:
+            get_all_blob_ids_for_two_commits(commit1, '', ret)
+        return ret
+    for commit1 in cveinfo["Added"]:
+        for commit2 in cveinfo["Fixed"]:
+            get_all_blob_ids_for_two_commits(commit1, commit2, ret)
+    return ret
+
+
+def update_dict1_with_dict2(dict1, dict2):
+    """
+    Update dict1 contents with dict2. The values of dict1 and dict2 must be list.
+    :param dict1: the dict to update
+    :param dict2: the dict to get new conents from
+    """
+    for afile in dict2:
+        if afile in dict1:
+            dict1[afile] = list(set(dict1[afile] + dict2[afile]))
+        else:
+            dict1[afile] = dict2[afile]
+
+
+def get_all_blob_ids_for_two_commits(cve_commit1, cve_commit2, blobs_db):
+    """
+    Get all the source blob IDs for two CVE commits. commit1 must be ancestor of commit2.
+    :param cve_commit1: earlier commit, dict of {"commit": commit_id, "src_files": list_of_files}
+    :param cve_commit2: later commit, dict of {"commit": commit_id, "src_files": list_of_files}
+    :param blobs_db: the blobs ID dict to update with the find result
+    blobs_db is updated with the find result.
+    """
+    commit1 = ''
+    commit2 = ''
+    if cve_commit1:
+        commit1 = cve_commit1["commit"]
+    if cve_commit2:
+        commit2 = cve_commit2["commit"]
+    if commit1 and commit2 and not is_ancestor_commit(commit1, commit2):
+        verbose(commit1 + " is not ancestor of " + commit2 + ", skip finding blobs", LEVEL_2)
+        return
+    src_files = []
+    if cve_commit2 and "src_files" in cve_commit2:
+        src_files = cve_commit2["src_files"]
+    elif cve_commit1 and "src_files" in cve_commit1:
+        src_files = cve_commit1["src_files"]
+    if not src_files:
+        if commit2:
+            src_files = get_git_commit_source_files(commit2)
+        elif commit1:
+            src_files = get_git_commit_source_files(commit1)
+    verbose("Now getting all blob IDs for commit1: " + commit1 + " commit2: " + commit2 + " for src_files: " + str(src_files), LEVEL_3)
+    if not src_files:
+        return
+    if commit1:
+        nocve_ids = get_all_blob_ids_for_files_between_two_commits('', commit1, src_files)
+        if g_no_cvelist_field not in blobs_db:
+            blobs_db[g_no_cvelist_field] = nocve_ids
+        else:
+            update_dict1_with_dict2(blobs_db[g_no_cvelist_field], nocve_ids)
+    if commit2:
+        vuln_cve_ids = get_all_blob_ids_for_files_between_two_commits(commit1, commit2, src_files)
+        if g_cvelist_field not in blobs_db:
+            blobs_db[g_cvelist_field] = vuln_cve_ids
+        else:
+            update_dict1_with_dict2(blobs_db[g_cvelist_field], vuln_cve_ids)
+        branches = which_branches_contain_commit(commit2)
+        for branch in branches:
+            fixed_cve_ids = get_all_blob_ids_for_files_between_two_commits(commit2, branch, src_files)
+            if g_fixed_cvelist_field not in blobs_db:
+                blobs_db[g_fixed_cvelist_field] = fixed_cve_ids
+            else:
+                update_dict1_with_dict2(blobs_db[g_fixed_cvelist_field], fixed_cve_ids)
+    else:
+        branches = which_branches_contain_commit(commit1)
+        for branch in branches:
+            vuln_cve_ids = get_all_blob_ids_for_files_between_two_commits(commit1, branch, src_files)
+            if g_cvelist_field not in blobs_db:
+                blobs_db[g_cvelist_field] = vuln_cve_ids
+            else:
+                update_dict1_with_dict2(blobs_db[g_cvelist_field], vuln_cve_ids)
+
+
+def get_all_blob_ids_for_cves(cve_db):
+    """
+    Get all the source blob IDs for all CVEs in cve_db.
+    :param cve_db: a dict of cve => dict of blob_ids of source files
+    """
+    ret = {}
+    for cve in cve_db:
+        ret[cve] = get_all_blob_ids_for_cve(cve_db, cve)
+    return ret
+
+
+def update_cve_checksum_db(cve_db, cve, cveinfo, which_list):
+    """
+    Update the cve checksum DB with cveinfo, for NoCVElist/CVElist/FixedCVElist.
+    :param cve_db: the cve checksum DB to update
+    :param cve: the CVE ID str
+    :param cveinfo: dict of { which_list => {afile => list_of_blob_ids} }
+    :param which_list: one of NoCVElist/CVElist/FixedCVElist
+    """
+    if which_list not in cveinfo:
+        return
+    cvelist_db = cveinfo[which_list]
+    for afile in cvelist_db:
+        alist = cvelist_db[afile]
+        for checksum in alist:
+            if checksum not in cve_db:
+                cve_db[checksum] = {"file_path": afile}
+            entry = cve_db[checksum]
+            if entry["file_path"] != afile:
+                print("Warning: different file path for the same checksum: " + checksum + " old path: " + entry["file_path"] + " new path: " + afile)
+            if which_list in entry:
+                entry[which_list].append(cve)
+            else:
+                entry[which_list] = [cve,]
+
+
+def convert_cve_commit_db_to_blob_db(commit_db):
+    """
+    Convert cve => blobs mapping to blob => cve mapping
+    :param commit_db: the dict with cve => dict of blob_ids of source files
+    returns a new dict with blob_id => CVElist/FixedCVElist mapping
+    """
+    ret = {}
+    for cve in commit_db:
+        cveinfo = commit_db[cve]
+        for which_list in (g_no_cvelist_field, g_cvelist_field, g_fixed_cvelist_field):
+            update_cve_checksum_db(ret, cve, cveinfo, which_list)
+        continue
+        if "no_cve" in cveinfo:
+            no_cve_db = cveinfo["no_cve"]
+            for afile in no_cve_db:
+                alist = no_cve_db[afile]
+                for checksum in alist:
+                    if checksum not in ret:
+                        ret[checksum] = {"file_path": afile}
+                    entry = ret[checksum]
+                    if entry["file_path"] != afile:
+                        print("Warning: different file path for the same checksum: " + checksum + " old path: " + entry["file_path"] + " new path: " + afile)
+                    if "NoCVElist" in entry:
+                        entry["NoCVElist"].append(cve)
+                    else:
+                        entry["NoCVElist"] = [cve,]
+    return ret
+
+
+def get_all_blob_ids_for_files_between_two_commits(commit1, commit2, afiles):
+    """
+    Get all blob IDs for a list of files, between two commits.
+    The two commits should share the list of files.
+    :param commit1: the first commit, which occurs earlier than commit2
+    :param commit2: the second commit, which occurs later than commit1
+    :param afiles: a list of source files
+    returns a dict of afile => list of blob IDs
+    """
+    output = get_git_log_raw_output_for_two_commits(commit1, commit2)
+    blob_ids = extract_blob_ids_for_source_files(output, afiles, commit2)
+    return blob_ids
+
+
+def get_all_cveinfo_files(cveinfo_dir):
+    """
+    Get all the cveinfo.*.yaml files in the cveinfo_dir.
+    :param cveinfo_dir: the directory to search all yaml files
+    returns a list of files
+    """
+    cmd = 'find ' + cveinfo_dir + ' -name "cveinfo.*.yaml" -type f || true'
+    output = get_shell_cmd_output(cmd)
+    if not output:
+        return ''
+    return output.strip().splitlines()
+
+
+def read_all_cveinfo_files(cveinfo_dir):
+    """
+    Read all cveinfo files and construct cve => commits database.
+    :param cveinfo_dir: the directory to search all yaml files
+    returns dict of cve => commits mapping
+    """
+    commit_db = {}
+    cveinfo_files = get_all_cveinfo_files(cveinfo_dir)
+    for afile in cveinfo_files:
+        tokens = os.path.basename(afile).split(".")
+        commit = tokens[1]
+        content = read_text_file(afile)
+        msg_obj = yaml.safe_load(content)
+        commit_db[commit] = msg_obj
+    cve_db = convert_commitcves_to_cvecommits(commit_db)
+    if args.verbose > 1:
+        jsonfile = g_jsonfile
+        if jsonfile[-5:] == ".json":
+            jsonfile = jsonfile[:-5]
+        afile = jsonfile + "-commitcves2.json"
+        save_json_db(afile, commit_db)
+        verbose("All the commit => CVEs mappings from cveinfo.*.yaml files are stored in the file " + afile, LEVEL_1)
+        afile = jsonfile + "-cvecommits2.json"
+        save_json_db(afile, cve_db)
+        verbose("All the CVE => commits mappings from cveinfo.*.yaml files are stored in the file " + afile, LEVEL_1)
+    return cve_db
+
+
+def is_git_repo(git_dir=''):
+    """
+    Check if a directory is a valid git repo or not.
+    :param git_dir: the git directory
+    returns True if git_dir is a valid git repo, otherwise, False
+    """
+    cmds = ['git', 'status']
+    if git_dir:
+        ret = subprocess.run(cmds, cwd=git_dir).returncode
+    else:
+        ret = subprocess.run(cmds).returncode
+    return ret == 0
+
+
+def is_ancestor_commit(commit1, commit2):
+    """
+    Check if commit1 is ancestor commit of commit2.
+    :param commit1: the ancestor git commit ID to check
+    :param commit2: the descendent git commit ID to check
+    returns True if commit is ancestor of commit2, otherwise, False
+    """
+    cmds = ['git', 'merge-base', '--is-ancestor', commit1, commit2]
+    return subprocess.run(cmds).returncode == 0
+
+
+def which_branches_contain_commit(commit_id):
+    """
+    Find out which git branch contains this git commmit.
+    :param commit_id: the git commit ID to find its branch
+    returns a list of git branch name.
+    """
+    cmd = 'git branch -r --contains ' + commit_id + ' || true'
+    output = get_shell_cmd_output(cmd)
+    if not output:
+        return ''
+    lines = output.strip().splitlines()
+    return [line.strip() for line in lines if " -> " not in line]
+
+
+def get_all_cve_relevant_blobs(git_dir=''):
+    """
+    Get all CVE-relevant blobs for all the git branches in git_dir.
+    :param git_dir: the git directory
+    returns a dict of afile => list of blob IDs
+    """
+    ret = {}
+    branches = get_all_git_remote_branches(git_dir)
+    branch_blobs = {}
+    for branch in branches:
+        verbose("Getting all CVE-relevant blobs for git branch: " + branch)
+        blobs = get_all_blob_ids_for_files_between_two_commits('', branch, g_cve_check_rules)
+        branch_blobs[branch] = blobs
+        for afile in blobs:
+            if afile in ret:
+                ret[afile].update(blobs[afile])
+            else:
+                ret[afile] = set(blobs[afile])
+    # This branch-blobs.json file is very useful to find which branch contains a blob ID.
+    save_json_db(g_jsonfile + "-branch-blobs.json", branch_blobs)
+    return ret
+
+
+def create_cve_extra_blobs_db(cve_checksum_db):
+    """
+    Create CVE DB for the additional relevant blobs in git repo that do not exist in cve_checksum_db.
+    :param cve_checksum_db: the CVE DB created based on cve-add/cve-fix commits
+    returns a new CVE DB, covering all other CVE-relevant blobs in git repo.
+    """
+    ret = {}
+    # First get all branches, and get all blobs on each branch
+    blobs_db = get_all_cve_relevant_blobs()
+    # Then check CVE rules for those blobs that do not exist in cve_checksum_db
+    for afile in blobs_db:
+        blobs = blobs_db[afile]
+        for blob in blobs:
+            if blob in cve_checksum_db:
+                continue
+            cve_result = cve_check_rule_for_git_blob(afile, blob)
+            has_cve_list, fixed_cve_list = get_cvelists_for_cve_result(cve_result)
+            ret[blob] = { "file_path": afile,
+                          "cvehints": cve_result,
+                          "cvehint_CVElist": has_cve_list,
+                          "cvehint_FixedCVElist": fixed_cve_list}
+    # Delete the bomsh_tmp dir at the end
+    shutil.rmtree(os.path.join(g_tmpdir, "bomsh_tmp"))
+    return ret
+
+############################################################
+#### End of CVEinfo git tags handling routines ####
+############################################################
+
+
+def get_git_file_hash(afile):
+    '''
+    Get the git object hash value of a file.
+    :param afile: the file to calculate the git hash or digest.
+    '''
+    cmd = 'git hash-object ' + cmd_quote(afile) + ' || true'
+    output = get_shell_cmd_output(cmd)
+    if output:
+        return output.strip()
+    return ''
+
+
+def get_all_src_files_in_cvedb(cve_db):
+    '''
+    Get all the source code files in CVE database.
+    :param cve_db: the CVE database
+    returns a list of src files
+    '''
+    result = set()
+    for blob_id in cve_db:
+        entry = cve_db[blob_id]
+        if "file_path" in entry:
+            result.add(entry["file_path"])
+    return result
+
+
+def get_cve_check_source_file(afile, src_files):
+    """
+    Get the CVE check src_file for a file.
+    :param afile: the file to check
+    :param src_files: a dict with src_file as key
+    """
+    for src_file in src_files:
+        if afile.endswith(src_file):
+            return src_file
+    return ''
+
+
+def unbundle_package(pkgfile, destdir=''):
+    '''
+    unbundle RPM/DEB/TAR package to destdir.
+    :param pkgfile: the RPM/DEB/TAR package file to unbundle
+    :param destdir: the destination directory to save unbundled files
+    '''
+    if not destdir:
+        destdir = os.path.join(g_tmpdir, "bomsh-" + os.path.basename(pkgfile))
+    if pkgfile[-4:] == ".rpm":
+        cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; cd " + destdir + " ; rpm2cpio " + pkgfile + " | cpio -idm || true"
+    elif pkgfile[-4:] == ".deb" or pkgfile[-5:] == ".udeb":
+        cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; dpkg-deb -x " + pkgfile + " " + destdir + " || true"
+    elif pkgfile[-7:] == ".tar.gz" or pkgfile[-7:] == ".tar.xz" or pkgfile[-8:] == ".tar.bz2":
+        cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; tar -xf " + pkgfile + " -C " + destdir + " || true"
+    else:
+        print("Unsupported package format in " + pkgfile + " file, skipping it.")
+        return ''
+    verbose(cmd, LEVEL_3)
+    get_shell_cmd_output(cmd)
+    return destdir
+
+
+# cache for performance
+g_pkgfile_baseline_blobs_cache = {}
+
+def create_cve_baseline_blobs_db(pkgfile, srcfiles):
+    '''
+    Unbundle the package, create the dict for all files in srcfiles.
+
+    :param pkgfile: the TAR package file to process
+    :param srcfiles: a list of src files to check
+    returns a dict of { src_file => its githash }
+    '''
+    # Check if it is a hit in the cache
+    if pkgfile in g_pkgfile_baseline_blobs_cache:
+        return g_pkgfile_baseline_blobs_cache[pkgfile]
+    destdir = unbundle_package(pkgfile)
+    if not destdir:
+        verbose("Failed to unbundle pkgfile: " + pkgfile)
+        return
+    src_rootdir = os.path.join(destdir, os.listdir(destdir)[0])
+    ret = {}
+    for src_file in srcfiles:
+        afile = os.path.join(src_rootdir, src_file)
+        if os.path.exists(afile):
+            ahash = get_git_file_hash(afile)
+            ret[src_file] = ahash
+            if ahash not in g_cvedb:
+                verbose("Warning: this blob ID " + ahash + " not found in the official CVE DB!")
+            continue
+    shutil.rmtree(destdir)
+    # cache it for later use
+    g_pkgfile_baseline_blobs_cache[pkgfile] = ret
+    return ret
+
+
+def get_nonexistent_blobs_in_baseline_for_dir(rootdir, baseline_db):
+    """
+    Get all new blob IDs in a rootdir that do not exist in the baseline src_file DB.
+    :param rootdir: the source code root directory
+    :param baseline_db: the baseline DB
+    returns a dict of { new_blob_id => {file_path, baseline_blob_id, cvehints} }
+    """
+    verbose("Finding nonexistent blobs for dir: " + rootdir)
+    ret = {}
+    for src_file in baseline_db:
+        afile = os.path.join(rootdir, src_file)
+        if os.path.exists(afile):
+            ahash = get_git_file_hash(afile)
+            baseline_hash = baseline_db[src_file]
+            verbose("afile_hash: " + ahash + " baseline_hash: " + baseline_hash + " afile: " + afile, LEVEL_2)
+            if ahash not in g_cvedb:  # record this blob if it is not in the baseline CVE DB, even if it is same value as baseline_hash
+                cve_result = cve_check_rule_for_file(afile)
+                has_cve_list, fixed_cve_list = get_cvelists_for_cve_result(cve_result)
+                ret[ahash] = {"baseline_blob_id": baseline_hash,
+                              "file_path": src_file,
+                              "cvehints": cve_result,
+                              "cvehint_CVElist": has_cve_list,
+                              "cvehint_FixedCVElist": fixed_cve_list}
+    return ret
+
+
+############################################################
+#### End of CVE extra blobs handling routines ####
+############################################################
+
+'''
+CVE-2020-1967:
+ ssl/t1_lib.c:
+  include:
+   - "if (sigalg != NULL && sig_nid == sigalg->sigandhash)"
+  exclude:
+   - "if (sig_nid == sigalg->sigandhash)"
+'''
+
+def read_cve_check_rules(cve_check_dir):
+    """
+    Read cveadd/cvefix files for the CVE check rules.
+    :param cve_check_dir: the directory to store the cveadd/cvefix files.
+    returns a dict with all rules.
+    """
+    ret = {}
+    if not os.path.exists(cve_check_dir):
+        return ret
+    cveadd_file = os.path.join(cve_check_dir, "cveadd")
+    cvefix_file = os.path.join(cve_check_dir, "cvefix")
+    if not (os.path.exists(cveadd_file) and os.path.exists(cvefix_file)):
+        return ret
+    ret["cveadd"] = yaml.safe_load(open(cveadd_file, "r"))
+    ret["cvefix"] = yaml.safe_load(open(cvefix_file, "r"))
+    #print(json.dumps(ret, indent=4, sort_keys=True))
+    return ret
+
+
+def convert_to_srcfile_cve_rules_db(cve_rules_db):
+    """
+    Convert to srcfile DB from the original cve_rules DB.
+    :param cve_rules_db: the original DB read from cve_check_dir files
+    returns a new dict with srcfile as key
+    """
+    ret = {}
+    if not cve_rules_db:
+        return ret
+    for rule_type in ("cveadd", "cvefix"):
+        cve_rules = cve_rules_db[rule_type]
+        update_srcfile_cve_rules_db(ret, cve_rules, rule_type)
+    #print(json.dumps(ret, indent=4, sort_keys=True))
+    return ret
+
+
+def update_srcfile_cve_rules_db(srcfile_db, cve_rules, rule_type):
+    """
+    Update the srcfile CVE rules DB, from the cve_rules DB with cve as key.
+    :param srcfile_db: cve_rules db to update, with src_file as key
+    :param cve_rules: cve_rules db, with cve as key
+    :param rule_type: cveadd or cvefix
+    """
+    for cve in cve_rules:
+        cve_file_rules = cve_rules[cve]
+        for afile in cve_file_rules:
+            afile_rule_value = cve_file_rules[afile]
+            if afile in srcfile_db:
+                srcfile_rules = srcfile_db[afile]
+                if cve in srcfile_rules:
+                    srcfile_rules[cve][rule_type] = afile_rule_value
+                else:
+                    srcfile_rules[cve] = {rule_type: afile_rule_value}
+            else:
+                srcfile_db[afile] = {cve: {rule_type: afile_rule_value} }
+
+
+def cve_check_rule(afile, rule, content=''):
+    """
+    Check if a file satisfies a CVE check rule.
+    :param afile: the file to check against the CVE rule
+    :param rule: the CVE rule to check
+    returns True if the rule is satisfied, otherwise, False
+    """
+    if not content:
+        content = read_text_file(afile)
+    includes = []
+    if "include" in rule:
+        includes = rule["include"]
+    for string in includes:
+        verbose("CVE checking include string: " + string, LEVEL_3)
+        if string not in content:
+            return False
+    excludes = []
+    if "exclude" in rule:
+        includes = rule["exclude"]
+    for string in excludes:
+        verbose("CVE checking exclude string: " + string, LEVEL_3)
+        if string in content:
+            return False
+    return True
+
+
+def cve_check_rules(afile, rules, content=''):
+    ret = {}
+    if not content:
+        content = read_text_file(afile)
+    for rule_type in ("cveadd", "cvefix"):
+        if rule_type not in rules:
+            continue
+        verbose("Checking " + rule_type + " for source file: " + afile, LEVEL_3)
+        rule = rules[rule_type]
+        ret[rule_type] = cve_check_rule(afile, rule, content)
+    return ret
+
+
+def get_cve_check_source_file(afile, src_files):
+    """
+    Get the CVE check src_file for a file.
+    :param afile: the file to check
+    :param src_files: a dict with src_file as key
+    """
+    for src_file in src_files:
+        if afile.endswith(src_file):
+            return src_file
+    return ''
+
+
+def get_cvelists_for_cve_result(cve_result):
+    """
+    Get (has_cve_list, fixed_cve_list) for CVE check result
+    :param cve_result: the CVE check result, a dict
+    """
+    has_cve_list = []
+    fixed_cve_list = []
+    for cve in cve_result:
+        result = cve_result[cve]
+        if "cvefix" in result and result["cvefix"]:
+            fixed_cve_list.append(cve)
+        elif "cveadd" in result and result["cveadd"]:
+            has_cve_list.append(cve)
+    return (has_cve_list, fixed_cve_list)
+
+
+def cve_check_rule_for_file(afile, src_file=''):
+    """
+    Check the CVE rule for a file and return a string for the CVE result
+    :param afile: the file to check against the CVE rules
+    :param src_file: the git src file for the git blob
+    returns a dict keyed with CVE ID
+    """
+    ret = {}
+    if not src_file:
+        src_file = get_cve_check_source_file(afile, g_cve_check_rules)
+    if not src_file:
+        return ''
+    content = read_text_file(afile)
+    cve_rules = g_cve_check_rules[src_file]
+    for cve in cve_rules:
+        cve_rule = cve_rules[cve]
+        verbose("Checking " + cve + " for source file: " + afile, LEVEL_3)
+        ret[cve] = cve_check_rules(afile, cve_rule, content)
+    verbose("cve check result for file: " + afile, LEVEL_3)
+    verbose(json.dumps(ret, indent=4, sort_keys=True), LEVEL_3)
+    return ret
+
+
+def cve_check_rule_for_git_blob(src_file, blob_id, git_dir=''):
+    """
+    Check the CVE rule for a file and return a string for the CVE result
+    :param src_file: the git src file for the git blob
+    :param blob_id: the git blob ID to check against the CVE rules
+    :param git_dir: the git directory
+    returns a dict keyed with CVE ID
+    """
+    afile = os.path.join(g_tmpdir, "bomsh_tmp", src_file)
+    dirname = os.path.dirname(afile)
+    if git_dir:
+        cmd = 'mkdir -p ' + dirname + ' ; cat /dev/null > ' + afile + ' ; cd ' + git_dir + ' ; git show ' + blob_id + ' > ' + afile + ' || true'
+    else:
+        cmd = 'mkdir -p ' + dirname + ' ; cat /dev/null > ' + afile + ' ; git show ' + blob_id + ' > ' + afile + ' || true'
+    os.system(cmd)
+    if os.path.getsize(afile) <= 0:
+        return {}
+    return cve_check_rule_for_file(afile, src_file)
+
+
+############################################################
+#### End of CVE check rules handling routines ####
+############################################################
+
+g_wget_exists = True
+
+def wget_url(url, destdir):
+    """
+    run wget to download a file from url
+    :param url: the URL to download file
+    :param destdir: the destination directory to store the downloaded file
+    returns the downloaded file path
+    """
+    basename = os.path.basename(url)
+    if not basename:
+        return ''
+    afile = os.path.join(destdir, basename)
+    if os.path.exists(afile):
+        return afile
+    #cmd = "wget " + url + " -P " + destdir + " || true"
+    #get_shell_cmd_output(cmd)
+    cmds = ['wget', url, '-P', destdir, '--no-check-certificate']
+    if subprocess.run(cmds).returncode != 0:
+        return ''
+    return afile
+
+
+def curl_url(url, destdir):
+    """
+    run curl to download a file from url
+    :param url: the URL to download file
+    :param destdir: the destination directory to store the downloaded file
+    returns the downloaded file path
+    """
+    basename = os.path.basename(url)
+    if not basename:
+        return ''
+    afile = os.path.join(destdir, basename)
+    if os.path.exists(afile) and "HTML document" not in get_filetype(afile):
+        return afile
+    cmd = "curl -k " + url + " > " + afile + " || true"
+    print(cmd)
+    os.system(cmd)
+    if os.path.exists(afile) and "HTML document" not in get_filetype(afile):
+        return afile
+    return ''
+
+
+def read_rpm_spec_file(specfile):
+    """
+    Read the RPM spec file, and return info
+    :param specfile: the RPM spec file to read
+    returns a tuple of (name, version, source, url)
+    """
+    name, version, source, url = ('', '', '', '')
+    with open(specfile, "r", errors="backslashreplace") as f:
+        for line in f:
+            tokens = line.split()
+            if len(tokens) == 2:
+                if tokens[0] == "Name:":
+                    name = tokens[1]
+                elif tokens[0] == "Version:":
+                    version = tokens[1]
+                elif tokens[0] == "Source:":
+                    source = tokens[1]
+                    if version:
+                        source = source.replace("%{version}", version)
+                elif tokens[0] == "URL:":
+                    url = tokens[1].replace("http://", "https://")
+                    return (name, version, source, url)
+    return (name, version, source, url)
+
+
+def get_rpm_spec_file(rpm_git_dir):
+    """
+    Get the rpm spec file in the rpm git repo
+    :param rpm_git_dir: the top directory of RPM git repo
+    returns the file path of the rpm spec file
+    """
+    specfiles = find_all_suffix_files(rpm_git_dir, ".spec")
+    if not specfiles:
+        return ''
+    return specfiles[0]
+
+
+def get_openssl_url_version(version):
+    """
+    Get the OpenSSL URL version part from the openssl version string.
+    """
+    if version[:3] == "3.0":
+        return "3.0"
+    tokens = version.split(".")
+    if len(tokens) > 2:
+        return ".".join(tokens[:2] + [tokens[2][0],])
+    return version
+
+
+def get_rpm_upstream_source_tarball(specfile, destdir):
+    """
+    Get or download the upstream source tarball file.
+    :param specfile: the RPM spec file
+    :param destdir: the destination directory to store the downloaded file
+    returns the file path of the downloaded tarball
+    """
+    name, version, source, url = read_rpm_spec_file(specfile)
+    global g_pkg_component_name
+    g_pkg_component_name = name
+    global g_pkg_component_version
+    g_pkg_component_version = version
+    if "-hobbled" in source:
+        global g_hobbled_tarball_name
+        g_hobbled_tarball_name = os.path.basename(source)
+        source = source.replace("-hobbled", "")
+    # the below may only work for openssl
+    source_url = os.path.join(url, "source", "old", get_openssl_url_version(version), source)
+    source_url_nosuffix = ".".join(source_url.split(".")[:-1])
+    for suffix in (".gz", ".xz", ".bz2"):
+        source_url2 = source_url_nosuffix + suffix
+        if g_wget_exists:
+            afile = wget_url(source_url2, destdir)
+        else:
+            afile = curl_url(source_url2, destdir)
+        if afile:
+            return afile
+    source_url = os.path.join(url, "source", source)
+    #source_url = os.path.join(url, "source", get_openssl_url_version(version), source)
+    source_url_nosuffix = ".".join(source_url.split(".")[:-1])
+    for suffix in (".gz", ".xz", ".bz2"):
+        source_url2 = source_url_nosuffix + suffix
+        if g_wget_exists:
+            afile = wget_url(source_url2, destdir)
+        else:
+            afile = curl_url(source_url2, destdir)
+        if afile:
+            return afile
+    return ''
+
+
+def setup_rpmbuild_dir(destdir):
+    """
+    Set up the rpmbuild directory for "rpmbuild -bp" command in destdir.
+    returns the rpmbuild directory
+    """
+    cmd = "cd " + destdir + " ; mkdir -p rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}"
+    get_shell_cmd_output(cmd)
+    return os.path.join(destdir, "rpmbuild")
+
+
+def copy_source_to_rpmbuild_dir(rpm_git_dir, rpmbuild_dir, source_tarball):
+    """
+    Copy all rpm SOURCE/* files to the rpmbuild directory for "rpmbuild -bp" command.
+    :param rpm_git_dir: the top directory of RPM git repo
+    :param rpmbuild_dir: the top directory of RPM build workspace
+    :param source_tarball: the downloaded upstream source tarball file
+    """
+    destdir = rpmbuild_dir + "/SOURCES/"
+    cmd = "cp " + source_tarball + " " + destdir
+    sources_dir = os.path.join(rpm_git_dir, "SOURCES")
+    if os.path.exists(sources_dir):
+        cmd += " ; cp " + rpm_git_dir + "/SOURCES/* " + destdir + " || true"
+    else:
+        cmd += " ; cp " + rpm_git_dir + "/* " + destdir + " || true"
+    verbose(cmd, LEVEL_3)
+    get_shell_cmd_output(cmd)
+
+
+g_tar_compression_flag = { "gz": "z", "bz2": "j", "xz": "J"}
+
+def hobble_openssl_source_tarball(source_tarball, hobble_script):
+    """
+    Convert OpenSSL orig source tarball to hobbled source tarball.
+    :param source_tarball: the downloaded upstream source tarball file
+    :param hobble_script: the hobble script file
+    returns the hobbled source tarball file path.
+    """
+    tarball_abspath = os.path.abspath(source_tarball)
+    hobble_dir = os.path.join(g_cvebuild_dir, "hobbledir")
+    src_dir_name = g_pkg_component_name + "-" + g_pkg_component_version
+    src_dir = os.path.join(hobble_dir, src_dir_name)
+    compress_type = g_hobbled_tarball_name.split(".")[-1]
+    cmd = "mkdir -p " + hobble_dir + " ; cd " + hobble_dir + " ; tar -xvf " + source_tarball
+    cmd += " ; cp " + hobble_script + " " + src_dir + " ; cd " + src_dir + " ; ./" + os.path.basename(hobble_script)
+    cmd += " ; cd .. ; tar -" + g_tar_compression_flag[compress_type] + "cvf " + g_hobbled_tarball_name + " " + src_dir_name + " || true"
+    verbose(cmd)
+    get_shell_cmd_output(cmd)
+    return os.path.join(hobble_dir, g_hobbled_tarball_name)
+
+
+def apply_rpm_patches(specfile, rpm_git_dir, source_tarball):
+    """
+    Run 'rpmbuild -bp' command to unpack source tarball and apply rpm patches.
+    :param specfile: the RPM spec file
+    :param rpm_git_dir: the top directory of RPM git repo
+    :param source_tarball: the downloaded upstream source tarball file
+    returns the source directory after rpm patches applied.
+    """
+    rpmbuild_dir = setup_rpmbuild_dir(g_cvebuild_dir)
+    if g_pkg_component_name == "openssl":
+        hobble_script = os.path.join(rpm_git_dir, "SOURCES", "hobble-openssl")
+        if not os.path.exists(hobble_script):
+            hobble_script = os.path.join(rpm_git_dir, "hobble-openssl")
+        if os.path.exists(hobble_script):
+            source_tarball = hobble_openssl_source_tarball(source_tarball, hobble_script)
+        else:
+            verbose("Warning: the hobble-openssl script is not found.", LEVEL_2)
+    copy_source_to_rpmbuild_dir(rpm_git_dir, rpmbuild_dir, source_tarball)
+    topdir_def = "_topdir " + rpmbuild_dir
+    cmds = ['rpmbuild', '--define', topdir_def, '--nodeps', '-bp', specfile]
+    verbose('Run "rpmbuild -bp ' + specfile + '" command in rpmbuild_dir: ' + rpmbuild_dir)
+    if subprocess.run(cmds, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+        return ''
+    src_dir_name = g_pkg_component_name + "-" + g_pkg_component_version
+    build_dir = os.path.join(rpmbuild_dir, "BUILD")
+    src_rootdir = os.path.join(build_dir, src_dir_name)
+    return src_rootdir
+
+
+def create_cve_extra_db(rpm_git_dir):
+    """
+    Create CVE extra DB for the rpm git directory.
+    :param git_dir: the git directory
+    returns a dict of { new_blob_id => {file_path, baseline_blob_id, cvehints} }
+    """
+    # first parse spec file and download orig.tar.gz file
+    specfile = get_rpm_spec_file(rpm_git_dir)
+    if not specfile:
+        print("Cannnot find rpm .spec file, do nothing for this git dir: " + rpm_git_dir)
+        return {}
+    if not os.path.exists(g_cvebuild_dir):
+        os.system("mkdir -p " + g_cvebuild_dir)
+    source_tarball = get_rpm_upstream_source_tarball(specfile, g_cvebuild_dir)
+    # construct the baseline CVE DB for src files
+    global g_baseline_srcfile_cvedb
+    if source_tarball:
+        verbose("Original source tarball: " + source_tarball + " githash: " + get_git_file_hash(source_tarball))
+        g_baseline_srcfile_cvedb = create_cve_baseline_blobs_db(source_tarball, g_cvedb_srcfiles)
+        verbose("Baseline srcfile CVE DB: " + json.dumps(g_baseline_srcfile_cvedb, indent=4, sort_keys=True), LEVEL_3)
+    else:
+        print("Error: cannot find the original tarball file!")
+        return {}
+    # Now apply RPM patches on top of the baseline source tarball
+    new_src_dir = apply_rpm_patches(specfile, rpm_git_dir, source_tarball)
+    # create the extra DB from the new source directory
+    blobs = get_nonexistent_blobs_in_baseline_for_dir(new_src_dir, g_baseline_srcfile_cvedb)
+    return blobs
+
+
+def get_all_git_remote_branches(git_dir=''):
+    """
+    Get all the git remote branches.
+    :param git_dir: the git directory
+    """
+    if git_dir:
+        cmd = "cd " + git_dir + " ; git branch -r || true"
+    else:
+        cmd = "git branch -r || true"
+    output = get_shell_cmd_output(cmd)
+    if not output:
+        return []
+    lines = output.strip().splitlines()
+    return [line.strip() for line in lines if " -> " not in line]
+
+
+def get_all_commits_on_branch(branch, git_dir=''):
+    """
+    Get all the git commits on a git branch.
+    :param branch: the git branch
+    :param git_dir: the git directory
+    """
+    ret = []
+    if git_dir:
+        cmd = "cd " + git_dir + ' ; git log --format="%h" ' + branch + " || true"
+    else:
+        cmd = 'git log --format="%h" ' + branch + " || true"
+    output = get_shell_cmd_output(cmd)
+    if not output:
+        return ret
+    return output.splitlines()
+
+
+def git_checkout_commit(commit, git_dir=''):
+    """
+    Run the "git checkout commit_id" command
+    """
+    if git_dir:
+        cmd = "cd " + git_dir + " ; git checkout " + commit + " || true"
+    else:
+        cmd = "git checkout " + commit + " || true"
+    verbose(cmd)
+    get_shell_cmd_output(cmd)
+
+
+def create_cve_extra_db_for_commit(commit, git_dir):
+    """
+    Create CVE extra DB for the specified git commit in git_dir.
+    :param commit: the git commit to "git checkout"
+    :param git_dir: the git directory
+    """
+    verbose("\n============= Now start creating CVE extra DB for commit: " + commit + " =============")
+    git_checkout_commit(commit, git_dir)
+    blobs = create_cve_extra_db(git_dir)
+    # update g_extra_cvedb with the newly created extra blobs result
+    for blob_id in blobs:
+        if blob_id in g_extra_cvedb:
+            if blobs[blob_id] != g_extra_cvedb[blob_id]:
+                verbose("Warning: different values for same blob_id: " + blob_id + " old: " + str(g_extra_cvedb[blob_id]) + " new: " + str(blobs[blob_id]))
+        else:
+            g_extra_cvedb[blob_id] = blobs[blob_id]
+
+
+def create_cve_extra_db_for_branch(branch, git_dir):
+    """
+    Create CVE extra DB for the specified git branch in git_dir.
+    :param branch: the git branch
+    :param git_dir: the git directory
+    """
+    commits = get_all_commits_on_branch(branch, git_dir)
+    for commit in commits:
+        create_cve_extra_db_for_commit(commit, git_dir)
+
+
+def create_cve_extra_db_for_all_branches(git_dir):
+    """
+    Create CVE extra DB for all the git branches in git_dir.
+    :param git_dir: the git directory
+    """
+    branches = get_all_git_remote_branches(git_dir)
+    for branch in branches:
+        verbose("Creating CVE extra DB for git branch: " + branch)
+        create_cve_extra_db_for_branch(branch, git_dir)
+    # finally clean up all the temporary directories.
+    clean_temp_build_dir()
+
+
+def clean_temp_build_dir():
+    """
+    Delete all the temporary directories for CVE extra DB build.
+    """
+    shutil.rmtree(g_cvebuild_dir, True)
+
+
+############################################################
+#### End of RPM git repo handling routines ####
+############################################################
 
 def rtd_parse_options():
     """
@@ -667,31 +1919,104 @@ def rtd_parse_options():
     parser.add_argument("--version",
                     action = "version",
                     version=VERSION)
+    parser.add_argument('--cvedbfile',
+                    help = "the input JSON file which stores the CVE database")
+    parser.add_argument('--extra_cvedbfile',
+                    help = "the initial input JSON file which stores the CVE extra database")
+    parser.add_argument('--gitdir',
+                    help = "the git directory")
     parser.add_argument('-j', '--jsonfile',
-                    help = "the output JSON file to store the created CVE database")
+                    help = "the output JSON file to store the created/updated CVE/CVE-extra database")
     parser.add_argument('-r', '--range_of_vulnerable_cve',
                     help = "the text file to specify the CVE vulnerable ranges")
+    parser.add_argument('--source_tarball',
+                    help = "the original upstream source tarball file")
+    parser.add_argument('--source_dir',
+                    help = "the directory to store all the source code files")
+    parser.add_argument('--cveinfo_dir',
+                    help = "the directory to store all cveinfo files")
+    parser.add_argument('--cve_check_dir',
+                    help = "the directory to store all CVE checking rules files")
+    parser.add_argument('--branches',
+                    help = "a comma-separated git branches")
+    parser.add_argument("--use_git_tags",
+                    action = "store_true",
+                    help = "Use git tags for CVE info")
+    parser.add_argument("--gen_extra_cvedb",
+                    action = "store_true",
+                    help = "Generate the extra CVE blob IDs database")
     parser.add_argument("-v", "--verbose",
                     action = "count",
                     default = 0,
                     help = "verbose output, can be supplied multiple times"
                            " to increase verbosity")
 
+    global args
     # Parse the command line arguments
     args = parser.parse_args()
-
-    #if not (args.raw_checksums_file):
-    #if not (args.cve_db_file and args.raw_cve_commits_file):
-    if False:
-        print ("Please specify the CVE database file with -d option!")
-        print ("Please specify the BOMSH raw checksum database file with -t option!")
-        print ("")
-        parser.print_help()
-        sys.exit()
 
     global g_jsonfile
     if args.jsonfile:
         g_jsonfile = args.jsonfile
+    global g_gitdir
+    if args.gitdir:
+        g_gitdir = args.gitdir
+    global g_cvedb
+    global g_cvedb_srcfiles
+    if args.cvedbfile:
+        if not os.path.isfile(args.cvedbfile):
+            print("The provided cvedbfile does not exist!")
+            print ("")
+            parser.print_help()
+            sys.exit()
+        g_cvedb = load_json_db(args.cvedbfile)
+        g_cvedb_srcfiles = get_all_src_files_in_cvedb(g_cvedb)
+        verbose("CVE DB #blobs: " + str(len(g_cvedb)) + " #srcfiles: " + str(len(g_cvedb_srcfiles)), LEVEL_2)
+    global g_wget_exists
+    g_wget_exists = which_tool_exist("wget")
+    global g_extra_cvedb
+    if args.extra_cvedbfile:
+        if not os.path.isfile(args.extra_cvedbfile):
+            print("The provided extra_cvedbfile does not exist!")
+            print ("")
+            parser.print_help()
+            sys.exit()
+        g_extra_cvedb = load_json_db(args.extra_cvedbfile)
+        verbose("Initial CVE extra DB #blobs: " + str(len(g_extra_cvedb)), LEVEL_2)
+    global g_baseline_srcfile_cvedb
+    if args.source_tarball:
+        if not os.path.isfile(args.source_tarball):
+            print("The provided source_tarball does not exist!")
+            print ("")
+            parser.print_help()
+            sys.exit()
+        g_baseline_srcfile_cvedb = create_cve_baseline_blobs_db(args.source_tarball, g_cvedb_srcfiles)
+        #print(json.dumps(g_baseline_srcfile_cvedb, indent=4, sort_keys=True))
+    if args.cveinfo_dir:
+        if not os.path.isdir(args.cveinfo_dir):
+            print("The provided cveinfo_dir does not exist!")
+            print ("")
+            parser.print_help()
+            sys.exit()
+    global g_cve_check_rules
+    if args.cve_check_dir:
+        if not os.path.isdir(args.cve_check_dir):
+            print("The provided cve_check_dir does not exist!")
+            print ("")
+            parser.print_help()
+            sys.exit()
+        g_cve_check_rules = convert_to_srcfile_cve_rules_db(read_cve_check_rules(args.cve_check_dir))
+        #print(json.dumps(g_cve_check_rules, indent=4, sort_keys=True))
+        if not g_cve_check_rules:
+            print("The provided cve_check_dir does not contain valid cveadd/cvefix rules files!")
+            print ("")
+            parser.print_help()
+            sys.exit()
+    if args.gen_extra_cvedb and not (g_cvedb and args.cve_check_dir):
+        print("Please specify CVE database and CVE check rules directory!")
+        print ("")
+        parser.print_help()
+        sys.exit()
 
     print ("Your command line is:")
     print (" ".join(sys.argv))
@@ -701,16 +2026,55 @@ def rtd_parse_options():
 
 
 def main():
-    global args
     # parse command line options first
     args = rtd_parse_options()
+
+    if args.gen_extra_cvedb:
+        if args.source_dir and g_baseline_srcfile_cvedb:
+            blobs = get_nonexistent_blobs_in_baseline_for_dir(args.source_dir, g_baseline_srcfile_cvedb)
+            save_json_db(g_jsonfile, blobs)
+            return
+        git_dir = g_gitdir
+        if args.branches:
+            branches = args.branches.split(",")
+            for branch in branches:
+                create_cve_extra_db_for_branch(branch, git_dir)
+            clean_temp_build_dir()
+        else:
+            create_cve_extra_db_for_all_branches(git_dir)
+        save_json_db(g_jsonfile, g_extra_cvedb)
+        return
+
+    if args.use_git_tags:
+        cwd = os.getcwd()
+        if not is_git_repo(cwd):
+            print("Your current directory " + cwd + " is not a git repo. You must run this command in a git repo!")
+            sys.exit()
+        cve_db = get_cveinfo_tags_info()
+        if args.cveinfo_dir:
+            # read all cveinfo.*.yaml files and update the CVE commits DB.
+            cve_db.update(read_all_cveinfo_files(args.cveinfo_dir))
+            afile = g_jsonfile + "-cvecommits-both.json"
+            save_json_db(afile, cve_db)
+            verbose("All the CVE => commits mappings from both git-tags and cveinfo.*.yaml files are stored in the file " + afile, LEVEL_2)
+        verbose("=== Here are all the CVEs: " + str(cve_db.keys()), LEVEL_2)
+        verbose("Trying to get all relevant blob IDs for CVE DB")
+        cve_blobs = get_all_blob_ids_for_cves(cve_db)
+        save_json_db(g_jsonfile + "-blobs.json", cve_blobs)
+        cve_checksum_db = convert_cve_commit_db_to_blob_db(cve_blobs)
+        if args.cve_check_dir:
+            cve_extra_blobs_db = create_cve_extra_blobs_db(cve_checksum_db)
+            cve_checksum_db.update(cve_extra_blobs_db)
+            save_json_db(g_jsonfile + "-extrablobs.json", cve_extra_blobs_db)
+        save_json_db(g_jsonfile, cve_checksum_db)
+        return
 
     if args.range_of_vulnerable_cve:
         cve_ranges = read_cve_range_file(args.range_of_vulnerable_cve)
         range_db = process_read_cve_ranges(cve_ranges)
         cve_db = process_cve_range_blob_ids(range_db)
         save_json_db(g_jsonfile, cve_db)
-        print("The created CVE database is stored in the file " + g_jsonfile)
+        verbose("The created CVE database is stored in the file " + g_jsonfile, LEVEL_2)
         return
 
     # First find all CVE commits by grep commit messages, then find and merge all source files of those cve commits.

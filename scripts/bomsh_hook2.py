@@ -27,6 +27,7 @@ import sys
 import os
 import subprocess
 import json
+import yaml
 
 # for special filename handling with shell
 try:
@@ -54,13 +55,14 @@ g_cc_compilers = ["/usr/bin/gcc", "/usr/bin/clang", "/usr/bin/cc", "/usr/bin/g++
 g_cc_linkers = ["/usr/bin/ld", "/usr/bin/ld.bfd", "/usr/bin/gold"]
 g_strip_progs = ["/usr/bin/strip", "/usr/bin/eu-strip"]
 # list of binary converting programs of the same file
-g_samefile_converters = ["/usr/bin/ranlib", "./tools/objtool/objtool", "/usr/lib/rpm/debugedit", "/usr/lib/rpm/sepdebugcrcfix",
+g_samefile_converters = ["/usr/bin/ranlib", "./tools/objtool/objtool", "/usr/lib/rpm/debugedit",
                          "./scripts/sortextable", "./scripts/sorttable", "./tools/bpf/resolve_btfids/resolve_btfids"]
 g_embed_bom_after_commands = g_cc_compilers + g_cc_linkers + ["/usr/bin/eu-strip",]
 g_last_embed_outfile_checksum = ''
 # a flag to skip bom-id-embedding for a shell command
 g_not_embed_bom_flag = False
 g_shell_cmd_rootdir = "/"
+g_cve_check_rules = None
 
 #
 # Helper routines
@@ -741,7 +743,50 @@ def get_git_file_hash_with_cache(afile):
     return ahash
 
 
-def record_raw_info(outfile, infiles, pwd, argv_str, pid='', outfile_checksum='', ignore_this_record=False):
+def get_build_tool_version(prog, pwd):
+    '''
+    Get the build tool version.
+    :param prog: the program binary
+    :param pwd: present working directory of the shell command
+    '''
+    if g_shell_cmd_rootdir != "/":
+        chroot_pwd = pwd
+        if pwd.startswith(g_shell_cmd_rootdir):
+            chroot_pwd = pwd[len(g_shell_cmd_rootdir):]
+        cmd = 'chroot ' + g_shell_cmd_rootdir + ' sh -c "cd ' + chroot_pwd + " ; " + prog + ' --version" || true'
+    else:
+        cmd = "cd " + pwd + " ; " + prog + " --version || true"
+    version_output = get_shell_cmd_output(cmd)
+    if not version_output:
+        cmd = cmd.replace(" --version", " version")
+        version_output = get_shell_cmd_output(cmd)
+    if version_output:
+        lines = version_output.splitlines()
+        return lines[0]
+    return ''
+
+
+def get_build_tool_info(prog, pwd):
+    '''
+    Get the build tool information.
+    :param prog: the program binary
+    :param pwd: present working directory of the shell command
+    '''
+    if g_githash_cache and prog in g_githash_cache:
+        return g_githash_cache[prog]
+    afile = get_real_path(prog, pwd)
+    ahash = get_git_file_hash(afile)
+    version_output = get_build_tool_version(prog, pwd)
+    verbose("Saving build_tool githash cache, hash: " + ahash + " afile: " + afile, LEVEL_3)
+    if version_output:
+        ret = "build_tool: " + ahash + " path: " + get_noroot_path(afile) + " tool_version: " + version_output
+    else:
+        ret = "build_tool: " + ahash + " path: " + get_noroot_path(afile)
+    g_githash_cache[prog] = ret
+    return ret
+
+
+def record_raw_info(outfile, infiles, pwd, argv_str, pid='', prog='', outfile_checksum='', ignore_this_record=False):
     '''
     Record the raw info for a list of infiles and outfile
 
@@ -750,6 +795,7 @@ def record_raw_info(outfile, infiles, pwd, argv_str, pid='', outfile_checksum=''
     :param pwd: present working directory of the shell command
     :param argv_str: the full command with all its command line options/parameters
     :param pid: PID of the shell command
+    :param prog: the program binary
     :param outfile_checksum: the checksum of the output file
     :param ignore_this_record: info only, ignore this record for create_bom processing
     '''
@@ -773,13 +819,18 @@ def record_raw_info(outfile, infiles, pwd, argv_str, pid='', outfile_checksum=''
     else:
         lines = ["\noutfile: " + outfile_checksum + " path: " + get_noroot_path(outfile),]
     for infile in infiles:
+        cve_result = ''
+        if g_cve_check_rules:
+            cve_result = cve_check_rule_for_file(infile)
         bomid = ''
         if args.record_raw_bomid:
             bomid = get_embedded_bom_id(infile)
+        infile_str = "infile: " + get_git_file_hash_with_cache(infile) + " path: " + get_noroot_path(infile)
+        if cve_result:
+            infile_str += cve_result
         if bomid:
-            lines.append("infile: " + get_git_file_hash_with_cache(infile) + " path: " + get_noroot_path(infile) + " bomid: " + bomid)
-        else:
-            lines.append("infile: " + get_git_file_hash_with_cache(infile) + " path: " + get_noroot_path(infile))
+            infile_str += " bomid: " + bomid
+        lines.append(infile_str)
     #lines.append("working_dir: " + pwd)
     if pid:
         if args.pre_exec:
@@ -789,6 +840,9 @@ def record_raw_info(outfile, infiles, pwd, argv_str, pid='', outfile_checksum=''
     if ignore_this_record:
         lines.append("ignore_this_record: information only")
     lines.append("build_cmd: " + argv_str)
+    if args.record_build_tool and prog:
+        build_tool_info = get_build_tool_info(prog, pwd)
+        lines.append(build_tool_info)
     if pid:
         lines.append("==== End of raw info for PID " + pid + " process\n\n")
     else:
@@ -925,6 +979,9 @@ def process_gcc_command(prog, pwddir, argv_str):
     :param pwddir: the present working directory for the command
     :param argv_str: the full command with all its command line options/parameters
     '''
+    global g_cve_check_rules
+    if args.cve_check_dir:
+        g_cve_check_rules = convert_to_srcfile_cve_rules_db(read_cve_check_rules(args.cve_check_dir))
     #gcc_logfile = os.path.join(g_tmpdir, "bomsh_hook_gcc_logfile")
     #verbose("\npwd: " + pwddir + " Found one gcc command: " + argv_str, LEVEL_0, gcc_logfile)
     (outfile, infiles) = get_all_subfiles_in_gcc_cmdline(argv_str, pwddir, prog)
@@ -945,9 +1002,9 @@ def process_gcc_command(prog, pwddir, argv_str):
         # also set not_embed_bom_flag to skip bom_id-embedding for this gcc command
         global g_not_embed_bom_flag
         g_not_embed_bom_flag = True
-        record_raw_info(outfile, infiles, pwddir, argv_str, outfile_checksum=checksum, ignore_this_record=True)
+        record_raw_info(outfile, infiles, pwddir, argv_str, prog=prog, outfile_checksum=checksum, ignore_this_record=True)
     else:
-        record_raw_info(outfile, infiles, pwddir, argv_str, outfile_checksum=checksum)
+        record_raw_info(outfile, infiles, pwddir, argv_str, prog=prog, outfile_checksum=checksum)
     return outfile
 
 
@@ -964,7 +1021,7 @@ def process_ld_command(prog, pwddir, argv_str):
     (outfile, infiles) = get_all_subfiles_in_gcc_cmdline(argv_str, pwddir, prog)
     if not infiles:  # if infiles is empty, no need to record info for this ld cmd
         return ''
-    record_raw_info(outfile, infiles, pwddir, argv_str)
+    record_raw_info(outfile, infiles, pwddir, argv_str, prog=prog)
     return outfile
 
 
@@ -980,7 +1037,7 @@ def process_rustc_command(prog, pwddir, argv_str):
     (outfile, infiles) = get_all_subfiles_in_rustc_cmdline(argv_str, pwddir, prog)
     if not infiles:  # if infiles is empty, no need to record info for this rustc cmd
         return ''
-    record_raw_info(outfile, infiles, pwddir, argv_str)
+    record_raw_info(outfile, infiles, pwddir, argv_str, prog=prog)
     return outfile
 
 
@@ -997,8 +1054,28 @@ def process_golang_command(prog, pwddir, argv_str):
     (outfile, infiles) = get_all_subfiles_in_golang_cmdline(argv_str, pwddir, prog)
     if not infiles:  # if infiles is empty, no need to record info for this golang cmd
         return ''
-    record_raw_info(outfile, infiles, pwddir, argv_str)
+    record_raw_info(outfile, infiles, pwddir, argv_str, prog=prog)
     return outfile
+
+
+def process_sepdebugcrcfix_command(prog, pwddir, argv_str, pid):
+    '''
+    Process the sepdebugcrcfix command
+    /usr/lib/rpm/sepdebugcrcfix usr/lib/debug .//usr/bin/openssl .//usr/lib64/engines-1.1/afalg.so .//usr/lib64/engines-1.1/capi.so .//usr/lib64/libcrypto.so.1.1.1k .//usr/lib64/engines-1.1/padlock.so .//usr/lib64/libssl.so.1.1.1k
+    :param prog: the program binary
+    :param pwddir: the present working directory for the command
+    :param argv_str: the full command with all its command line options/parameters
+    :param pid: PID of the shell command, this is a str, not integer
+    '''
+    tokens = argv_str.split()
+    if len(tokens) < 3: # infiles is empty, no need to record info for this cmd
+        return ''
+    infiles = [get_real_path(afile, pwddir) for afile in tokens[2:]]
+    verbose(prog + " infiles: " + str(infiles), LEVEL_3)
+    # record info for both pre-exec and post-exec mode.
+    for infile in infiles:
+        record_raw_info(infile, [], pwddir, argv_str, pid)
+    return ''
 
 
 def process_generic_shell_command(prog, pwddir, argv_str, pid):
@@ -1030,7 +1107,7 @@ def process_generic_shell_command(prog, pwddir, argv_str, pid):
 
 def shell_command_record_same_file(prog, pwddir, argv_str, pid, cmdname):
     '''
-    The shell command update the single file, like objtool/strip/ranlib. the last token must the file to update.
+    The shell command update the single file, like objtool/sorttable/ranlib. the last token must the file to update.
     '''
     tokens = argv_str.split()
     outfile = get_real_path(tokens[-1], pwddir)
@@ -1049,7 +1126,6 @@ def process_samefile_converter_command(prog, pwddir, argv_str, pid):
     ./scripts/sortextable vmlinux
     ./scripts/sorttable vmlinux
     ./tools/bpf/resolve_btfids/resolve_btfids vmlinux
-    /usr/lib/rpm/sepdebugcrcfix usr/lib/debug .//usr/lib64/libopenosc.so.0.0.0
     /usr/lib/rpm/debugedit -b /home/OpenOSC/rpmbuild/BUILD/openosc-1.0.5 -d /usr/src/debug/openosc-1.0.5-1.el8.x86_64 -i --build-id-seed=1.0.5-1.el8 -l /home/OpenOSC/rpmbuild/BUILD/openosc-1.0.5/debugsources.list /home/OpenOSC/rpmbuild/BUILDROOT/openosc-1.0.5-1.el8.x86_64/usr/lib64/libopenosc.so.0.0.0
 
     :param prog: the program binary
@@ -1174,7 +1250,7 @@ def process_javac_command(prog, pwddir, argv_str):
             break
     java_file = get_real_path(java_file, pwddir)
     outfile = get_real_path(outfile, pwddir)
-    record_raw_info(outfile, infiles, pwddir, argv_str)
+    record_raw_info(outfile, infiles, pwddir, argv_str, prog=prog)
     return outfile
 
 
@@ -1291,6 +1367,8 @@ def process_shell_command(prog, pwd_str, argv_str, pid_str):
         outfile = process_objcopy_command(prog, pwddir, argv_str, pid)
     elif prog == "arch/x86/boot/tools/build":
         outfile = process_bzImage_build_command(prog, pwddir, argv_str)
+    elif prog == "/usr/lib/rpm/sepdebugcrcfix":
+        outfile = process_sepdebugcrcfix_command(prog, pwddir, argv_str, pid)
     elif prog in g_strip_progs or prog == "/usr/bin/dwz":
         outfile = process_generic_shell_command(prog, pwddir, argv_str, pid)
     elif prog in g_samefile_converters:
@@ -1319,6 +1397,156 @@ def process_shell_command(prog, pwd_str, argv_str, pid_str):
 
 ############################################################
 #### End of shell command handling routines ####
+############################################################
+
+def read_cve_check_rules(cve_check_dir):
+    """
+    Read cveadd/cvefix files for the CVE check rules.
+    :param cve_check_dir: the directory to store the cveadd/cvefix files.
+    returns a dict with all rules.
+    """
+    ret = {}
+    if not os.path.exists(cve_check_dir):
+        return ret
+    cveadd_file = os.path.join(cve_check_dir, "cveadd")
+    cvefix_file = os.path.join(cve_check_dir, "cvefix")
+    if not (os.path.exists(cveadd_file) and os.path.exists(cvefix_file)):
+        return ret
+    ret["cveadd"] = yaml.safe_load(open(cveadd_file, "r"))
+    ret["cvefix"] = yaml.safe_load(open(cvefix_file, "r"))
+    #print(json.dumps(ret, indent=4, sort_keys=True))
+    return ret
+
+
+def convert_to_srcfile_cve_rules_db(cve_rules_db):
+    """
+    Convert to srcfile DB from the original cve_rules DB.
+    :param cve_rules_db: the original DB read from cve_check_dir files
+    returns a new dict with srcfile as key
+    """
+    ret = {}
+    for rule_type in ("cveadd", "cvefix"):
+        cve_rules = cve_rules_db[rule_type]
+        update_srcfile_cve_rules_db(ret, cve_rules, rule_type)
+    #print(json.dumps(ret, indent=4, sort_keys=True))
+    return ret
+
+
+def update_srcfile_cve_rules_db(srcfile_db, cve_rules, rule_type):
+    """
+    Update the srcfile CVE rules DB, from the cve_rules DB with cve as key.
+    :param srcfile_db: cve_rules db to update, with src_file as key
+    :param cve_rules: cve_rules db, with cve as key
+    :param rule_type: cveadd or cvefix
+    """
+    for cve in cve_rules:
+        cve_file_rules = cve_rules[cve]
+        for afile in cve_file_rules:
+            afile_rule_value = cve_file_rules[afile]
+            if afile in srcfile_db:
+                srcfile_rules = srcfile_db[afile]
+                if cve in srcfile_rules:
+                    srcfile_rules[cve][rule_type] = afile_rule_value
+                else:
+                    srcfile_rules[cve] = {rule_type: afile_rule_value}
+            else:
+                srcfile_db[afile] = {cve: {rule_type: afile_rule_value} }
+
+
+def cve_check_rule(afile, rule, content=''):
+    """
+    Check if a file satisfies a CVE check rule.
+    :param afile: the file to check against the CVE rule
+    :param rule: the CVE rule to check
+    returns True if the rule is satisfied, otherwise, False
+    """
+    if not content:
+        content = read_text_file(afile)
+    includes = []
+    if "include" in rule:
+        includes = rule["include"]
+    for string in includes:
+        verbose("CVE checking include string: " + string, LEVEL_3)
+        if string not in content:
+            return False
+    excludes = []
+    if "exclude" in rule:
+        includes = rule["exclude"]
+    for string in excludes:
+        verbose("CVE checking exclude string: " + string, LEVEL_3)
+        if string in content:
+            return False
+    return True
+
+
+def cve_check_rules(afile, rules, content=''):
+    ret = {}
+    if not content:
+        content = read_text_file(afile)
+    for rule_type in ("cveadd", "cvefix"):
+        if rule_type not in rules:
+            continue
+        verbose("Checking " + rule_type + " for source file: " + afile, LEVEL_3)
+        rule = rules[rule_type]
+        ret[rule_type] = cve_check_rule(afile, rule, content)
+    return ret
+
+
+def get_cve_check_source_file(afile, src_files):
+    """
+    Get the CVE check src_file for a file.
+    :param afile: the file to check
+    :param src_files: a dict with src_file as key
+    """
+    for src_file in src_files:
+        if afile.endswith(src_file):
+            return src_file
+    return ''
+
+
+def get_concise_str_for_cve_result(cve_result):
+    """
+    Get a concise string for CVE check result
+    :param cve_result: the CVE check result, a dict
+    """
+    has_cve_list = []
+    fixed_cve_list = []
+    for cve in cve_result:
+        result = cve_result[cve]
+        if "cvefix" in result and result["cvefix"]:
+            fixed_cve_list.append(cve)
+        elif "cveadd" in result and result["cveadd"]:
+            has_cve_list.append(cve)
+    ret = ''
+    if has_cve_list:
+        ret += " has_cve:" + ",".join(has_cve_list)
+    if fixed_cve_list:
+        ret += " fixed_cve:" + ",".join(fixed_cve_list)
+    return ret
+
+
+def cve_check_rule_for_file(afile):
+    """
+    Check the CVE rule for a file and return a string for the CVE result
+    :param afile: the file to check against the CVE rules
+    returns a string
+    """
+    ret = {}
+    src_file = get_cve_check_source_file(afile, g_cve_check_rules)
+    if not src_file:
+        return ''
+    content = read_text_file(afile)
+    cve_rules = g_cve_check_rules[src_file]
+    for cve in cve_rules:
+        cve_rule = cve_rules[cve]
+        verbose("Checking " + cve + " for source file: " + afile, LEVEL_3)
+        ret[cve] = cve_check_rules(afile, cve_rule, content)
+    verbose("cve check result for file: " + afile, LEVEL_3)
+    verbose(json.dumps(ret, indent=4, sort_keys=True), LEVEL_3)
+    return get_concise_str_for_cve_result(ret)
+
+############################################################
+#### End of CVE check rules handling routines ####
 ############################################################
 
 def rtd_parse_options():
@@ -1352,6 +1580,8 @@ def rtd_parse_options():
                     help = "the comma-separated C linker paths, like /usr/bin/ld,/usr/bin/llvm-ld")
     parser.add_argument("--embed_bom_after_commands",
                     help = "embed .bom ELF section after a command on an ELF binary, which is a list of comma-separated programs")
+    parser.add_argument('--cve_check_dir',
+                    help = "do additional CVE check for source files defined in cveadd/cvefix files of the directory")
     parser.add_argument("--pre_exec",
                     action = "store_true",
                     help = "pre-exec mode, invoked before executing the process")
@@ -1364,6 +1594,9 @@ def rtd_parse_options():
     parser.add_argument("--record_raw_bomid",
                     action = "store_true",
                     help = "record raw info for bom_id of input/output files if it exists")
+    parser.add_argument("--record_build_tool",
+                    action = "store_true",
+                    help = "record build tool information")
     parser.add_argument("--no_githash_cache_file",
                     action = "store_true",
                     help = "not use a helper cache file to store githash of header files")
@@ -1426,12 +1659,12 @@ def main():
 
     if args.pre_exec:
         # Fewer number of programs to watch in pre_exec mode
-        progs_to_watch = g_samefile_converters + g_strip_progs + ["/usr/bin/objcopy", "/usr/bin/dwz", "bomsh_openat_file"]
+        progs_to_watch = g_samefile_converters + g_strip_progs + ["/usr/bin/objcopy", "/usr/bin/dwz", "/usr/lib/rpm/sepdebugcrcfix", "bomsh_openat_file"]
         if args.watched_pre_exec_programs:
             progs_to_watch.extend(args.watched_pre_exec_programs.split(","))
     else:
         progs_to_watch = g_cc_compilers + g_cc_linkers + g_samefile_converters + g_strip_progs + ["/usr/bin/ar", "/usr/bin/objcopy", "arch/x86/boot/tools/build",
-                     "/usr/bin/rustc", "/usr/bin/dwz", "bomsh_openat_file", "/usr/bin/javac", "/usr/bin/jar"]
+                     "/usr/bin/rustc", "/usr/bin/dwz", "/usr/lib/rpm/sepdebugcrcfix", "bomsh_openat_file", "/usr/bin/javac", "/usr/bin/jar"]
         if args.watched_programs:
             progs_to_watch.extend(args.watched_programs.split(","))
     if prog in progs_to_watch:
