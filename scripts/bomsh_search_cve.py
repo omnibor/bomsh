@@ -27,6 +27,7 @@ import sys
 import os
 import subprocess
 import json
+import yaml
 import re
 
 # for special filename handling with shell
@@ -48,9 +49,13 @@ args = None
 g_cvedb = None
 g_checksum_db = None
 g_metadata_db = None
+g_cve_check_rules = None
 
 g_tmpdir = "/tmp"
 g_jsonfile = "/tmp/bomsh_search_jsonfile"
+# All the CVE lists to store CVEs in the search result tree
+g_cvelist_keys = ("NoCVElist", "CVElist", "FixedCVElist", "cvehint_CVElist", "cvehint_FixedCVElist")
+g_metadata_keys = ["file_path", "file_paths", "build_cmd"] + list(g_cvelist_keys)
 
 #
 # Helper routines
@@ -498,9 +503,6 @@ def get_metadata_for_checksum_from_db(db, checksum, which_list):
     return ''
 
 
-# All the CVE lists to store CVEs in the search result tree
-g_cvelist_keys = ("NoCVElist", "CVElist", "FixedCVElist", "cvehint_CVElist", "cvehint_FixedCVElist")
-
 def is_any_cvelist_in_entry(entry):
     '''
     Is any CVE list in this dict entry.
@@ -637,10 +639,24 @@ def find_cve_lists_for_checksums(checksums):
     tree = create_hash_tree_for_checksums(checksums, g_checksum_db)
     if g_jsonfile and args.verbose > 1:
         save_json_db(g_jsonfile + "-details.json", tree)
+    if args.software_heritage_save_dir:
+        download_tree_blobs_from_software_heritage(tree, args.software_heritage_save_dir)
     # Check if there are any new blob IDs that do not exist in g_cvedb
     blobs = check_nonexistent_cve_blob_ids(tree)
     if blobs:
         print("Warning: the CVE search result may be inaccurate, since " + str(len(blobs)) + " blob IDs are not found in CVE DB")
+        # Download blobs from softwareHeritage and check against CVE rules
+        destdir = os.path.join(g_tmpdir, "bomsh_swh_save_dir")
+        afiles = download_blobs_from_software_heritage(blobs, destdir)
+        verbose("For your convenience, " + str(len(afiles)) + " CVEDB-non-existent blob files are downloaded from SoftwareHeritage to directory: " + destdir)
+        if afiles and args.cve_check_dir:
+            global g_cve_check_rules
+            g_cve_check_rules = convert_to_srcfile_cve_rules_db(read_cve_check_rules(args.cve_check_dir))
+            cve_results = cve_check_rule_for_files(blobs, afiles, g_cve_check_rules)
+            verbose("Here is CVE check results of downloaded SWH blobs: " + json.dumps(cve_results, indent=4, sort_keys=True), LEVEL_3)
+            update_hash_tree_with_cve_results(tree, cve_results)
+            if g_jsonfile and args.verbose > 1:
+                save_json_db(g_jsonfile + "-details_swh.json", tree)
     ret = {}
     for checksum in checksums:
         if checksum in tree:
@@ -796,6 +812,297 @@ def check_nonexistent_cve_blob_ids(tree):
 #### End of CVE finding routines ####
 ############################################################
 
+def wget_url(url, destdir, destpath=''):
+    """
+    run wget to download a file from url
+    :param url: the URL to download file
+    :param destdir: the destination directory to store the downloaded file
+    :param destpath: the destination file name or path
+    returns the downloaded file path
+    """
+    #cmd = "wget " + url + " -P " + destdir + " || true"
+    #get_shell_cmd_output(cmd)
+    if destpath:
+        cmds = ['wget', url, '-O', destpath, '--no-check-certificate']
+    else:
+        cmds = ['wget', url, '-P', destdir, '--no-check-certificate']
+        basename = os.path.basename(url)
+        if not basename:
+            basename = "index.html"
+        destpath = os.path.join(destdir, basename)
+    retcode = subprocess.run(cmds, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+    verbose("retcode: " + str(retcode) + " when downloading URL " + url, LEVEL_4)
+    if retcode != 0:
+        return ''
+    return destpath
+
+
+# the SoftwareHeritage URL to download a raw blob file is like below:
+# https://archive.softwareheritage.org/browse/content/sha1_git:4c376c5b31f5c4ec4c7afb3bbef06fa5ceba4a92/raw/
+
+def download_blob_from_software_heritage(blob, destdir):
+    """
+    download a file for a blob ID from SoftwareHeritage archive website.
+    :param blob: the blob ID to query and download from SoftwareHeritage
+    :param destdir: the destination directory to save the downloaded file
+    returns the downloaded file path
+    """
+    url = "https://archive.softwareheritage.org/browse/content/sha1_git:" + blob + "/raw/"
+    return wget_url(url, destdir, os.path.join(destdir, blob))
+
+
+def download_blobs_from_software_heritage(blobs, destdir):
+    """
+    download files for a list of blob IDs from SoftwareHeritage archive website.
+    :param blobs: the blob ID to query and download from SoftwareHeritage
+    :param destdir: the destination directory to save the downloaded files
+    returns the number of successfully downloaded files
+    """
+    ret = {}
+    if not blobs:
+        return ret
+    if not os.path.exists(destdir):
+        os.system("mkdir -p " + destdir)
+    verbose("Downloading " + str(len(blobs)) + " blobs from SoftwareHeritage to dir: " + destdir, LEVEL_2)
+    for blob in blobs:
+        afile = download_blob_from_software_heritage(blob, destdir)
+        if afile:
+            ret[blob] = afile
+    verbose("Downloaded " + str(len(ret)) + " blobs from SoftwareHeritage to dir: " + destdir, LEVEL_2)
+    return ret
+
+
+def download_tree_blobs_from_software_heritage(tree, destdir):
+    """
+    download files for a gitBOM tree from SoftwareHeritage archive website.
+    :param tree: the top level tree node of the gitBOM tree with metadata details
+    :param destdir: the destination directory to save the downloaded files
+    returns the number of successfully downloaded files
+    """
+    blobs = get_all_blobs_in_tree(tree)
+    return download_blobs_from_software_heritage(blobs, destdir)
+
+
+def get_all_blobs_in_tree_internal(tree, blob_set):
+    """
+    Get all unique blob IDs from a gitBOM tree. The node key is checksum_line.
+    :param tree: the top level tree node
+    :param blob_set: the set to update with blobs in the tree
+    """
+    for key, value in tree.items():
+        if key in g_metadata_keys:
+            continue
+        blob_id, bom_id = get_blob_bom_id_from_checksum_line(key)
+        blob_set.add(blob_id)
+        get_all_blobs_in_tree_internal(value, blob_set)
+
+
+def get_all_blobs_in_tree(tree):
+    """
+    Get all unique blob IDs from a gitBOM tree. The node key is checksum_line.
+    :param tree: the top level tree node of the gitBOM tree
+    returns a list of blob IDs
+    """
+    blob_set = set()
+    get_all_blobs_in_tree_internal(tree, blob_set)
+    return blob_set
+
+
+def cve_check_rule_for_files(blobs, afiles, rules):
+    """
+    Check CVE rules for a list of files.
+    :param blobs: dict of {blob => (git_src_file, build_src_file}
+    :param afiles: dict of {blob => downloaded_swh_file}
+    :param rules: the CVE check rules
+    returns the CVE check results
+    """
+    ret = {}
+    for blob in afiles:
+        srcfile = blobs[blob][0]
+        afile = afiles[blob]
+        cve_result = cve_check_rule_for_file(afile, srcfile)
+        has_cve_list, fixed_cve_list = get_cvelists_for_cve_result(cve_result)
+        ret[blob] = { "file_path": srcfile,
+                      "cvehints": cve_result,
+                      "cvehint_CVElist": has_cve_list,
+                      "cvehint_FixedCVElist": fixed_cve_list}
+    return ret
+
+
+def update_hash_tree_with_cve_results(tree, cve_results):
+    """
+    Update hash tree with CVE check results
+    :param tree: the top level tree node of the gitBOM tree with metadata details
+    :param cve_results: the CVE check results
+    update the relevant nodes of the tree with the CVE check results
+    """
+    for key, value in tree.items():
+        if key in g_metadata_keys:
+            continue
+        update_hash_tree_with_cve_results(value, cve_results)
+        blob_id, bom_id = get_blob_bom_id_from_checksum_line(key)
+        if blob_id not in cve_results:
+            continue
+        cve_result = cve_results[blob_id]
+        for field in ("cvehints", "cvehint_CVElist", "cvehint_FixedCVElist"):
+            if field not in value:
+                value[field] = cve_result[field]
+
+
+############################################################
+#### End of SofwareHeritage routines ####
+############################################################
+
+def read_cve_check_rules(cve_check_dir):
+    """
+    Read cveadd/cvefix files for the CVE check rules.
+    :param cve_check_dir: the directory to store the cveadd/cvefix files.
+    returns a dict with all rules.
+    """
+    ret = {}
+    if not os.path.exists(cve_check_dir):
+        return ret
+    cveadd_file = os.path.join(cve_check_dir, "cveadd")
+    cvefix_file = os.path.join(cve_check_dir, "cvefix")
+    if not (os.path.exists(cveadd_file) and os.path.exists(cvefix_file)):
+        return ret
+    ret["cveadd"] = yaml.safe_load(open(cveadd_file, "r"))
+    ret["cvefix"] = yaml.safe_load(open(cvefix_file, "r"))
+    #print(json.dumps(ret, indent=4, sort_keys=True))
+    return ret
+
+
+def convert_to_srcfile_cve_rules_db(cve_rules_db):
+    """
+    Convert to srcfile DB from the original cve_rules DB.
+    :param cve_rules_db: the original DB read from cve_check_dir files
+    returns a new dict with srcfile as key
+    """
+    ret = {}
+    if not cve_rules_db:
+        return ret
+    for rule_type in ("cveadd", "cvefix"):
+        cve_rules = cve_rules_db[rule_type]
+        update_srcfile_cve_rules_db(ret, cve_rules, rule_type)
+    #print(json.dumps(ret, indent=4, sort_keys=True))
+    return ret
+
+
+def update_srcfile_cve_rules_db(srcfile_db, cve_rules, rule_type):
+    """
+    Update the srcfile CVE rules DB, from the cve_rules DB with cve as key.
+    :param srcfile_db: cve_rules db to update, with src_file as key
+    :param cve_rules: cve_rules db, with cve as key
+    :param rule_type: cveadd or cvefix
+    """
+    for cve in cve_rules:
+        cve_file_rules = cve_rules[cve]
+        for afile in cve_file_rules:
+            afile_rule_value = cve_file_rules[afile]
+            if afile in srcfile_db:
+                srcfile_rules = srcfile_db[afile]
+                if cve in srcfile_rules:
+                    srcfile_rules[cve][rule_type] = afile_rule_value
+                else:
+                    srcfile_rules[cve] = {rule_type: afile_rule_value}
+            else:
+                srcfile_db[afile] = {cve: {rule_type: afile_rule_value} }
+
+
+def cve_check_rule(afile, rule, content=''):
+    """
+    Check if a file satisfies a CVE check rule.
+    :param afile: the file to check against the CVE rule
+    :param rule: the CVE rule to check
+    returns True if the rule is satisfied, otherwise, False
+    """
+    if not content:
+        content = read_text_file(afile)
+    includes = []
+    if "include" in rule:
+        includes = rule["include"]
+    for string in includes:
+        verbose("CVE checking include string: " + string, LEVEL_3)
+        if string not in content:
+            return False
+    excludes = []
+    if "exclude" in rule:
+        includes = rule["exclude"]
+    for string in excludes:
+        verbose("CVE checking exclude string: " + string, LEVEL_3)
+        if string in content:
+            return False
+    return True
+
+
+def cve_check_rules(afile, rules, content=''):
+    ret = {}
+    if not content:
+        content = read_text_file(afile)
+    for rule_type in ("cveadd", "cvefix"):
+        if rule_type not in rules:
+            continue
+        verbose("Checking " + rule_type + " for source file: " + afile, LEVEL_3)
+        rule = rules[rule_type]
+        ret[rule_type] = cve_check_rule(afile, rule, content)
+    return ret
+
+
+def get_cve_check_source_file(afile, src_files):
+    """
+    Get the CVE check src_file for a file.
+    :param afile: the file to check
+    :param src_files: a dict with src_file as key
+    """
+    for src_file in src_files:
+        if afile.endswith(src_file):
+            return src_file
+    return ''
+
+
+def get_cvelists_for_cve_result(cve_result):
+    """
+    Get (has_cve_list, fixed_cve_list) for CVE check result
+    :param cve_result: the CVE check result, a dict
+    """
+    has_cve_list = []
+    fixed_cve_list = []
+    for cve in cve_result:
+        result = cve_result[cve]
+        if "cvefix" in result and result["cvefix"]:
+            fixed_cve_list.append(cve)
+        elif "cveadd" in result and result["cveadd"]:
+            has_cve_list.append(cve)
+    return (has_cve_list, fixed_cve_list)
+
+
+def cve_check_rule_for_file(afile, src_file=''):
+    """
+    Check the CVE rule for a file and return a string for the CVE result
+    :param afile: the file to check against the CVE rules
+    :param src_file: the git src file for the git blob
+    returns a dict keyed with CVE ID
+    """
+    ret = {}
+    if not src_file:
+        src_file = get_cve_check_source_file(afile, g_cve_check_rules)
+    if not src_file:
+        return ''
+    content = read_text_file(afile)
+    cve_rules = g_cve_check_rules[src_file]
+    for cve in cve_rules:
+        cve_rule = cve_rules[cve]
+        verbose("Checking " + cve + " for source file: " + afile, LEVEL_3)
+        ret[cve] = cve_check_rules(afile, cve_rule, content)
+    verbose("cve check result for file: " + afile, LEVEL_3)
+    verbose(json.dumps(ret, indent=4, sort_keys=True), LEVEL_3)
+    return ret
+
+
+############################################################
+#### End of CVE check rules handling routines ####
+############################################################
+
 
 def rtd_parse_options():
     """
@@ -826,6 +1133,10 @@ def rtd_parse_options():
                     help = "tmp directory, which is /tmp by default")
     parser.add_argument('-j', '--jsonfile',
                     help = "the output JSON file for the search result")
+    parser.add_argument('--cve_check_dir',
+                    help = "the directory to store all CVE checking rules files")
+    parser.add_argument("--software_heritage_save_dir",
+                    help = "the directory to save the source files if they exist in SoftwareHeritage")
     parser.add_argument("-v", "--verbose",
                     action = "count",
                     default = 0,

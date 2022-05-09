@@ -1182,9 +1182,9 @@ def is_git_repo(git_dir=''):
     """
     cmds = ['git', 'status']
     if git_dir:
-        ret = subprocess.run(cmds, cwd=git_dir).returncode
+        ret = subprocess.run(cmds, cwd=git_dir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
     else:
-        ret = subprocess.run(cmds).returncode
+        ret = subprocess.run(cmds, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
     return ret == 0
 
 
@@ -1196,7 +1196,7 @@ def is_ancestor_commit(commit1, commit2):
     returns True if commit is ancestor of commit2, otherwise, False
     """
     cmds = ['git', 'merge-base', '--is-ancestor', commit1, commit2]
-    return subprocess.run(cmds).returncode == 0
+    return subprocess.run(cmds, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 
 
 def which_branches_contain_commit(commit_id):
@@ -1587,7 +1587,7 @@ def wget_url(url, destdir):
     #cmd = "wget " + url + " -P " + destdir + " || true"
     #get_shell_cmd_output(cmd)
     cmds = ['wget', url, '-P', destdir, '--no-check-certificate']
-    if subprocess.run(cmds).returncode != 0:
+    if subprocess.run(cmds, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
         return ''
     return afile
 
