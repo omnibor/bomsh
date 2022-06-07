@@ -46,9 +46,19 @@ LEVEL_3 = 3
 LEVEL_4 = 4
 
 args = None
+# CVE DB with checksum (blob_id) as key, containing various metadata like file_path/CVElist/FixedCVElist, etc.
 g_cvedb = None
+
+# hash-tree DB with checksum (blob_id) as key, "hash_tree" is also a list of checksums (blob_ids)
 g_checksum_db = None
+
+# hash-tree DB with bom_id as key, "hash_tree" is a list of checksum_line "blob XX bom YY"
+g_bomid_db = None
+
+# metadata DB with checksum (blob_id) as key, containing various metadata like file_path/build_cmd/CVElist, etc.
 g_metadata_db = None
+
+# CVE checking rules DB with src_file as key, with value of {cve: {rule_type: afile_rule_value} }
 g_cve_check_rules = None
 
 g_tmpdir = "/tmp"
@@ -258,9 +268,9 @@ def get_embedded_bom_id_of_elf_file(afile):
     result = []
     for line in lines:
         tokens = line.strip().split()
-        if len(tokens) > 5 and tokens[0] == "0x00000000":
+        if len(tokens) > 5 and tokens[0][:2] == "0x":
             result.extend( (tokens[1], tokens[2], tokens[3], tokens[4]) )
-        elif len(tokens) > 2 and tokens[0] == "0x00000010":
+        elif len(tokens) > 2 and tokens[0][:2] == "0x":
             result.append(tokens[1])
             break
     return ''.join(result)
@@ -282,6 +292,8 @@ def get_embedded_bom_id(afile):
 
 # the file blob checksum (blob_id) => gitBOM doc (bom_id) mapping cache DB.
 g_gitbom_doc_db = {}
+# the gitBOM doc bom_id => gitBOM doc file path mapping cache DB. Needed when gitBOM docs are stored in multiple .gitbom/objects/ directories.
+g_gitbom_docfile_db = {}
 
 def create_gitbom_node_of_blob_id(afile):
     '''
@@ -344,6 +356,33 @@ def get_node_id_from_checksum_line(checksum_line):
     return checksum_line.strip()
 
 
+def get_all_gitbom_doc_files_in_dir(topdir, is_topdir=True):
+    '''
+    Get all the gitBOM doc files stored in a directory, which contains multiple .gitbom/objects directories.
+    :param topdir: the top directory to store all gitBOM docs
+    :param is_topdir: is it the top directory?
+    returns a dict of {bomid => gitBOM doc file}
+    '''
+    hexchar = "[0-9a-f]"
+    topdir_abspath = os.path.abspath(topdir)
+    if is_topdir:
+        #cmd = 'find ' + topdir_abspath + ' -path "*.gitbom/objects/[0-9a-f][0-9a-f]/*" -type f || true'
+        cmd = 'find ' + topdir_abspath + ' -name "' + hexchar * 38 + '" -path "*.gitbom/objects/[0-9a-f][0-9a-f]/*" -type f || true'
+    else:
+        cmd = 'find ' + topdir_abspath + ' -name "' + hexchar * 38 + '" -path "*/objects/[0-9a-f][0-9a-f]/*" -type f || true'
+    verbose(cmd, LEVEL_3)
+    output = get_shell_cmd_output(cmd)
+    ret = {}
+    if not output:
+        return ret
+    lines = output.splitlines()
+    for line in lines:
+        tokens = line.split("/")
+        bomid = tokens[-2] + tokens[-1]
+        ret[bomid] = line
+    return ret
+
+
 def get_all_gitbom_doc_files(object_bomdir):
     '''
     Get all the gitBOM doc files stored in object_bomdir
@@ -373,7 +412,9 @@ def create_gitbom_doc_treedb(object_bomdir, use_checksum_line=True):
     treedb = {}
     if not os.path.isdir(object_bomdir):
         return treedb
-    for afile, ahash in get_all_gitbom_doc_files(object_bomdir):
+    # g_gitbom_docfile_db should have been created
+    for ahash in g_gitbom_docfile_db:
+        afile = g_gitbom_docfile_db[ahash]
         if use_checksum_line:
             node = create_gitbom_node_of_checksum_line(afile)
         else:
@@ -429,16 +470,18 @@ def update_gitbom_doc_treedb_for_checksum_line(object_bomdir, checksum, bom_id, 
     :param checksum: the git checksum (blob_id) of the file that is associated with bom_id
     :param bom_id: a single bom_id that is embedded in binary file
     :param treedb: the dict to update with bom_id as key
-    returns a dict with bom_id as key (if no bom_id, then use checksum (blob_id) as key)
+    #returns nothing, the treedb parameter is updated
     '''
     if bom_id in treedb:
-        return treedb
-    afile = os.path.join(object_bomdir, bom_id[:2], bom_id[2:])
+        return
+    if bom_id not in g_gitbom_docfile_db:
+        return
+    afile = g_gitbom_docfile_db[bom_id]
     if not os.path.exists(afile):
-        return treedb
+        return
     node = create_gitbom_node_of_checksum_line(afile)
     if not node:
-        return treedb
+        return
     # Use bom_id (not blob_id) as key for treedb.
     # CVEs are usually associated with leaf nodes only, so this should still work
     treedb[bom_id] = {"hash_tree": node}
@@ -446,7 +489,6 @@ def update_gitbom_doc_treedb_for_checksum_line(object_bomdir, checksum, bom_id, 
         blobid, bomid = get_blob_bom_id_from_checksum_line(line)
         if bomid:
             update_gitbom_doc_treedb_for_checksum_line(object_bomdir, blobid, bomid, treedb)
-    return treedb
 
 
 def create_gitbom_doc_treedb_for_files(bomdir, afiles, use_checksum_line=True):
@@ -546,7 +588,11 @@ def create_hash_tree_for_checksum(checksum, ancestors, checksum_db, checksum_lin
             if file_path:
                 entry["file_path"] = file_path
         for which_list in ("file_path", "build_cmd"):
-            if not g_metadata_db or which_list in entry:
+            if which_list in entry:
+                continue
+            metadata = get_metadata_for_checksum_from_db(g_cvedb, checksum, which_list)
+            if metadata:
+                entry[which_list] = metadata
                 continue
             metadata = get_metadata_for_checksum_from_db(g_metadata_db, checksum, which_list)
             if metadata:
@@ -631,12 +677,15 @@ def collect_cve_list_from_hash_tree(tree_db, which_list):
     return list(set(ret))
 
 
-def find_cve_lists_for_checksums(checksums):
+def find_cve_lists_for_checksums(checksums, is_bom_id=False):
     '''
     find all the CVEs for a list of checksums.
     :param checksums: the list of checksums to find CVEs
     '''
-    tree = create_hash_tree_for_checksums(checksums, g_checksum_db)
+    if is_bom_id:
+        tree = create_hash_tree_for_checksums(checksums, g_bomid_db)
+    else:
+        tree = create_hash_tree_for_checksums(checksums, g_checksum_db)
     if g_jsonfile and args.verbose > 1:
         save_json_db(g_jsonfile + "-details.json", tree)
     if args.software_heritage_save_dir:
@@ -683,7 +732,7 @@ def find_cve_lists_for_files(afiles):
             file_checksums[afile] = checksum
         else:
             file_checksums[afile] = 'FILE_NOT_EXIST'
-    result = find_cve_lists_for_checksums(checksums)
+    result = find_cve_lists_for_checksums(checksums, g_bomid_db)
     for afile in file_checksums:
         checksum = file_checksums[afile]
         if checksum == 'FILE_NOT_EXIST':
@@ -863,7 +912,7 @@ def download_blobs_from_software_heritage(blobs, destdir):
         return ret
     if not os.path.exists(destdir):
         os.system("mkdir -p " + destdir)
-    verbose("Downloading " + str(len(blobs)) + " blobs from SoftwareHeritage to dir: " + destdir, LEVEL_2)
+    verbose("Trying to download " + str(len(blobs)) + " blobs from SoftwareHeritage to dir: " + destdir, LEVEL_2)
     for blob in blobs:
         afile = download_blob_from_software_heritage(blob, destdir)
         if afile:
@@ -1022,15 +1071,25 @@ def cve_check_rule(afile, rule, content=''):
     if "include" in rule:
         includes = rule["include"]
     for string in includes:
-        verbose("CVE checking include string: " + string, LEVEL_3)
-        if string not in content:
+        verbose("CVE checking include string: " + str(string), LEVEL_3)
+        if isinstance(string, dict):
+            for key in string:
+                strings = [key,] + string[key]
+                if not any_string_in_content(strings, content):
+                    return False
+        elif string not in content:
             return False
     excludes = []
     if "exclude" in rule:
-        includes = rule["exclude"]
+        excludes = rule["exclude"]
     for string in excludes:
-        verbose("CVE checking exclude string: " + string, LEVEL_3)
-        if string in content:
+        verbose("CVE checking exclude string: " + str(string), LEVEL_3)
+        if isinstance(string, dict):
+            for key in string:
+                strings = [key,] + string[key]
+                if any_string_in_content(strings, content):
+                    return False
+        elif string in content:
             return False
     return True
 
@@ -1117,8 +1176,10 @@ def rtd_parse_options():
                     help = "the CVE database file, with git blob ID to CVE mappings")
     parser.add_argument('-r', '--raw_checksums_file',
                     help = "the raw checksum database file generated by bomsh_hook or bomsh_create_bom script")
-    parser.add_argument('-b', '--bom_dir',
-                    help = "the directory to store the generated gitBOM doc files")
+    parser.add_argument('-b', '--bom_topdir',
+                    help = "the top directory which usually contains multiple subdirs to store the generated gitBOM doc files")
+    parser.add_argument('--bom_dir',
+                    help = "the single directory to store the generated gitBOM doc files")
     parser.add_argument('-e', '--cve_list_to_search',
                     help = "the comma-separated CVE list to search vulnerable git blob IDs")
     parser.add_argument('-c', '--checksums_to_search_cve',
@@ -1146,9 +1207,9 @@ def rtd_parse_options():
     # Parse the command line arguments
     args = parser.parse_args()
 
-    if not (args.cve_db_file and (args.raw_checksums_file or args.bom_dir)):
+    if not (args.cve_db_file and (args.raw_checksums_file or args.bom_dir or args.bom_topdir)):
         print ("Please specify the CVE database file with -d option!")
-        print ("Please specify the BOMSH raw checksum database file with -r option or the gitBOM directory with -b option!")
+        print ("Please specify the BOMSH raw checksum database file with -r option or the gitBOM directory with -b or --bom_topdir option!")
         print ("")
         parser.print_help()
         sys.exit()
@@ -1186,18 +1247,25 @@ def main():
     global g_checksum_db
     if args.raw_checksums_file:
         g_checksum_db = load_json_db(args.raw_checksums_file)
-    elif args.bom_dir:
-        object_bomdir = os.path.join(args.bom_dir, "objects")
-        if not os.path.exists(object_bomdir):
-            print("Warning: gitBOM objects directory does not exist.")
-            g_checksum_db = {}
+    elif args.bom_dir or args.bom_topdir:
+        global g_bomid_db
+        global g_gitbom_docfile_db
+        if args.bom_topdir:
+            bom_dir = args.bom_topdir
+            g_gitbom_docfile_db = get_all_gitbom_doc_files_in_dir(bom_dir)
         else:
-            if args.files_to_search_cve:
-                g_checksum_db = create_gitbom_doc_treedb_for_files(args.bom_dir, args.files_to_search_cve.split(","))
-            else:
-                g_checksum_db = create_gitbom_doc_treedb(object_bomdir)
+            bom_dir = args.bom_dir
+            g_gitbom_docfile_db = get_all_gitbom_doc_files_in_dir(bom_dir, False)
+        if args.files_to_search_cve:
+            g_bomid_db = create_gitbom_doc_treedb_for_files(bom_dir, args.files_to_search_cve.split(","))
+        else:
+            g_bomid_db = create_gitbom_doc_treedb(bom_dir)
     if args.verbose > 2:
-        save_json_db(g_jsonfile + "-treedb.json", g_checksum_db)
+        if g_bomid_db:
+            save_json_db(g_jsonfile + "-treedb.json", g_bomid_db)
+        else:
+            save_json_db(g_jsonfile + "-treedb.json", g_checksum_db)
+        save_json_db(g_jsonfile + "-bomdocdb.json", g_gitbom_docfile_db)
 
     cve_result = {}
     if args.files_to_search_cve:
@@ -1205,13 +1273,13 @@ def main():
         cve_result = find_cve_lists_for_files(afiles)
     elif args.checksums_to_search_cve:
         checksums = args.checksums_to_search_cve.split(",")
-        cve_result = find_cve_lists_for_checksums(checksums)
+        cve_result = find_cve_lists_for_checksums(checksums, g_bomid_db)
     elif args.cve_list_to_search:
         cves = args.cve_list_to_search.split(",")
         cve_result = find_vulnerable_blob_ids_for_cves(cves, g_cvedb)
     elif args.gitbom_ids_to_search_cve:
         bom_ids = args.gitbom_ids_to_search_cve.split(",")
-        cve_result = find_cve_lists_for_checksums(bom_ids)
+        cve_result = find_cve_lists_for_checksums(bom_ids, g_bomid_db)
     else:
         print("Did you forget providing files to search?")
         print("Try -c/-f/-g option.")

@@ -1466,15 +1466,25 @@ def cve_check_rule(afile, rule, content=''):
     if "include" in rule:
         includes = rule["include"]
     for string in includes:
-        verbose("CVE checking include string: " + string, LEVEL_3)
-        if string not in content:
+        verbose("CVE checking include string: " + str(string), LEVEL_3)
+        if isinstance(string, dict):
+            for key in string:
+                strings = [key,] + string[key]
+                if not any_string_in_content(strings, content):
+                    return False
+        elif string not in content:
             return False
     excludes = []
     if "exclude" in rule:
-        includes = rule["exclude"]
+        excludes = rule["exclude"]
     for string in excludes:
-        verbose("CVE checking exclude string: " + string, LEVEL_3)
-        if string in content:
+        verbose("CVE checking exclude string: " + str(string), LEVEL_3)
+        if isinstance(string, dict):
+            for key in string:
+                strings = [key,] + string[key]
+                if any_string_in_content(strings, content):
+                    return False
+        elif string in content:
             return False
     return True
 
