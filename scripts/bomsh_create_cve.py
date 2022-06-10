@@ -61,6 +61,7 @@ g_cvedb_srcfiles = set()
 g_extra_cvedb = {}
 g_baseline_srcfile_cvedb = {}
 g_cve_check_rules = None
+g_cverule_verify_db = {}
 g_gitdir = ""
 
 g_hobbled_tarball_name = ''
@@ -1236,6 +1237,43 @@ def get_all_cve_relevant_blobs(git_dir=''):
     return ret
 
 
+def get_cve_check_result_for_git_blob(afile, blob):
+    """
+    Get CVE check result for a git blob
+    :param afile: src_file in g_cve_check_rules
+    :param blob: the blob ID for afile
+    returns a dict with file_path/cvehints/cve_hint_CVElist/cvehint_FixedCVElist as keys
+    """
+    cve_result = cve_check_rule_for_git_blob(afile, blob)
+    has_cve_list, fixed_cve_list = get_cvelists_for_cve_result(cve_result)
+    return { "file_path": afile,
+             "cvehints": cve_result,
+             "cvehint_CVElist": has_cve_list,
+             "cvehint_FixedCVElist": fixed_cve_list}
+
+
+# The below specifies which CVE-result list to verify for CVE checking rules
+g_cvehint_matched_list = { "cvehint_CVElist":"CVElist" }
+
+def verify_cve_check_result(cvedb_result, cve_check_result):
+    """
+    Verify CVE check result for a git blob against its CVEDB result obtained from git commit cveinfo.
+    :param cvedb_result: the CVE result in CVE_DB which is obtained from git commit cveinfo
+    :param cve_check_result: the CVE check result using rules against the git blob
+    returns True when the two results match, False otherwise
+    """
+    for cvehint_list in g_cvehint_matched_list:
+        cvedb_list = g_cvehint_matched_list[cvehint_list]
+        if cvedb_list in cvedb_result:
+            if set(cvedb_result[cvedb_list]) != set(cve_check_result[cvehint_list]):
+                verbose("Warning: cve check result differs from cvedb result!", LEVEL_2)
+                return False
+        elif cve_check_result[cvehint_list]:
+                verbose("Warning: cve check result differs from cvedb result!", LEVEL_2)
+                return False
+    return True
+
+
 def create_cve_extra_blobs_db(cve_checksum_db):
     """
     Create CVE DB for the additional relevant blobs in git repo that do not exist in cve_checksum_db.
@@ -1250,6 +1288,12 @@ def create_cve_extra_blobs_db(cve_checksum_db):
         blobs = blobs_db[afile]
         for blob in blobs:
             if blob in cve_checksum_db:
+                if args.verify_cve_rules:
+                    cve_result = get_cve_check_result_for_git_blob(afile, blob)
+                    verify_ok = verify_cve_check_result(cve_checksum_db[blob], cve_result)
+                    if not verify_ok:
+                        verbose("Warning: blob: " + blob + " src_file: " + afile + " cvedb_result: " + str(cve_checksum_db[blob]) + " cve_check_result: " + str(cve_result))
+                        g_cverule_verify_db[blob] = { "cvedb_result": cve_checksum_db[blob], "cve_check_result": cve_result }
                 continue
             cve_result = cve_check_rule_for_git_blob(afile, blob)
             has_cve_list, fixed_cve_list = get_cvelists_for_cve_result(cve_result)
@@ -1455,6 +1499,18 @@ def update_srcfile_cve_rules_db(srcfile_db, cve_rules, rule_type):
                 srcfile_db[afile] = {cve: {rule_type: afile_rule_value} }
 
 
+def any_string_in_content(strings, content):
+    """
+    :param strings: a list of strings to search
+    :param content: a long string, read from source file
+    return True if any string is found, otherwise False
+    """
+    for string in strings:
+        if string in content:
+            return True
+    return False
+
+
 def cve_check_rule(afile, rule, content=''):
     """
     Check if a file satisfies a CVE check rule.
@@ -1468,15 +1524,25 @@ def cve_check_rule(afile, rule, content=''):
     if "include" in rule:
         includes = rule["include"]
     for string in includes:
-        verbose("CVE checking include string: " + string, LEVEL_3)
-        if string not in content:
+        verbose("CVE checking include string: " + str(string), LEVEL_3)
+        if isinstance(string, dict):
+            for key in string:
+                strings = [key,] + string[key]
+                if not any_string_in_content(strings, content):
+                    return False
+        elif string not in content:
             return False
     excludes = []
     if "exclude" in rule:
-        includes = rule["exclude"]
+        excludes = rule["exclude"]
     for string in excludes:
-        verbose("CVE checking exclude string: " + string, LEVEL_3)
-        if string in content:
+        verbose("CVE checking exclude string: " + str(string), LEVEL_3)
+        if isinstance(string, dict):
+            for key in string:
+                strings = [key,] + string[key]
+                if any_string_in_content(strings, content):
+                    return False
+        elif string in content:
             return False
     return True
 
@@ -1939,6 +2005,12 @@ def rtd_parse_options():
                     help = "the directory to store all CVE checking rules files")
     parser.add_argument('--branches',
                     help = "a comma-separated git branches")
+    parser.add_argument("--verify_cve_rules",
+                    action = "store_true",
+                    help = "verify if CVE rules check results match cveinfo results")
+    parser.add_argument("--verify_fixed_cvelist",
+                    action = "store_true",
+                    help = "also verify the CVE rules check results for FixedCVElist")
     parser.add_argument("--use_git_tags",
                     action = "store_true",
                     help = "Use git tags for CVE info")
@@ -2006,12 +2078,17 @@ def rtd_parse_options():
             parser.print_help()
             sys.exit()
         g_cve_check_rules = convert_to_srcfile_cve_rules_db(read_cve_check_rules(args.cve_check_dir))
-        #print(json.dumps(g_cve_check_rules, indent=4, sort_keys=True))
+        verbose(json.dumps(g_cve_check_rules, indent=4, sort_keys=True), LEVEL_3)
         if not g_cve_check_rules:
             print("The provided cve_check_dir does not contain valid cveadd/cvefix rules files!")
             print ("")
             parser.print_help()
             sys.exit()
+        if args.verbose > 1:
+            save_json_db(g_jsonfile + "-cve-check-rules.json", g_cve_check_rules)
+        if args.verify_fixed_cvelist:
+            global g_cvehint_matched_list
+            g_cvehint_matched_list = { "cvehint_CVElist":"CVElist", "cvehint_FixedCVElist": "FixedCVElist" }
     if args.gen_extra_cvedb and not (g_cvedb and args.cve_check_dir):
         print("Please specify CVE database and CVE check rules directory!")
         print ("")
@@ -2064,9 +2141,17 @@ def main():
         cve_checksum_db = convert_cve_commit_db_to_blob_db(cve_blobs)
         if args.cve_check_dir:
             cve_extra_blobs_db = create_cve_extra_blobs_db(cve_checksum_db)
+            print("=== There are " + str(len(cve_extra_blobs_db)) + " extra blobs")
             cve_checksum_db.update(cve_extra_blobs_db)
             save_json_db(g_jsonfile + "-extrablobs.json", cve_extra_blobs_db)
+            if args.verify_cve_rules:
+                if g_cverule_verify_db:
+                    save_json_db(g_jsonfile + "-cverule-verify.json", g_cverule_verify_db)
+                    print("=== The CVE check rules fail to verify: there are " + str(len(g_cverule_verify_db)) + " blobs whose CVElists do not match the CVEDB based on git commits.")
+                else:
+                    print("=== The CVE check rules pass verification: all the CVElists match the CVEDB based on git commits.")
         save_json_db(g_jsonfile, cve_checksum_db)
+        print("=== There are " + str(len(cve_checksum_db)) + " blobs in the created CVE database.")
         return
 
     if args.range_of_vulnerable_cve:

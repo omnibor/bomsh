@@ -475,6 +475,8 @@ def update_hash_tree_db_and_gitbom(db, record):
         return
     checksum, outfile = record["outfile"]
     verbose("\n=== Update treedb and gitBOM for checksum: " + checksum + " outfile: " + outfile, LEVEL_0)
+    if not checksum and outfile:  # for llvm-gitbom generated .metadata files, which have empty checksum for outfile
+        checksum = outfile
     if not checksum:
         verbose("Warning: empty checksum for outfile " + outfile + ", skipping hash tree and gitBOM doc update")
         return
