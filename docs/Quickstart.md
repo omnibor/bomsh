@@ -8,12 +8,12 @@
 - `head`
 - `xxd`
 
-For generating non-java boms:
+For generating C, Rust, and Go gitoids:
 - `ar`
 - `readelf`
 - `objcopy`
 
-For generating java boms:
+For generating Java gitoids:
 - Java
 - `zip`
 - `diff`
@@ -30,7 +30,7 @@ docker run -it --rm -v ${PWD}:/out bomsh
 
 ## Generate GitBOM Docs
 
-For C, Rust, and Go
+For C, Rust, and Go:
 
 ```bash
 bomtrace2 <build command>
@@ -38,7 +38,7 @@ bomtrace2 <build command>
 python3 bomsh_create_bom.py -r /tmp/bomsh_hook_raw_logfile -j treedb.json
 ```
 
-For Java
+For Java:
 
 ```bash
 # Generates the GitBOM metadata in treedb.json
