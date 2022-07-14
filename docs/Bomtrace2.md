@@ -1,14 +1,8 @@
 # Bomtrace2
 
-Bomtrace2 is version 2 of Bomtrace.
-Bomtrace2 improves performance over Bomtrace, has more command options/features, is more flexible and extensible, more tested for bugfixes, and more preferred to use than Bomtrace.
-Do the following to generate gitBOM docs for the HelloWorld program with Bomtrace2.
+Bomtrace2 uses the `strace` command to watch which programs are executed during a software build to find and record the input files, generating a GitBOM [artifact tree](https://gitbom.dev/glossary/artifact_tree/).
 
-```bash
-bomtrace2 <build command>
-# Generates the GitBOM metadata in the bomdir directory
-python3 bomsh_create_bom.py -r /tmp/bomsh_hook_raw_logfile -b bomdir
-```
+An example for generating an artifact tree for a C program, such as the HelloWorld program in `src`, is to run `bomtrace2 make`.
 
 Bomtrace2 works together with the `bomsh_hook2.py` script to record the raw info necessary to generate GitBOM docs. The raw info is recorded in `/tmp/bomsh_hook_raw_logfile` by default unless overriden with the `-r` option. For each process involved in building a complete program, the script records the checksums of the parsed input/output files and the shell command used to build the output file. An example for the HelloWorld program is:
 
@@ -37,7 +31,9 @@ The `-w watched_programs_file` argument is used to tell bomtrace2 to only record
 - An exact line of "---"
 - List of pre-exec mode only programs
 - An exact line of "==="
-- List of programs that can be detached upon execve syscall
+- List of ignored programs (`strace` will detach when executed)
 
-Lines starting with `#` are ignored. An example watched programs file is in `bin/bomtrace_watched_programs`
+Lines starting with `#` are ignored. An example watched programs file is in `bin/bomtrace_watched_programs`.
+
+Some programs, such as `./configure`, do not process additional input source files. Adding those programs to the ignored programs list can result in performance benefits.
 
