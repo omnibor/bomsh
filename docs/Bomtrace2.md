@@ -25,9 +25,13 @@ build_cmd: gcc -c -o hello.o hello.c
 
 After the software build is done, the `bomsh_create_bom.py` script is used to read the raw logfile, generate the hash tree, and create the GitBOM docs. The hash tree database is saved in `/tmp/bomsh_createbom_jsonfile` by default.
 
+## Config
+
+The `-c config_file` argument is used to read configuration options from file. A sample config file with documentation on each option is provided in `bin/bomtrace.conf`.
+
 ## Watched Programs
 
-The `-w watched_programs_file` option is used to tell bomtrace2 to only record commands for a limited set of programs. The watched programs file is formatted like:
+The `-w watched_programs_file` argument is used to tell bomtrace2 to only record commands for a limited set of programs. The watched programs file is formatted like:
 
 - List of watched programs.
 - An exact line of "---"
