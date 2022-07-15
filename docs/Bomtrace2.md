@@ -4,6 +4,8 @@ Bomtrace2 uses the `strace` command to watch which programs are executed during 
 
 An example for generating an artifact tree for a C program, such as the HelloWorld program in `src`, is to run `bomtrace2 make`.
 
+The `/tmp` directory must contain the `bomsh_hook2.py` and `bomsh_create_bom.py` scripts.
+
 Bomtrace2 works together with the `bomsh_hook2.py` script to record the raw info necessary to generate GitBOM docs. The raw info is recorded in `/tmp/bomsh_hook_raw_logfile` by default unless overriden with the `-r` option. For each process involved in building a complete program, the script records the checksums of the parsed input/output files and the shell command used to build the output file. An example for the HelloWorld program is:
 
 ```
@@ -23,13 +25,17 @@ After the software build is done, the `bomsh_create_bom.py` script is used to re
 
 The `-c config_file` argument is used to read configuration options from file. A sample config file with documentation on each option is provided in `bin/bomtrace.conf`.
 
+## Logfile
+
+The `-o logfile` argument overrides the bomtrace logfile. It is `/tmp/bomsh_hook_strace_logfile` by default.
+
 ## Watched Programs
 
 The `-w watched_programs_file` argument is used to tell bomtrace2 to only record commands for a limited set of programs. The watched programs file is formatted like:
 
-- List of watched programs.
+- List of all watched programs
 - An exact line of "---"
-- List of pre-exec mode only programs
+- List of watched programs that overwrite the input file (such as `strip` and `objcopy`)
 - An exact line of "==="
 - List of ignored programs (`strace` will detach when executed)
 
