@@ -33,6 +33,8 @@ docker run -it --rm -v ${PWD}:/out bomsh
 For C, Rust, and Go:
 
 ```bash
+cp scripts/bomsh_hook2.py /tmp
+cp scripts/bomsh_create_bom.py /tmp
 bomtrace2 <build command>
 # Generates the GitBOM metadata in treedb.json
 python3 bomsh_create_bom.py -r /tmp/bomsh_hook_raw_logfile -j treedb.json
