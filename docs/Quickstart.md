@@ -36,14 +36,17 @@ For C, Rust, and Go:
 cp scripts/bomsh_hook2.py /tmp
 cp scripts/bomsh_create_bom.py /tmp
 bomtrace2 <build command>
-# Generates the GitBOM metadata in treedb.json
-python3 bomsh_create_bom.py -r /tmp/bomsh_hook_raw_logfile -j treedb.json
+# Generates the GitBOM metadata in the .gibtom directory
+python3 bomsh_create_bom.py -r /tmp/bomsh_hook_raw_logfile
 ```
 
 For Java:
 
 ```bash
-# Generates the GitBOM metadata in treedb.json
-python3 bomsh_create_bom_java.py -r <root directory of build workspace> -f <list of comma-separated jar files> -j treedb.json
+# Generates the GitBOM metadata in the .gitbom directory
+# and the artifact tree in treedb.json
+python3 bomsh_create_bom_java.py -r <root directory of build workspace> -b .gitbom -j treedb.json
 ```
+
+The root directory of build workspace should contain the `.java` source files, the corresponding `.class` files, and the compiled JARs.
 
