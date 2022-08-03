@@ -1,0 +1,29 @@
+# Bomsh
+
+A collection of tools to explore the [GitBOM](https://gitbom.dev/) idea.
+
+- [Bomtrace2](docs/Bomtrace2.md): Generates GitBOM [artifact trees](https://gitbom.dev/glossary/artifact_tree/) for software during the build process.
+- `bomsh_create_bom.py`: Processes the raw bomtrace2 logs and creates GitBOM docs.
+- `bomsh_create_bom_java.py`: Scans the build workspace and creates GitBOM docs for generated JAR files.
+
+- `bomsh_create_cve.py`: Creates a CVE database by scanning a Git repo.
+- `bomsh_search_cve.py`: Uses the CVE database and GitBOM docs to search for vulnerabilities in software.
+
+## Getting Started
+
+Check the [quickstart guide](docs/Quickstart.md) for instructions on how to use the tool to generate GitBOM docs.
+
+The [CVE search quickstart guide](docs/CVE%20Search%20Quickstart) has instructions on how to generate a CVE database and use it to search for vulnerabilities.
+
+## Notes
+
+This has been tested on Ubuntu20.04/AlmaLinux8/Centos8/RedHat8.
+
+Most of the generated files by the scripts are put in `/tmp` directory by default, except the gitBOM docs are put in `${PWD}/.gitbom` directory. This is configurable. The tmp directory can be changed with the `--tmpdir` option. The gitbom directory can be changed with the `-b`/`--bom_dir` option.
+
+## References
+
+1. Towards a GitBOM Specification : https://hackmd.io/@aeva/draft-gitbom-spec
+
+2. [Bomsh/Bomtrace: Tools to Generate gitBOM Artifact Trees and Search CVE for Software Build](https://docs.google.com/presentation/d/14HuQ2_4kJYkDNumd7w7WgXJTOup0tp-AkCY7jtBNHjg)
+
