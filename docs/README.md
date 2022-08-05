@@ -3,6 +3,7 @@
 A collection of tools to explore the [GitBOM](https://gitbom.dev/) idea.
 
 - [Bomtrace2](docs/Bomtrace2.md): Generates GitBOM [artifact trees](https://gitbom.dev/glossary/artifact_tree/) for software during the build process.
+- [Bombash](docs/Bombash.md) and [Bomtrace](docs/Bomtrace.md): Previous versions of the bomtrace2 tool.
 - `bomsh_create_bom.py`: Processes the raw bomtrace2 logs and creates GitBOM docs.
 - `bomsh_create_bom_java.py`: Scans the build workspace and creates GitBOM docs for generated JAR files.
 
@@ -14,6 +15,8 @@ A collection of tools to explore the [GitBOM](https://gitbom.dev/) idea.
 Check the [quickstart guide](docs/Quickstart.md) for instructions on how to use the tool to generate GitBOM docs.
 
 The [CVE search quickstart guide](docs/CVE%20Search%20Quickstart) has instructions on how to generate a CVE database and use it to search for vulnerabilities.
+
+Sample GitBOM docs for popular Linux binaries are available in the [gitbom-repo](https://github.com/yonhan3/gitbom-repo). Bomsh supports [reproducible builds](docs/Reproducible%20Build.md) of these binaries.
 
 ## Notes
 
