@@ -28,6 +28,8 @@ docker build -t bomsh .devcontainer
 docker run -it --rm -v ${PWD}:/out bomsh
 ```
 
+If needed, there are instructions to directly [compile from source](Compile%20from%20Source.md).
+
 ## Generate GitBOM Docs
 
 For C, Rust, and Go:
