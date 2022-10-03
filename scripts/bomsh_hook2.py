@@ -57,7 +57,7 @@ g_strip_progs = ["/usr/bin/strip", "/usr/bin/eu-strip"]
 # list of binary converting programs of the same file
 g_samefile_converters = ["/usr/bin/ranlib", "./tools/objtool/objtool", "/usr/lib/rpm/debugedit",
                          "./scripts/sortextable", "./scripts/sorttable", "./tools/bpf/resolve_btfids/resolve_btfids"]
-g_embed_bom_after_commands = g_cc_compilers + g_cc_linkers + ["/usr/bin/eu-strip",]
+g_embed_bom_after_commands = g_cc_compilers + g_cc_linkers + ["/usr/bin/eu-strip", "/usr/bin/ar"]
 g_last_embed_outfile_checksum = ''
 # a flag to skip bom-id-embedding for a shell command
 g_not_embed_bom_flag = False
@@ -288,6 +288,21 @@ def save_json_db(db_file, db, indentation=4):
 #### Start of shell command read/parse routines ####
 ############################################################
 
+def get_usr_merged_path(path):
+    """ Convert /bin/gcc to /usr/bin/gcc, due to usrmerge feature
+    """
+    if path[0] != "/":
+        return path
+    tokens = path.split(os.sep)
+    topdir = os.sep.join(tokens[:2])
+    real_topdir = os.path.realpath(topdir)
+    if real_topdir != topdir:
+        newpath = os.path.join(real_topdir, *tokens[2:])
+        verbose("Convert " + path + " to " + newpath + " due to usrmerge", LEVEL_3)
+        return newpath
+    return path
+
+
 '''
 Format of /tmp/bomsh_cmd file, which records shell command info:
 pid: 75627 ppid: 75591 pgid: 73910
@@ -316,7 +331,10 @@ def read_shell_command(shell_cmd_file):
     if lines:
         pwd = lines[0]
     if len(lines) > 1:
-        prog = lines[1]
+        if args.check_usr_merge:
+            prog = get_usr_merged_path(lines[1])  # convert to possible usr-merged real path
+        else:
+            prog = lines[1]
     ret = (pid, pwd, prog, '\n'.join(lines[2:]))
     verbose("cmd_file: " + shell_cmd_file + " return tuple: " + str(ret), LEVEL_2)
     return ret
@@ -1297,8 +1315,8 @@ def embed_bom_after_cmd(prog, pwddir, argv_str, outfile):
     '''
     if not outfile or not os.path.exists(outfile):
         return
-    # Use /tmp/embed_bomdir instead of the default ${PWD}/.gitbom directory as gitBOM repo dir
-    bomdir = os.path.join(g_tmpdir, "embed_bomdir")
+    # Use /tmp/bomsh_hook_embed_bomdir instead of the default ${PWD}/.gitbom directory as gitBOM repo dir
+    bomdir = os.path.join(g_tmpdir, "bomsh_hook_embed_bomdir")
     lseek_lines_file = os.path.join(g_tmpdir, "bomsh_hook_lseek_lines")
     # Invoke the bomsh_create_bom script to generate hash-tree and gitBOM docs
     cmd = g_create_bom_script + ' --embed_bom_section -r ' + cmd_quote(g_raw_logfile) + ' --tmpdir ' + g_tmpdir + ' -b ' + bomdir + ' --lseek_lines_file ' + lseek_lines_file + ' || true'
@@ -1610,6 +1628,9 @@ def rtd_parse_options():
     parser.add_argument("--no_githash_cache_file",
                     action = "store_true",
                     help = "not use a helper cache file to store githash of header files")
+    parser.add_argument("--check_usr_merge",
+                    action = "store_true",
+                    help = "check if usrmerge feature is enabled")
     parser.add_argument("-v", "--verbose",
                     action = "count",
                     default = 0,

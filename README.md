@@ -4,9 +4,10 @@ Table of Contents
 -----------------
 * [Overview](#Overview)
 * [Compile Bombash and Bomtrace from Source](#Compile-Bombash-and-Bomtrace-from-Source)
-* [Generating gitBOM docs with Bomtrace2](#Generating-gitBOM-docs-with-Bomtrace2)
-* [Generating gitBOM docs with Bomtrace](#Generating-gitBOM-docs-with-Bomtrace)
-* [Generating gitBOM docs with Bombash](#Generating-gitBOM-docs-with-Bombash)
+* [Generating gitBOM Docs with Bomtrace2](#Generating-gitBOM-Docs-with-Bomtrace2)
+* [Generating gitBOM Docs with Bomtrace](#Generating-gitBOM-Docs-with-Bomtrace)
+* [Generating gitBOM Docs with Bombash](#Generating-gitBOM-Docs-with-Bombash)
+* [Reducing Storage of Generated gitBOM Docs](#Reducing-Storage-of-Generated-gitBOM-Docs)
 * [Creating CVE Database for Software](#Creating-CVE-Database-for-Software)
 * [Software Vulnerability CVE Search](#Software-Vulnerability-CVE-Search)
 * [Software Vulnerability CVE Search for JAVA Packages](#Software-Vulnerability-CVE-Search-for-JAVA-Packages)
@@ -42,11 +43,11 @@ To compile Bombash/Bomtrace2 from source, do the following steps:
     $ git clone URL-of-this-git-repo bomsh
     $ git clone https://git.savannah.gnu.org/git/bash.git
     $ # or github repo # git clone https://github.com/bminor/bash.git
-    $ cd bash ; patch -p1 < ../bomsh/patches/bombash.patch
+    $ cd bash ; patch -p1 < ../bomsh/.devcontainer/patches/bombash.patch
     $ ./configure ; make ; cp ./bash ../bomsh/bin/bombash
     $ cd ..
     $ git clone https://github.com/strace/strace.git
-    $ cd strace ; patch -p1 < ../bomsh/patches/bomtrace2.patch
+    $ cd strace ; patch -p1 < ../bomsh/.devcontainer/patches/bomtrace2.patch
     $ ./bootstrap ; ./configure ; make
     $ # if configure fails, try add --disable-mpers or --enable-mpers=check
     $ cp src/strace ../bomsh/bin/bomtrace2
@@ -59,7 +60,7 @@ To automatically create the bombash/bomtrace/bomtrace2 binaries run:
 
 And you will find the bombash, bomtrace, and bomtrace2 files have been copied into '.' on your host.
 
-Generating gitBOM docs with Bomtrace2
+Generating gitBOM Docs with Bomtrace2
 -------------------------------------
 
 Bomtrace2 is version 2 of Bomtrace.
@@ -246,7 +247,7 @@ here is the workflow:
 If you just want to capture all the build commands for your software build, you can do similar steps with the "bomtrace2 -c bomtrace.conf make" command.
 Then you check the generated /tmp/bomsh_hook_trace_logfile for a list of recorded shell commands.
 
-Generating gitBOM docs with Bomtrace
+Generating gitBOM Docs with Bomtrace
 ------------------------------------
 
 Do the following to generate gitBOM docs for the HelloWorld program with Bomtrace.
@@ -280,7 +281,7 @@ Do the following to generate gitBOM docs for the RPM or DEB package of OpenOSC w
     $ rpm2cpio ../rpmbuild/RPMS/x86_64/openosc-static-1.0.5-1.el8.x86_64.rpm | cpio -idmv ; cd ..
     $ ../bomsh/scripts/bomsh_search_cve.py -vv -r /tmp/bomsh_hook_jsonfile -d openosc_cvedb.json -f rpm-extractdir/usr/lib64/libopenosc.a,rpm-extractdir/usr/lib64/libopenosc.so.0.0.0
 
-Generating gitBOM docs with Bombash
+Generating gitBOM Docs with Bombash
 -----------------------------------
 
 Do the following to generate gitBOM docs for the HelloWorld program with Bombash.
@@ -510,6 +511,28 @@ If you need to generate gitBOM docs for another software like OpenSSL,
 The bomsh_hook.py script is a Python script, make sure that you have Python3 installed.
 This script is invoked for each recorded shell command under the Bombash shell or with Bomtrace.
 You can play with the bomsh_hook.py script and observe the output changes.
+
+Reducing Storage of Generated gitBOM Docs
+-----------------------------------------
+
+The generated gitBOM documents are usually more than necessary for the final delivery products.
+
+There are many reasons to generate more gitBOM docs than necessary: ./configure script, testing code, build tool preparation, etc.
+The bomsh tool nor the gcc/clang compilers can distinguish these compilations from the normal software build compilations.
+
+To solve this issue, a new option "--copyout_bomdir" has been added to the bomsh_search_cve.py script.
+When this option is specified, the script will build the hash tree for your queried binary files, and will copy
+all the necessary/relevant gitBOM documents to the new copyout_bomdir, while leaving other unnecessary/irrlevant
+gitBOM docs. This way, a truncated set of gitBOM documents are created in the new copyout_bomdir.
+Experiments with Ubuntu kernel build has found that this option can reduce the storage size of gitBOM documents
+by 5 to 6 times. Therefore it is suggested to run this command before saving the gitBOM documents to your reository.
+
+Here is an example for Ubuntu kernel build:
+
+    $ # the below command creates more gitBOM docs than necessary in the default .gitbom directory:
+    $ ./bomsh_create_bom.py -r /tmp/bomsh_hook_raw_logfile -p linux-image-unsigned-5.11.0-1028-aws_5.11.0-1028.31~20.04.1_amd64.deb
+    $ # the below command creates a truncated set of gitBOM docs in the new truncate-bomdir:
+    $ ./bomsh_search_cve.py --bom_dir .gitbom -f linux-image-unsigned-5.11.0-1028-aws_5.11.0-1028.31~20.04.1_amd64.deb --copyout_bomdir truncate-bomdir
 
 Creating CVE Database for Software
 ----------------------------------

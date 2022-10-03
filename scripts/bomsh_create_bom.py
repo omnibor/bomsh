@@ -234,6 +234,8 @@ def create_gitbom_doc_text(infiles, db):
     lines = []
     for ahash in infiles:
         line = "blob " + ahash
+        # if ahash is not in db, should we try to extract the embedded bom_id in the infile? probably NOT, due to impact on performance
+        # plus, this infile may not exist in the file system when this script is run offline later.
         if ahash in db:
             gitbom_hash = db[ahash]
             line += " bom " + gitbom_hash
@@ -350,8 +352,14 @@ def update_hash_tree_node_filepath(db, ahash, afile, cvehint=None):
     :param afile: a file, either input file or output file
     :param cvehint: a tuple of (has_cve_list, fixed_cvelist)
     '''
+    if afile in g_bomdb and ahash not in g_bomdb:
+        # this afile is outfile with empty checksum in previous records, and now it is infile, we assume this afile is never overwritten by a different checksum
+        g_bomdb[ahash] = g_bomdb[afile]
     if ahash not in db:  # not exist, then create this hash entry
-        db[ahash] = {"file_path": afile}
+        if afile in db:  # this afile is outfile with empty checksum in previous records, and now it is infile
+            db[ahash] = db[afile]
+        else:
+            db[ahash] = {"file_path": afile}
     afile_db = db[ahash]
     if afile_db["file_path"] != afile:
         verbose("Warning: checksum " + ahash + " has two file paths: " + afile + " and " + afile_db["file_path"])
@@ -698,11 +706,27 @@ def process_package_files(pkgfiles):
 #### End of shell command read/parse routines ####
 ############################################################
 
+def get_git_file_hash_sha256(afile):
+    '''
+    Get the git object hash value of a file for SHA256 hash type.
+    :param afile: the file to calculate the git hash or digest.
+    '''
+    cmd = 'printf "blob $(wc -c < ' + afile + ')\\0" | cat - ' + afile + ' | sha256sum | head --bytes=-4 || true'
+    #print(cmd)
+    output = get_shell_cmd_output(cmd)
+    #verbose("output of git_hash_sha256:\n" + output, LEVEL_3)
+    if output:
+        return output.strip()
+    return ''
+
+
 def get_git_file_hash(afile):
     '''
     Get the git object hash value of a file.
     :param afile: the file to calculate the git hash or digest.
     '''
+    if args.hashtype and args.hashtype.lower() == "sha256":
+        return get_git_file_hash_sha256(afile)
     cmd = 'git hash-object ' + cmd_quote(afile) + ' || true'
     #print(cmd)
     output = get_shell_cmd_output(cmd)
@@ -767,6 +791,10 @@ def rtd_parse_options():
                     help = "the generated gitBOM artifact tree JSON file")
     parser.add_argument('-p', '--package_files',
                     help = "an extra comma-separated list of RPM/DEB package files to create gitBOM docs")
+    parser.add_argument('--hashtype',
+                    help = "the hash type, like sha1/sha256, the default is sha1")
+    parser.add_argument('--dependency_criteria',
+                    help = "the criteria for dependency, like normal/broad/compact, the default is normal")
     parser.add_argument("-g", "--new_gitbom_doc_for_unary_transform",
                     action = "store_true",
                     help = "generate new gitBOM doc/identifier for single input/output file transform")
