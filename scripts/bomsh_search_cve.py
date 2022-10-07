@@ -25,6 +25,7 @@ December 2021, Yongkui Han
 import argparse
 import sys
 import os
+import shutil
 import subprocess
 import json
 import yaml
@@ -47,7 +48,7 @@ LEVEL_4 = 4
 
 args = None
 # CVE DB with checksum (blob_id) as key, containing various metadata like file_path/CVElist/FixedCVElist, etc.
-g_cvedb = None
+g_cvedb = {}
 
 # hash-tree DB with checksum (blob_id) as key, "hash_tree" is also a list of checksums (blob_ids)
 g_checksum_db = None
@@ -367,6 +368,7 @@ def get_all_gitbom_doc_files_in_dir(topdir, is_topdir=True):
     topdir_abspath = os.path.abspath(topdir)
     if is_topdir:
         #cmd = 'find ' + topdir_abspath + ' -path "*.gitbom/objects/[0-9a-f][0-9a-f]/*" -type f || true'
+        # to interoperate with gitbom-llvm implementation
         cmd = 'find ' + topdir_abspath + ' -name "' + hexchar * 38 + '" -path "*.gitbom/objects/[0-9a-f][0-9a-f]/*" -type f || true'
     else:
         cmd = 'find ' + topdir_abspath + ' -name "' + hexchar * 38 + '" -path "*/objects/[0-9a-f][0-9a-f]/*" -type f || true'
@@ -476,6 +478,7 @@ def update_gitbom_doc_treedb_for_checksum_line(object_bomdir, checksum, bom_id, 
         return
     if bom_id not in g_gitbom_docfile_db:
         return
+    # use g_gitbom_docfile_db to directly get the gitBOM doc file, without using the object_bomdir parameter.
     afile = g_gitbom_docfile_db[bom_id]
     if not os.path.exists(afile):
         return
@@ -497,12 +500,17 @@ def create_gitbom_doc_treedb_for_files(bomdir, afiles, use_checksum_line=True):
     :param bomdir: the gitBOM repo directory to store all gitBOM docs and metadata
     :param afiles: a list of files which contain embedded .bom section
     :param use_checksum_line: a flag to use the full checksum line as node of treedb
-    returns a dict with checksum (blob_id) as key (even if bom_id exists for blob_id)
+    returns a dict with bom_id as key (except for the nodes with is_self_hashtree attribute, which has blob_id as key and is top level node only)
+    ##returns a dict with checksum (blob_id) as key (even if bom_id exists for blob_id)
     '''
     bom_db = {}
     jsonfile = os.path.join(bomdir, "metadata", "bomsh", "bomsh_gitbom_doc_mapping")
     if os.path.exists(jsonfile):
         bom_db = load_json_db(jsonfile)
+    else:
+        jsonfile = os.path.join(bomdir, ".gitbom", "metadata", "bomsh", "bomsh_gitbom_doc_mapping")
+        if os.path.exists(jsonfile):
+            bom_db = load_json_db(jsonfile)
     object_bomdir = os.path.join(bomdir, "objects")
     treedb = {}
     for afile in afiles:
@@ -518,10 +526,13 @@ def create_gitbom_doc_treedb_for_files(bomdir, afiles, use_checksum_line=True):
                 continue
         verbose("blob_id: " + checksum + " bom_id: " + bom_id + " file: " + afile)
         if use_checksum_line:
-            # Add below blob_id to bom_id mapping for convenience
-            treedb[checksum] = {"hash_tree": [bom_id,]}
+            # Add below blob_id to bom_id mapping for convenience, which has the is_self_hashtree attribute to distinguish from regular nodes.
+            checksum_line = "blob " + checksum + " bom " + bom_id
+            treedb[checksum] = {"hash_tree": [checksum_line,], "is_self_hashtree": True}
+            # this treedb will use bom_id as node key, except for the above is_self_hashtree node
             update_gitbom_doc_treedb_for_checksum_line(object_bomdir, checksum, bom_id, treedb)
         else:
+            # this treedb will use blob_id as node key
             update_gitbom_doc_treedb_for_bomid(object_bomdir, checksum, bom_id, treedb)
     return treedb
 
@@ -688,6 +699,19 @@ def find_cve_lists_for_checksums(checksums, is_bom_id=False):
         tree = create_hash_tree_for_checksums(checksums, g_checksum_db)
     if g_jsonfile and args.verbose > 1:
         save_json_db(g_jsonfile + "-details.json", tree)
+    if args.copyout_bomdir:  # Copy out necessary gitBOM docs only and truncated metadata files
+        copy_all_bomdoc_in_tree(tree, args.copyout_bomdir)
+        # Truncate the .gitbom/metadata/bomsh/* files too
+        metadata_dir = ""
+        if args.bom_topdir:
+            metadata_dir = os.path.join(args.bom_topdir, "metadata", "bomsh")
+            if not os.path.exists(metadata_dir):
+                metadata_dir = os.path.join(args.bom_topdir, ".gitbom", "metadata", "bomsh")
+        if not os.path.exists(metadata_dir) and args.bom_dir:
+            metadata_dir = os.path.join(args.bom_dir, "metadata", "bomsh")
+        if os.path.exists(metadata_dir):
+            new_metadata_dir = os.path.join(args.copyout_bomdir, "metadata", "bomsh")
+            copy_truncated_metadata_files(tree, new_metadata_dir, metadata_dir)
     if args.software_heritage_save_dir:
         download_tree_blobs_from_software_heritage(tree, args.software_heritage_save_dir)
     # Check if there are any new blob IDs that do not exist in g_cvedb
@@ -1162,6 +1186,213 @@ def cve_check_rule_for_file(afile, src_file=''):
 #### End of CVE check rules handling routines ####
 ############################################################
 
+# The below gitBOM doc truncation routines assume g_bomid_db is used, which has bom_id as node key, "hash_tree" is a list of checksum_line "blob XX bom YY"
+
+def copy_truncated_raw_logfile(raw_logfile, blob_ids, outfile_path):
+    """
+    Create a truncated copy of the bomsh build raw_logfile, based on a list of blob IDs.
+    """
+    outfile = open(outfile_path, "w")
+    #blobs = set(blob_ids)
+    write_flag = True
+    write_outfiles = 0
+    skip_outfiles = 0
+    total_lines = 0
+    write_lines = 0
+    for line in open(raw_logfile, "r"):
+        if line[:9] == "outfile: ":
+            tokens = line.split()
+            blob_id = tokens[1]
+            if blob_id in blob_ids:
+                write_flag = True
+                write_outfiles += 1
+            else:
+                write_flag = False
+                skip_outfiles += 1
+            #verbose("outfile blob_id: " + blob_id + " write_flag: " + str(write_flag))
+        if write_flag:
+            outfile.write(line)
+            write_lines += 1
+        total_lines += 1
+    outfile.close()
+    verbose("Truncate raw_logfile: kept " + str(write_outfiles) + " outfiles and deleted " + str(skip_outfiles) + " outfiles, kept " + str(write_lines) + " out of " + str(total_lines) + " total lines")
+
+
+def copy_truncated_gitbom_doc_mapping(afile, blob_ids, outfile_path, mapping_db={}):
+    """
+    Create a truncated copy of the bomsh_gitbom_doc_mapping file, blob_id => bom_id
+    """
+    if mapping_db:
+        save_json_db(outfile_path, mapping_db)
+        verbose("Truncate gitbom doc mappings: kept " + str(len(mapping_db)) + " blobs")
+        return
+    db = load_json_db(afile)
+    new_db = {}
+    for blob_id in db:
+        if blob_id in blob_ids:
+            new_db[blob_id] = db[blob_id]
+    save_json_db(outfile_path, new_db)
+    verbose("Truncate gitbom doc mappings: kept " + str(len(new_db)) + " blobs out of total " + str(len(db)) + " blobs")
+
+
+def copy_truncated_gitbom_treedb(afile, blob_ids, outfile_path):
+    """
+    Create a truncated copy of the bomsh_gitbom_treedb file, whose node key is blob_id, and node value is hash_tree of list of blob_ids + metadata
+    """
+    db = load_json_db(afile)
+    new_db = {}
+    for blob_id in db:
+        if blob_id in blob_ids:
+            new_db[blob_id] = db[blob_id]
+    save_json_db(outfile_path, new_db)
+    verbose("Truncate treedb: kept " + str(len(new_db)) + " blobs out of total " + str(len(db)) + " blobs")
+
+
+def copy_truncated_metadata_files(tree, destdir, metadata_dir):
+    """
+    Copy truncated bomsh metadata files, based on the CVE search result tree.
+    """
+    if not os.path.exists(destdir):
+        os.makedirs(destdir)
+    blob_ids, new_mapping_db = get_all_extra_blobid_in_tree(tree, metadata_dir, True)
+    verbose("There are " + str(len(blob_ids)) + " extra blob IDs in the CVE search result")
+    raw_logfile = os.path.join(metadata_dir, "bomsh_hook_raw_logfile")
+    if os.path.exists(raw_logfile):
+        new_raw_logfile = os.path.join(destdir, "bomsh_hook_raw_logfile")
+        copy_truncated_raw_logfile(raw_logfile, blob_ids, new_raw_logfile)
+    mapping_file = os.path.join(metadata_dir, "bomsh_gitbom_doc_mapping")
+    if os.path.exists(mapping_file):
+        new_mapping_file = os.path.join(destdir, "bomsh_gitbom_doc_mapping")
+        copy_truncated_gitbom_doc_mapping(mapping_file, blob_ids, new_mapping_file, new_mapping_db)
+    treedb_file = os.path.join(metadata_dir, "bomsh_gitbom_treedb")
+    if os.path.exists(treedb_file):
+        new_treedb_file = os.path.join(destdir, "bomsh_gitbom_treedb")
+        copy_truncated_gitbom_treedb(treedb_file, blob_ids, new_treedb_file)
+
+
+def copy_gitbom_doc(srcdoc, destdir, bom_id):
+    """
+    Copy a single gitBOM doc from srcdir to destdir, preserving the relative path objects/HH/HH38 pattern
+    :param srcdoc: the source gitBOM doc, whose filename must be the last 38 characters of the BOM ID.
+    :param destdir: the destination directory to copy
+    :param bom_id: the 40-character BOM ID of the gitBOM doc
+    """
+    afile = srcdoc
+    if not os.path.exists(afile):
+        return
+    bdir = os.path.join(destdir, "objects", bom_id[:2])
+    if not os.path.exists(bdir):
+        os.makedirs(bdir)
+    shutil.copy(afile, bdir)
+
+
+def copy_all_bomdoc_in_tree(tree, destdir):
+    """
+    Copy all the gitBOM docs of a CVE search result tree to dest directory.
+    """
+    bomids = get_all_bomid_in_tree(tree)
+    num_copied = 0
+    for bomid in bomids:
+        if bomid in g_gitbom_docfile_db:
+            copy_gitbom_doc(g_gitbom_docfile_db[bomid], destdir, bomid)
+            num_copied += 1
+        else:
+            verbose("Warning: bomid " + bomid + " does not have a gitBOM doc to copy")
+    verbose("Total " + str(len(bomids)) + " BOM IDs in the tree, and copied " + str(num_copied) + " gitBOM docs to destdir " + destdir)
+
+
+def get_all_blob_bomid_in_tree(tree):
+    """
+    Get a list of blob and BOM IDs for all the nodes in a CVE search result tree.
+    This function recurses on itself.
+    """
+    if not isinstance(tree, dict):
+        return []
+    result = []
+    for node in tree:
+        subtree = tree[node]
+        blobid, bomid = get_blob_bom_id_from_checksum_line(node)
+        if blobid:
+            result.append((blobid, bomid))
+        result.extend(get_all_blob_bomid_in_tree(subtree))
+    return list(set(result))
+
+
+def get_all_blobid_in_tree(tree):
+    """
+    Get a list of blob IDs for all the nodes in a CVE search result tree.
+    This function recurses on itself.
+    """
+    if not isinstance(tree, dict):
+        return []
+    result = []
+    for node in tree:
+        subtree = tree[node]
+        blobid, bomid = get_blob_bom_id_from_checksum_line(node)
+        if blobid:
+            result.append(blobid)
+        result.extend(get_all_blobid_in_tree(subtree))
+    return list(set(result))
+
+
+def get_all_extra_blobid_in_tree(tree, metadata_dir, get_new_mapping=False):
+    """
+    Get all blob IDs in the tree, plus some extra blob IDs that share the same set of bom IDs in the tree.
+    :param tree: the constructed tree for CVE search, with bom_id as node key
+    :param metadata_dir: the directory to store bomsh metadata files
+    :param get_new_mapping: a flag to get a new mapping db or not
+    returns a set of blob IDs, and a new mapping DB dict
+    """
+    tree_blob_ids = set(get_all_blobid_in_tree(tree))
+    # Also get those blob IDs that share the same bom_id in the tree
+    bomids = set(get_all_bomid_in_tree(tree))
+    mapping_file = os.path.join(metadata_dir, "bomsh_gitbom_doc_mapping")
+    new_mapping_db = {}
+    if not os.path.exists(mapping_file):
+        return (tree_blob_ids, new_mapping_db)
+    mapping_db = load_json_db(mapping_file)
+    verbose("there are " + str(len(mapping_db)) + " blob_id => bom_id mappings in the original mapping file " + mapping_file)
+    blob_ids = set()
+    for blob_id in mapping_db:
+        bom_id = mapping_db[blob_id]
+        if bom_id in bomids:
+            blob_ids.add(blob_id)
+            if get_new_mapping:
+                new_mapping_db[blob_id] = bom_id
+    return (blob_ids | tree_blob_ids, new_mapping_db)
+
+
+def get_all_bomid_in_tree(tree):
+    """
+    Get a list of BOM IDs for all the nodes in a CVE search result tree.
+    This function recurses on itself.
+    """
+    if not isinstance(tree, dict):
+        return []
+    result = []
+    for node in tree:
+        subtree = tree[node]
+        blobid, bomid = get_blob_bom_id_from_checksum_line(node)
+        if bomid:
+            result.append(bomid)
+        result.extend(get_all_bomid_in_tree(subtree))
+    return list(set(result))
+
+
+def get_all_bomdoc_in_tree(tree):
+    """
+    Get a list of gitBOM docs for all the nodes in a CVE search result tree.
+    """
+    bomids = get_all_bomid_in_tree(tree)
+    result = []
+    for bomid in bomids:
+        if bomid in g_gitbom_docfile_db:
+            result.append(g_gitbom_docfile_db[bomid])
+    return result
+
+############################################################
+#### End of gitBOM doc copy routines ####
+############################################################
 
 def rtd_parse_options():
     """
@@ -1198,6 +1429,8 @@ def rtd_parse_options():
                     help = "the directory to store all CVE checking rules files")
     parser.add_argument("--software_heritage_save_dir",
                     help = "the directory to save the source files if they exist in SoftwareHeritage")
+    parser.add_argument('--copyout_bomdir',
+                    help = "the new directory to copy out or store the relevant gitBOM doc and metadata files for the search result")
     parser.add_argument("-v", "--verbose",
                     action = "count",
                     default = 0,
@@ -1207,9 +1440,8 @@ def rtd_parse_options():
     # Parse the command line arguments
     args = parser.parse_args()
 
-    if not (args.cve_db_file and (args.raw_checksums_file or args.bom_dir or args.bom_topdir)):
-        print ("Please specify the CVE database file with -d option!")
-        print ("Please specify the BOMSH raw checksum database file with -r option or the gitBOM directory with -b or --bom_topdir option!")
+    if not (args.raw_checksums_file or args.bom_dir or args.bom_topdir):
+        print ("Please specify the BOMSH raw checksum database file with -r option OR the gitBOM directory with -b or --bom_topdir or --bom_dir option!")
         print ("")
         parser.print_help()
         sys.exit()
@@ -1235,7 +1467,8 @@ def main():
     args = rtd_parse_options()
 
     global g_cvedb
-    g_cvedb = load_json_db(args.cve_db_file)
+    if args.cve_db_file:
+        g_cvedb = load_json_db(args.cve_db_file)
     global g_metadata_db
     if args.metadata_db_file:
         g_metadata_db = load_json_db(args.metadata_db_file)
@@ -1256,6 +1489,7 @@ def main():
         else:
             bom_dir = args.bom_dir
             g_gitbom_docfile_db = get_all_gitbom_doc_files_in_dir(bom_dir, False)
+        verbose("There are " + str(len(g_gitbom_docfile_db)) + " total gitBOM docs in directory " + bom_dir)
         if args.files_to_search_cve:
             g_bomid_db = create_gitbom_doc_treedb_for_files(bom_dir, args.files_to_search_cve.split(","))
         else:
