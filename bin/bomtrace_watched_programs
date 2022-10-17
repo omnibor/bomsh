@@ -10,10 +10,11 @@
 /usr/bin/cc
 /usr/bin/g++
 /usr/bin/gold
-/usr/bin/install
 /usr/bin/ranlib
 /usr/bin/dwz
 /usr/bin/rustc
+/usr/bin/dpkg-deb
+/usr/bin/rpmbuild
 /usr/lib/rpm/debugedit
 /usr/lib/rpm/sepdebugcrcfix
 arch/x86/boot/tools/build
@@ -27,6 +28,7 @@ arch/x86/boot/tools/build
 /usr/bin/objcopy
 /usr/bin/strip
 /usr/bin/eu-strip
+/usr/bin/ar
 /usr/bin/ranlib
 /usr/bin/dwz
 /usr/lib/rpm/debugedit
