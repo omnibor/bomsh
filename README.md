@@ -5,6 +5,7 @@ Table of Contents
 * [Overview](#Overview)
 * [Compile Bombash and Bomtrace from Source](#Compile-Bombash-and-Bomtrace-from-Source)
 * [Generating gitBOM Docs with Bomtrace2](#Generating-gitBOM-Docs-with-Bomtrace2)
+* [Generating gitBOM ADGs for Debian/RPM Packages with Bomtrace2](#Generating-gitBOM-ADGs-for-Debian/RPM-Packages-with-Bomtrace2)
 * [Generating gitBOM Docs with Bomtrace](#Generating-gitBOM-Docs-with-Bomtrace)
 * [Generating gitBOM Docs with Bombash](#Generating-gitBOM-Docs-with-Bombash)
 * [Reducing Storage of Generated gitBOM Docs](#Reducing-Storage-of-Generated-gitBOM-Docs)
@@ -25,6 +26,8 @@ Bomsh is collection of tools to explore the GitBOM idea. It includes the below t
 Bombash: a BASH-based shell to generate [GitBOM](https://gitbom.dev/) [artifact trees](https://gitbom.dev/glossary/artifact_tree/) for software.
 
 Bomtrace/Bomtrace2: a STRACE-based tool to generate [GitBOM](https://gitbom.dev/) [artifact trees](https://gitbom.dev/glossary/artifact_tree/) for software.
+
+Note: Bombash and Bomtrace are deprecated, only Bomtrace2 is actively developing and supported.
 
 Multiple Python scripts are developed to work together with these tools.
 - bomsh_hook.py script, invoked by Bombash and Bomtrace for each shell command during software build.
@@ -246,6 +249,131 @@ here is the workflow:
 
 If you just want to capture all the build commands for your software build, you can do similar steps with the "bomtrace2 -c bomtrace.conf make" command.
 Then you check the generated /tmp/bomsh_hook_trace_logfile for a list of recorded shell commands.
+
+Generating gitBOM ADGs for Debian/RPM Packages with Bomtrace2
+-------------------------------------------------------------
+
+Bomsh implements the symlink farm feature to persist the artifact ID to gitBOM ADG (Artifact Dependency Graph) doc mapping.
+For the output file of each build step, a symlink file is created in the .gitbom/symlinks/ directory, with the gitoid of the output file as file name.
+This symlink file points to the associated gitBOM ADG doc in the .gitbom/objects/ directory.
+With this symlink farm, the A2G (Artifact-ID to gitBOM Graph) mappings are persisted in the file system.
+Given a binary file, user can compute its gitoid, then look up its associated ADG document in the .gitbom/symlinks/ directory.
+This makes ADG document lookup of artifacts much easier for users.
+
+For Debian package or RPM package build, bomtrace2 will also automatically create a hello.deb.gitbom_adg or hello.rpm.gitbom_adg symlink
+for each built hello.deb or hello.rpm package file for user convenience.
+It will also create a symlink in the default .gitbom/pkgs/ directory, pointing to the associated ADG (Artifact Dependency Graph) document.
+This helps user quickly find the associated gitBOM bom-id for the built packages, and makes publishing gitBOM documents easy.
+
+Package maintainers can create tarballs for the associated gitBOM ADG documents, and put it next to the Debian/RPM package in the same repo for easy access by users.
+Or a new field like Gitbom-Bomid can be added to the generated hostname_3.23_amd64.buildinfo file, which can help user find the associated gitBOM ADG documents elsewhere.
+
+Here is an example hostname_3.23_amd64.buildinfo file with the new proposed Gitbom-Bomid-Sha1 field added:
+
+```
+Gitbom-Bomid-Sha1:
+ 8be5ef9c8d4db58cdd0404814b1233cf696b0200 hostname-dbgsym_3.23_amd64.deb
+ 361aa0bb79fe277af3c299304057acebda0a58f5 hostname_3.23_amd64.deb
+```
+
+If you specify the "-n" option to not embed bom-id by Bomsh, and compile a build-reproducible Debian package,
+then you get the gitBOM ADG documents that other people can reproduce the build and verify. This gives us REPRODUCIBLE gitBOM documents!
+
+Therefore, it is feasible to generate the gitBOM ADG documents for all the officially released build-reproducible Debian packages.
+An official repo to host the standard gitBOM documents for build-reproducible packages will become possible for the software industry.
+This will be a great advantage for build-reproducible Debian packages.
+
+Here is an example of the hostname Debian package build, reproduced with the debrebuild.py script.
+Two different people should be able reproduce the same build, generate the bit-for-bit identical hostname Debian packages, as well as the same gitBOM documents.
+
+```
+root@60cb7fac1537:/home/repro-deb/myreprodir# rm -rf .gitbom  /tmp/bomsh_hook_*
+root@60cb7fac1537:/home/repro-deb/myreprodir# /tmp/bomtrace2 -c /tmp/bomtrace.conf -w /tmp/bomtrace_watched_programs /home/repro-deb/debrebuild/debrebuild.py --output ./art3 --verbose --builder=mmdebstrap ../buildinfo-dir/hostname_3.23_amd64.buildinfo
+
+I: creating tarball...
+I: done
+I: removing tempdir /tmp/mmdebstrap.lH261h4YdA...
+I: success in 262.4173 seconds
+md5: hostname-dbgsym_3.23_amd64.deb: OK
+md5: hostname_3.23_amd64.deb: OK
+sha1: hostname-dbgsym_3.23_amd64.deb: OK
+sha1: hostname_3.23_amd64.deb: OK
+sha256: hostname-dbgsym_3.23_amd64.deb: OK
+sha256: hostname_3.23_amd64.deb: OK
+Checksums: OK
+
+root@60cb7fac1537:/home/repro-deb/myreprodir# ls -tl art3
+-rw-------. 1 root root  1216 Oct 17 05:12 summary.out
+-rw-r--r--. 1 1000 1000  1483 Oct 17 05:12 hostname_3.23_amd64.changes
+-rw-r--r--. 1 1000 1000  4445 Oct 17 05:12 hostname_3.23_amd64.buildinfo
+lrwxrwxrwx. 1 root root    95 Oct 17 05:12 hostname-dbgsym_3.23_amd64.deb.gitbom_adg -> ../../../../home/repro-deb/myreprodir/.gitbom/objects/8b/e5ef9c8d4db58cdd0404814b1233cf696b0200
+-rw-r--r--. 1 1000 1000 13312 Oct 17 05:12 hostname-dbgsym_3.23_amd64.deb
+lrwxrwxrwx. 1 root root    95 Oct 17 05:12 hostname_3.23_amd64.deb.gitbom_adg -> ../../../../home/repro-deb/myreprodir/.gitbom/objects/36/1aa0bb79fe277af3c299304057acebda0a58f5
+-rw-r--r--. 1 1000 1000 14948 Oct 17 05:12 hostname_3.23_amd64.deb
+drwxr-xr-x. 3 1000 1000  4096 Oct 17 05:12 hostname-3.23
+root@60cb7fac1537:/home/repro-deb/myreprodir# ls -tl .gitbom/pkgs
+lrwxrwxrwx. 1 root root 52 Oct 17 05:12 hostname-dbgsym_3.23_amd64.deb.gitbom_adg -> ../objects/8b/e5ef9c8d4db58cdd0404814b1233cf696b0200
+lrwxrwxrwx. 1 root root 52 Oct 17 05:12 hostname_3.23_amd64.deb.gitbom_adg -> ../objects/36/1aa0bb79fe277af3c299304057acebda0a58f5
+root@60cb7fac1537:/home/repro-deb/myreprodir# ls -tl .gitbom/*/*
+lrwxrwxrwx. 1 root root   52 Oct 17 05:12 .gitbom/pkgs/hostname-dbgsym_3.23_amd64.deb.gitbom_adg -> ../objects/8b/e5ef9c8d4db58cdd0404814b1233cf696b0200
+lrwxrwxrwx. 1 root root   52 Oct 17 05:12 .gitbom/symlinks/90d3e30024df8a52566b1edef657256b5fb5e49e -> ../objects/8b/e5ef9c8d4db58cdd0404814b1233cf696b0200
+lrwxrwxrwx. 1 root root   52 Oct 17 05:12 .gitbom/pkgs/hostname_3.23_amd64.deb.gitbom_adg -> ../objects/36/1aa0bb79fe277af3c299304057acebda0a58f5
+lrwxrwxrwx. 1 root root   52 Oct 17 05:12 .gitbom/symlinks/cf2f6247f73a4b13c3363c31a003b7bcb610af86 -> ../objects/36/1aa0bb79fe277af3c299304057acebda0a58f5
+lrwxrwxrwx. 1 root root   52 Oct 17 05:12 .gitbom/symlinks/cd6933dd663ca099e4c7758bdb22b5cbcd5478d4 -> ../objects/6b/d38ff5092af9f0cac209f6f1466c4376694de1
+lrwxrwxrwx. 1 root root   52 Oct 17 05:12 .gitbom/symlinks/8cf556f1bc2b80d9b14324b6bd3a102b50761248 -> ../objects/6b/d38ff5092af9f0cac209f6f1466c4376694de1
+lrwxrwxrwx. 1 root root   52 Oct 17 05:12 .gitbom/symlinks/6f41ea69396ab9a32077d42f0e0e6864b04922b2 -> ../objects/6b/d38ff5092af9f0cac209f6f1466c4376694de1
+lrwxrwxrwx. 1 root root   52 Oct 17 05:12 .gitbom/symlinks/ef79f940d64dd1e9677d6cb8b01d09caa9e00e31 -> ../objects/6b/d38ff5092af9f0cac209f6f1466c4376694de1
+lrwxrwxrwx. 1 root root   52 Oct 17 05:12 .gitbom/symlinks/6581e00f013b687e9a457f6375b65ff19c276b95 -> ../objects/2a/709f0c4f59298557b2ae4fbfb703aab5ccb1e2
+
+.gitbom/objects/8b:
+-rw-------. 1 root root 183 Oct 17 05:12 e5ef9c8d4db58cdd0404814b1233cf696b0200
+
+.gitbom/objects/36:
+-rw-------. 1 root root 321 Oct 17 05:12 1aa0bb79fe277af3c299304057acebda0a58f5
+
+.gitbom/objects/6b:
+-rw-------. 1 root root 321 Oct 17 05:12 d38ff5092af9f0cac209f6f1466c4376694de1
+
+.gitbom/objects/2a:
+-rw-------. 1 root root 5152 Oct 17 05:12 709f0c4f59298557b2ae4fbfb703aab5ccb1e2
+root@60cb7fac1537:/home/repro-deb/myreprodir#
+```
+
+Here is an example of the sysstat RPM package build, with the mock build tool:
+
+```
+[root@e8281323a4d6 rpm-src-dir]# rm -rf .gitbom/  /tmp/bomsh_hook_*
+[root@e8281323a4d6 rpm-src-dir]# /tmp/bomtrace2 -c /tmp/bomtrace.conf -w /tmp/bomtrace_watched_programs mock -r /etc/mock/almalinux-8-x86_64.cfg rebuild sysstat-11.7.3-6.el8.src.rpm
+
+Wrote: /builddir/build/RPMS/sysstat-11.7.3-6.el8.x86_64.rpm
+Wrote: /builddir/build/RPMS/sysstat-debugsource-11.7.3-6.el8.x86_64.rpm
+Wrote: /builddir/build/RPMS/sysstat-debuginfo-11.7.3-6.el8.x86_64.rpm
+Executing(%clean): /bin/sh -e /var/tmp/rpm-tmp.17qvvY
++ umask 022
++ cd /builddir/build/BUILD
++ cd sysstat-11.7.3
++ /usr/bin/rm -rf /builddir/build/BUILDROOT/sysstat-11.7.3-6.el8.x86_64
++ exit 0
+Finish: rpmbuild sysstat-11.7.3-6.el8.src.rpm
+Finish: build phase for sysstat-11.7.3-6.el8.src.rpm
+INFO: Done(sysstat-11.7.3-6.el8.src.rpm) Config(almalinux-8-x86_64) 1 minutes 11 seconds
+INFO: Results and/or logs in: /var/lib/mock/almalinux-8-x86_64/result
+Finish: run
+
+[root@e8281323a4d6 rpm-src-dir]# ls -tl .gitbom/pkgs/
+lrwxrwxrwx. 1 root root 52 Oct 17 05:28 sysstat-debuginfo-11.7.3-6.el8.x86_64.rpm.gitbom_adg -> ../objects/da/5f9988fd02603ed0f24ca11f011f7601acb266
+lrwxrwxrwx. 1 root root 52 Oct 17 05:28 sysstat-11.7.3-6.el8.x86_64.rpm.gitbom_adg -> ../objects/9e/9267a9d1902d7b34d5f3c56be592d92bb057e7
+lrwxrwxrwx. 1 root root 52 Oct 17 05:28 sysstat-debugsource-11.7.3-6.el8.x86_64.rpm.gitbom_adg -> ../objects/7d/acbbfd2022c5322059fcca00c7e462ce38ba3c
+lrwxrwxrwx. 1 root root 52 Oct 17 05:27 sysstat-11.7.3-6.el8.src.rpm.gitbom_adg -> ../objects/59/13a0db7e8d5ee18b00f24603f45844537f7d7a
+[root@e8281323a4d6 rpm-src-dir]# ls -tl /var/lib/mock/almalinux-8-x86_64/root/builddir/build/RPMS/
+lrwxrwxrwx. 1 root root     98 Oct 17 05:28 sysstat-debuginfo-11.7.3-6.el8.x86_64.rpm.gitbom_adg -> ../../../../../../../../home/rpm-src-dir/.gitbom/objects/da/5f9988fd02603ed0f24ca11f011f7601acb266
+lrwxrwxrwx. 1 root root     98 Oct 17 05:28 sysstat-11.7.3-6.el8.x86_64.rpm.gitbom_adg -> ../../../../../../../../home/rpm-src-dir/.gitbom/objects/9e/9267a9d1902d7b34d5f3c56be592d92bb057e7
+lrwxrwxrwx. 1 root root     98 Oct 17 05:28 sysstat-debugsource-11.7.3-6.el8.x86_64.rpm.gitbom_adg -> ../../../../../../../../home/rpm-src-dir/.gitbom/objects/7d/acbbfd2022c5322059fcca00c7e462ce38ba3c
+-rw-r--r--. 1 root mock 529732 Oct 17 05:28 sysstat-debuginfo-11.7.3-6.el8.x86_64.rpm
+-rw-r--r--. 1 root mock 217384 Oct 17 05:28 sysstat-debugsource-11.7.3-6.el8.x86_64.rpm
+-rw-r--r--. 1 root mock 434208 Oct 17 05:28 sysstat-11.7.3-6.el8.x86_64.rpm
+[root@e8281323a4d6 rpm-src-dir]#
+```
 
 Generating gitBOM Docs with Bomtrace
 ------------------------------------
