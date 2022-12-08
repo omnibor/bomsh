@@ -5,7 +5,7 @@ Table of Contents
 * [Overview](#Overview)
 * [Compile Bombash and Bomtrace from Source](#Compile-Bombash-and-Bomtrace-from-Source)
 * [Generating gitBOM Docs with Bomtrace2](#Generating-gitBOM-Docs-with-Bomtrace2)
-* [Generating gitBOM ADGs for Debian/RPM Packages with Bomtrace2](#Generating-gitBOM-ADGs-for-Debian/RPM-Packages-with-Bomtrace2)
+* [Generating gitBOM ADGs for Debian or RPM Packages with Bomtrace2](#Generating-gitBOM-ADGs-for-Debian-or-RPM-Packages-with-Bomtrace2)
 * [Generating gitBOM Docs with Bomtrace](#Generating-gitBOM-Docs-with-Bomtrace)
 * [Generating gitBOM Docs with Bombash](#Generating-gitBOM-Docs-with-Bombash)
 * [Reducing Storage of Generated gitBOM Docs](#Reducing-Storage-of-Generated-gitBOM-Docs)
@@ -250,8 +250,8 @@ here is the workflow:
 If you just want to capture all the build commands for your software build, you can do similar steps with the "bomtrace2 -c bomtrace.conf make" command.
 Then you check the generated /tmp/bomsh_hook_trace_logfile for a list of recorded shell commands.
 
-Generating gitBOM ADGs for Debian/RPM Packages with Bomtrace2
--------------------------------------------------------------
+Generating gitBOM ADGs for Debian or RPM Packages with Bomtrace2
+----------------------------------------------------------------
 
 Bomsh implements the symlink farm feature to persist the artifact ID to gitBOM ADG (Artifact Dependency Graph) doc mapping.
 For the output file of each build step, a symlink file is created in the .gitbom/symlinks/ directory, with the gitoid of the output file as file name.
@@ -260,7 +260,7 @@ With this symlink farm, the A2G (Artifact-ID to gitBOM Graph) mappings are persi
 Given a binary file, user can compute its gitoid, then look up its associated ADG document in the .gitbom/symlinks/ directory.
 This makes ADG document lookup of artifacts much easier for users.
 
-For Debian package or RPM package build, bomtrace2 will also automatically create a hello.deb.gitbom_adg or hello.rpm.gitbom_adg symlink
+For Debian package or RPM package build, bomtrace2 will also automatically create a hello.deb.gitbom_adg.sha1, hello.deb.gitbom_adg.sha256, hello.rpm.gitbom_adg.sha1, or hello.rpm.gitbom_adg.sha256 symlink
 for each built hello.deb or hello.rpm package file for user convenience.
 It will also create a symlink in the default .gitbom/pkgs/ directory, pointing to the associated ADG (Artifact Dependency Graph) document.
 This helps user quickly find the associated gitBOM bom-id for the built packages, and makes publishing gitBOM documents easy.
@@ -268,12 +268,15 @@ This helps user quickly find the associated gitBOM bom-id for the built packages
 Package maintainers can create tarballs for the associated gitBOM ADG documents, and put it next to the Debian/RPM package in the same repo for easy access by users.
 Or a new field like Gitbom-Bomid can be added to the generated hostname_3.23_amd64.buildinfo file, which can help user find the associated gitBOM ADG documents elsewhere.
 
-Here is an example hostname_3.23_amd64.buildinfo file with the new proposed Gitbom-Bomid-Sha1 field added:
+Here is an example hostname_3.23_amd64.buildinfo file with the new proposed Gitbom-Bomid-Sha1 and Gitbom-Bomid-Sha256 fields added:
 
 ```
 Gitbom-Bomid-Sha1:
  8be5ef9c8d4db58cdd0404814b1233cf696b0200 hostname-dbgsym_3.23_amd64.deb
  361aa0bb79fe277af3c299304057acebda0a58f5 hostname_3.23_amd64.deb
+Gitbom-Bomid-Sha256:
+ f5c5526c06000b7e0826416df537df1dcd2a0a2ae3499d5192ab250c2eb49f14 hostname-dbgsym_3.23_amd64.deb
+ c241440dc405a3dd0e943cae09f4b706ee9cd955010d568ab38f2ec5446a1565 hostname_3.23_amd64.deb
 ```
 
 If you specify the "-n" option to not embed bom-id by Bomsh, and compile a build-reproducible Debian package,
@@ -652,8 +655,14 @@ To solve this issue, a new option "--copyout_bomdir" has been added to the bomsh
 When this option is specified, the script will build the hash tree for your queried binary files, and will copy
 all the necessary/relevant gitBOM documents to the new copyout_bomdir, while leaving other unnecessary/irrlevant
 gitBOM docs. This way, a truncated set of gitBOM documents are created in the new copyout_bomdir.
+If user does not specify any binary file, then all the gitBOM files (of either sha1 or sha256 via the --hashtype option) will be copied.
 Experiments with Ubuntu kernel build has found that this option can reduce the storage size of gitBOM documents
 by 5 to 6 times. Therefore it is suggested to run this command before saving the gitBOM documents to your reository.
+
+Another optimization is to remove the separator strings like the “blob “ and “bom “ strings and the first line of “gitoid:blob:sha1”/”gitoid:blob:sha256” from all gitBOM docs,
+before compressing them to store these gitBOM docs; and re-insert them after uncompressing to recover these gitBOM docs.
+A new option "--remove_sepstrs_in_doc" has been added to the bomsh_search_cve.py script to do the removal,
+and another new option "--insert_sepstrs_in_doc" has been added to re-insert them.
 
 Here is an example for Ubuntu kernel build:
 
@@ -661,6 +670,30 @@ Here is an example for Ubuntu kernel build:
     $ ./bomsh_create_bom.py -r /tmp/bomsh_hook_raw_logfile -p linux-image-unsigned-5.11.0-1028-aws_5.11.0-1028.31~20.04.1_amd64.deb
     $ # the below command creates a truncated set of gitBOM docs in the new truncate-bomdir:
     $ ./bomsh_search_cve.py --bom_dir .gitbom -f linux-image-unsigned-5.11.0-1028-aws_5.11.0-1028.31~20.04.1_amd64.deb --copyout_bomdir truncate-bomdir
+    $ # the below command copies out and removes the separator strings of gitBOM docs in the new remove-bomdir:
+    $ ./bomsh_search_cve.py --bom_dir truncate-bomdir --copyout_bomdir remove-bomdir --remove_sepstrs_in_doc
+    $ # the below command recovers the truncated gitBOM docs in the new recover-bomdir:
+    $ ./bomsh_search_cve.py --bom_dir remove-bomdir --copyout_bomdir recover-bomdir --insert_sepstrs_in_doc
+
+To further reduce the storage size, we can sacrifice the gitBOM tree structure:
+we can collapse all subtrees to a single level and remove duplicate artifact-IDs.
+Because a lot of common .h header files are repeated in the gitBOM docs of different .o files,
+this will be able to remove many such duplicates, and reduce the storage size significantly.
+For most of applications like CVE search, we don’t need to keep the full gitBOM tree structure,
+so this subtree collapsing works for CVE search while reducing the storage size.
+And sometimes we don’t want to expose the gitBOM tree structure, a flat list of artifact IDs can still satisfy the SBOM requirement while reducing storage significantly.
+
+A new option "--subtree_collapsed_bomdir" has been added to the bomsh_search_cve.py script to implement this feature.
+The "--remove_sepstrs_in_doc" and "--insert_sepstrs_in_doc" options can work well with this option.
+
+Here is an example for Ubuntu kernel build:
+
+    $ # the below command creates more gitBOM docs than necessary in the default .gitbom directory:
+    $ ./bomsh_create_bom.py -r /tmp/bomsh_hook_raw_logfile.sha1 -p linux-image-unsigned-5.11.0-1028-aws_5.11.0-1028.31~20.04.1_amd64.deb
+    $ # the below command creates a truncated set of gitBOM docs in the new truncate-bomdir:
+    $ ./bomsh_search_cve.py --bom_dir .gitbom -f linux-image-unsigned-5.11.0-1028-aws_5.11.0-1028.31~20.04.1_amd64.deb --subtree_collapsed_bomdir collapse-bomdir --remove_sepstrs_in_doc
+    $ # the below command recovers the newly created subtree-collapsed gitBOM docs in the new recover-bomdir:
+    $ ./bomsh_search_cve.py --bom_dir collapse-bomdir --copyout_bomdir recover-bomdir --insert_sepstrs_in_doc
 
 Creating CVE Database for Software
 ----------------------------------

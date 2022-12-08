@@ -254,7 +254,11 @@ def create_gitbom_doc(infile_hashes, db, destdir):
     """
     lines = create_gitbom_doc_text(infile_hashes, db)
     output_file = os.path.join(g_tmpdir, "bomsh_temp_gitbom_file")
-    write_text_file(output_file, lines)
+    if args.hashtype and args.hashtype.lower() == "sha256":
+        firstline = "gitoid:blob:sha256\n"
+    else:
+        firstline = "gitoid:blob:sha1\n"
+    write_text_file(output_file, firstline + lines)
     ahash = get_git_file_hash(output_file)
     save_gitbom_doc(output_file, destdir, ahash)
     return ahash
