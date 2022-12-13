@@ -178,11 +178,27 @@ def save_json_db(db_file, db, indentation=4):
 ############################################################
 
 
+def get_git_file_hash_sha256(afile):
+    '''
+    Get the git object hash value of a file for SHA256 hash type.
+    :param afile: the file to calculate the git hash or digest.
+    '''
+    cmd = 'printf "blob $(wc -c < ' + afile + ')\\0" | cat - ' + afile + ' | sha256sum | head --bytes=-4 || true'
+    #print(cmd)
+    output = get_shell_cmd_output(cmd)
+    #verbose("output of git_hash_sha256:\n" + output, LEVEL_3)
+    if output:
+        return output.strip()
+    return ''
+
+
 def get_git_file_hash(afile):
     '''
     Get the git object hash value of a file.
     :param afile: the file to calculate the git hash or digest.
     '''
+    if args.hashtype and args.hashtype.lower() == "sha256":
+        return get_git_file_hash_sha256(afile)
     cmd = 'git hash-object ' + cmd_quote(afile) + ' || true'
     #print(cmd)
     output = get_shell_cmd_output(cmd)
@@ -253,7 +269,54 @@ def get_embedded_bom_id_of_jar_file(afile):
     return ''
 
 
-def get_embedded_bom_id_of_elf_file(afile):
+def get_embedded_bom_id_of_elf_file(afile, hash_alg):
+    '''
+    Get the embedded 20 or 32 bytes githash of the associated gitBOM doc for an ELF file.
+    :param afile: the file to extract the embedded .note.gitbom ELF section.
+    :param hash_alg: the hashing algorithm, sha1 or sha256
+    '''
+    abspath = os.path.abspath(afile)
+    cmd = 'readelf -x .note.gitbom ' + cmd_quote(afile) + ' 2>/dev/null || true'
+    output = get_shell_cmd_output(cmd)
+    if not output:
+        return ''
+    lines = output.splitlines()
+    if len(lines) < 4:
+        return ''
+    result = []
+    for line in lines:
+        tokens = line.strip().split()
+        len_tokens = len(tokens)
+        if len_tokens < 2 or tokens[0][:2] != '0x':
+            continue
+        if len_tokens > 5:
+            result.extend( tokens[1:5] )
+        else:
+            result.extend( tokens[1: len_tokens - 1] )
+    if len(result) < 10:
+        return ''
+    if result[2] == '01000000' and hash_alg == 'sha1':
+        return ''.join(result[5:10])
+    if result[2] == '02000000' and hash_alg == 'sha256':
+        return ''.join(result[5:13])
+    if len(result) >= 23 and result[12] == '02000000' and hash_alg == 'sha256':
+        return ''.join(result[15:23])
+    return ''
+
+
+def get_embedded_bom_id(afile):
+    '''
+    Get the embedded 20 or 32 bytes githash of the associated gitBOM doc for a binary file.
+    :param afile: the file to extract the 20-bytes embedded .bom section.
+    returns a string of 40 characters
+    '''
+    if args.hashtype and args.hashtype.lower() == "sha256":
+        return get_embedded_bom_id_of_elf_file(afile, "sha256")
+    else:
+        return get_embedded_bom_id_of_elf_file(afile, "sha1")
+
+
+def get_embedded_bom_id_of_elf_file2(afile):
     '''
     Get the embedded 20bytes githash of the associated gitBOM doc for an ELF file.
     :param afile: the file to extract the 20-bytes embedded .bom ELF section.
@@ -277,7 +340,7 @@ def get_embedded_bom_id_of_elf_file(afile):
     return ''.join(result)
 
 
-def get_embedded_bom_id(afile):
+def get_embedded_bom_id2(afile):
     '''
     Get the embedded 20bytes githash of the associated gitBOM doc for a binary file.
     :param afile: the file to extract the 20-bytes embedded .bom section.
@@ -340,20 +403,30 @@ def create_gitbom_node_of_checksum_line(afile):
     returns a list of checksum lines inside the gitBOM doc.
     '''
     content = read_text_file(afile)
-    return content.strip().splitlines()
+    lines = content.strip().splitlines()
+    if lines and lines[0].startswith("gitoid:blob:sha"):
+        return lines[1:]
+    return lines
 
 
 def get_node_id_from_checksum_line(checksum_line):
     '''
     Get the gitBOM hash-tree node ID from a line in the gitBOM doc.
     The checksum line can be: 40-character SHA1 checksum, "blob SHA1", or "blob SHA1 bom SHA1"
+    The checksum line can be: 64-character SHA256 checksum, "blob SHA256", or "blob SHA256 bom SHA256"
     :param checksum_line: the checksum line provided
     returns the node ID, which is bom_id if bom_id exists, otherwise, the blob_id
     '''
     if " bom " in checksum_line:
-        return checksum_line[50:90]
+        if args.hashtype and args.hashtype.lower() == "sha256":
+            return checksum_line[74:138]
+        else:
+            return checksum_line[50:90]
     elif "blob " == checksum_line[:5]:
-        return checksum_line[5:45]
+        if args.hashtype and args.hashtype.lower() == "sha256":
+            return checksum_line[5:69]
+        else:
+            return checksum_line[5:45]
     return checksum_line.strip()
 
 
@@ -365,13 +438,16 @@ def get_all_gitbom_doc_files_in_dir(topdir, is_topdir=True):
     returns a dict of {bomid => gitBOM doc file}
     '''
     hexchar = "[0-9a-f]"
+    hexchar_num = 38
+    if args.hashtype and args.hashtype.lower() == "sha256":
+        hexchar_num = 62
     topdir_abspath = os.path.abspath(topdir)
     if is_topdir:
         #cmd = 'find ' + topdir_abspath + ' -path "*.gitbom/objects/[0-9a-f][0-9a-f]/*" -type f || true'
         # to interoperate with gitbom-llvm implementation
-        cmd = 'find ' + topdir_abspath + ' -name "' + hexchar * 38 + '" -path "*.gitbom/objects/[0-9a-f][0-9a-f]/*" -type f || true'
+        cmd = 'find ' + topdir_abspath + ' -name "' + hexchar * hexchar_num + '" -path "*.gitbom/objects/[0-9a-f][0-9a-f]/*" -type f || true'
     else:
-        cmd = 'find ' + topdir_abspath + ' -name "' + hexchar * 38 + '" -path "*/objects/[0-9a-f][0-9a-f]/*" -type f || true'
+        cmd = 'find ' + topdir_abspath + ' -name "' + hexchar * hexchar_num + '" -path "*/objects/[0-9a-f][0-9a-f]/*" -type f || true'
     verbose(cmd, LEVEL_3)
     output = get_shell_cmd_output(cmd)
     ret = {}
@@ -457,10 +533,14 @@ def get_blob_bom_id_from_checksum_line(checksum_line):
     '''
     Extract blob_id, bom_id from the checksum line.
     The checksum line can be: 40-character SHA1 checksum, "blob SHA1", or "blob SHA1 bom SHA1"
+    The checksum line can be: 64-character SHA256 checksum, "blob SHA256", or "blob SHA256 bom SHA256"
     :param checksum_line: the checksum line provided
     '''
     if checksum_line[:5] == "blob ":
-        return (checksum_line[5:45], checksum_line[50:90])
+        if args.hashtype and args.hashtype.lower() == "sha256":
+            return (checksum_line[5:69], checksum_line[74:138])
+        else:
+            return (checksum_line[5:45], checksum_line[50:90])
     return (checksum_line.strip(), '')
 
 
@@ -712,6 +792,8 @@ def find_cve_lists_for_checksums(checksums, is_bom_id=False):
         if os.path.exists(metadata_dir):
             new_metadata_dir = os.path.join(args.copyout_bomdir, "metadata", "bomsh")
             copy_truncated_metadata_files(tree, new_metadata_dir, metadata_dir)
+    if args.subtree_collapsed_bomdir:  # Copy out necessary gitBOM docs only and with subtree-collapsed
+        copy_subtree_collapsed_bomdocs_in_tree(tree, args.subtree_collapsed_bomdir)
     if args.software_heritage_save_dir:
         download_tree_blobs_from_software_heritage(tree, args.software_heritage_save_dir)
     # Check if there are any new blob IDs that do not exist in g_cvedb
@@ -1272,10 +1354,10 @@ def copy_truncated_metadata_files(tree, destdir, metadata_dir):
 
 def copy_gitbom_doc(srcdoc, destdir, bom_id):
     """
-    Copy a single gitBOM doc from srcdir to destdir, preserving the relative path objects/HH/HH38 pattern
+    Copy a single gitBOM doc from srcdir to destdir, preserving the relative path objects/HH/HH38 or /HH/HH62 pattern
     :param srcdoc: the source gitBOM doc, whose filename must be the last 38 characters of the BOM ID.
     :param destdir: the destination directory to copy
-    :param bom_id: the 40-character BOM ID of the gitBOM doc
+    :param bom_id: the 40-character or 64-character BOM ID of the gitBOM doc
     """
     afile = srcdoc
     if not os.path.exists(afile):
@@ -1283,7 +1365,72 @@ def copy_gitbom_doc(srcdoc, destdir, bom_id):
     bdir = os.path.join(destdir, "objects", bom_id[:2])
     if not os.path.exists(bdir):
         os.makedirs(bdir)
-    shutil.copy(afile, bdir)
+    if args.remove_sepstrs_in_doc:
+        contents = read_text_file(afile).replace("gitoid:blob:sha256\n", "").replace("gitoid:blob:sha1\n", "").replace("blob ", "").replace("bom ", "")
+        write_text_file(os.path.join(bdir, bom_id[2:]), contents)
+    elif args.insert_sepstrs_in_doc:
+        lines = read_text_file(afile).splitlines()
+        if not lines:
+            shutil.copy(afile, bdir)
+            return
+        newlines = []
+        for line in lines:
+            if "blob" not in line:
+                newlines.append("blob " + line.replace(" ", " bom "))
+            else:
+                newlines.append(line)
+        firstline = ''
+        if not newlines[0].startswith("gitoid:blob:"):
+            if len(lines[0]) in (64, 129):
+                firstline = "gitoid:blob:sha256\n"
+            else:
+                firstline = "gitoid:blob:sha1\n"
+        write_text_file(os.path.join(bdir, bom_id[2:]), firstline + '\n'.join(newlines) + '\n')
+    else:
+        shutil.copy(afile, os.path.join(bdir, bom_id[2:]))
+
+
+def copy_all_bomdoc(docfile_db, destdir):
+    """
+    Copy all the gitBOM docs to dest directory.
+    """
+    for bomid in docfile_db:
+        copy_gitbom_doc(docfile_db[bomid], destdir, bomid)
+    verbose("Copied " + str(len(docfile_db)) + " gitBOM docs to destdir " + destdir)
+
+
+def copy_subtree_collapsed_bomdoc_in_tree(tree, destdir):
+    """
+    Collapse all the gitBOM docs of a CVE search result tree to a single level.
+    Create a new subtree-collapsed gitBOM doc and copy it to dest directory.
+    """
+    if not isinstance(tree, dict):
+        return ''
+    blobids = sorted(get_all_leaf_blobid_in_tree(tree))
+    lines = ["blob " + blobid for blobid in blobids]
+    if args.hashtype and args.hashtype.lower() == "sha256":
+        firstline = "gitoid:blob:sha256\n"
+    else:
+        firstline = "gitoid:blob:sha1\n"
+    content = firstline + '\n'.join(lines) + '\n'
+    output_file = os.path.join(g_tmpdir, "bomsh_search_gitbom_file")
+    write_text_file(output_file, content)
+    ahash = get_git_file_hash(output_file)
+    copy_gitbom_doc(output_file, destdir, ahash)
+    return ahash
+
+
+def copy_subtree_collapsed_bomdocs_in_tree(tree, destdir):
+    """
+    Create new subtree-collapsed gitBOM docs and copy them to dest directory.
+    """
+    leaf_tree = {}
+    for checksum in tree:
+        subtree = tree[checksum]
+        leaf_tree[checksum] = copy_subtree_collapsed_bomdoc_in_tree(subtree, destdir)
+    print("The new subtree collapsed gitBOM doc mapping:")
+    print(json.dumps(leaf_tree, indent=4, sort_keys=True))
+    return leaf_tree
 
 
 def copy_all_bomdoc_in_tree(tree, destdir):
@@ -1315,6 +1462,23 @@ def get_all_blob_bomid_in_tree(tree):
         if blobid:
             result.append((blobid, bomid))
         result.extend(get_all_blob_bomid_in_tree(subtree))
+    return list(set(result))
+
+
+def get_all_leaf_blobid_in_tree(tree):
+    """
+    Get a list of leaf blob IDs for all the nodes in a CVE search result tree.
+    This function recurses on itself.
+    """
+    if not isinstance(tree, dict):
+        return []
+    result = []
+    for node in tree:
+        subtree = tree[node]
+        blobid, bomid = get_blob_bom_id_from_checksum_line(node)
+        if blobid and not bomid:
+            result.append(blobid)
+        result.extend(get_all_blobid_in_tree(subtree))
     return list(set(result))
 
 
@@ -1429,8 +1593,18 @@ def rtd_parse_options():
                     help = "the directory to store all CVE checking rules files")
     parser.add_argument("--software_heritage_save_dir",
                     help = "the directory to save the source files if they exist in SoftwareHeritage")
+    parser.add_argument('--hashtype',
+                    help = "the hash type, like sha1/sha256, the default is sha1")
     parser.add_argument('--copyout_bomdir',
                     help = "the new directory to copy out or store the relevant gitBOM doc and metadata files for the search result")
+    parser.add_argument('--subtree_collapsed_bomdir',
+                    help = "the new directory to copy out or store the relevant subtree-collapsed gitBOM doc and metadata files for the search result")
+    parser.add_argument("--remove_sepstrs_in_doc",
+                    action = "store_true",
+                    help = "remove redundant blob/bom separator strings in gitBOM docs")
+    parser.add_argument("--insert_sepstrs_in_doc",
+                    action = "store_true",
+                    help = "insert redundant blob/bom separator strings in gitBOM docs")
     parser.add_argument("-v", "--verbose",
                     action = "count",
                     default = 0,
@@ -1514,6 +1688,9 @@ def main():
     elif args.gitbom_ids_to_search_cve:
         bom_ids = args.gitbom_ids_to_search_cve.split(",")
         cve_result = find_cve_lists_for_checksums(bom_ids, g_bomid_db)
+    elif args.copyout_bomdir:  # Copy out all gitBOM docs with remove_sepstrs or insert_sepstrs
+        copy_all_bomdoc(g_gitbom_docfile_db, args.copyout_bomdir)
+        return
     else:
         print("Did you forget providing files to search?")
         print("Try -c/-f/-g option.")

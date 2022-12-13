@@ -59,6 +59,7 @@ g_samefile_converters = ["/usr/bin/ranlib", "./tools/objtool/objtool", "/usr/lib
                          "./scripts/sortextable", "./scripts/sorttable", "./tools/bpf/resolve_btfids/resolve_btfids"]
 g_embed_bom_after_commands = g_cc_compilers + g_cc_linkers + ["/usr/bin/eu-strip",]
 #g_embed_bom_after_commands = g_cc_compilers + g_cc_linkers + ["/usr/bin/eu-strip", "/usr/bin/ar"]
+g_hashtypes = []
 g_shell_cmd_rootdir = "/"
 g_cve_check_rules = None
 
@@ -113,6 +114,17 @@ def read_text_file(afile):
          return (f.read())
 
 
+def write_binary_file(afile, barray):
+    '''
+    Write a string to a text file.
+
+    :param afile: the binary file to write
+    :param barray: the byte array to write
+    '''
+    with open(afile, 'wb') as f:
+         return f.write(barray)
+
+
 def get_shell_cmd_output(cmd):
     """
     Returns the output of the shell command "cmd".
@@ -160,31 +172,39 @@ def find_specific_file(builddir, filename, maxdepth=0):
     return files
 
 
-def get_embedded_bom_id_of_elf_file(afile):
+def get_embedded_bom_id_of_elf_file(afile, hash_alg):
     '''
     Get the embedded 20 or 32 bytes githash of the associated gitBOM doc for an ELF file.
-    :param afile: the file to extract the 20-bytes embedded .bom ELF section.
+    :param afile: the file to extract the embedded .note.gitbom ELF section.
+    :param hash_alg: the hashing algorithm, sha1 or sha256
     '''
     abspath = os.path.abspath(afile)
-    cmd = 'readelf -x .bom ' + cmd_quote(afile) + ' 2>/dev/null || true'
+    cmd = 'readelf -x .note.gitbom ' + cmd_quote(afile) + ' 2>/dev/null || true'
     output = get_shell_cmd_output(cmd)
     if not output:
         return ''
     lines = output.splitlines()
-    if len(lines) < 3:
+    if len(lines) < 4:
         return ''
     result = []
     for line in lines:
         tokens = line.strip().split()
-        if len(tokens) > 5 and tokens[0] == "0x00000000":
-            result.extend( (tokens[1], tokens[2], tokens[3], tokens[4]) )
-        elif len(tokens) > 2 and tokens[0] == "0x00000010":
-            if args.hashtype and args.hashtype.lower() == "sha256":
-                result.extend( (tokens[1], tokens[2], tokens[3], tokens[4]) )
-            else:
-                result.append(tokens[1])
-            break
-    return ''.join(result)
+        len_tokens = len(tokens)
+        if len_tokens < 2 or tokens[0][:2] != '0x':
+            continue
+        if len_tokens > 5:
+            result.extend( tokens[1:5] )
+        else:
+            result.extend( tokens[1: len_tokens - 1] )
+    if len(result) < 10:
+        return ''
+    if result[2] == '01000000' and hash_alg == 'sha1':
+        return ''.join(result[5:10])
+    if result[2] == '02000000' and hash_alg == 'sha256':
+        return ''.join(result[5:13])
+    if len(result) >= 23 and result[12] == '02000000' and hash_alg == 'sha256':
+        return ''.join(result[15:23])
+    return ''
 
 
 def load_json_db(db_file):
@@ -918,36 +938,26 @@ def get_all_subfiles_in_rpmbuild_cmdline(rpmline, pwd):
 # a dict to cache the computed hash of files
 g_git_file_hash_cache = {}
 
-def get_git_file_hash_sha256(afile):
-    '''
-    Get the git object hash value of a file for SHA256 hash type.
-    :param afile: the file to calculate the git hash or digest.
-    '''
-    cmd = 'printf "blob $(wc -c < ' + afile + ')\\0" | cat - ' + afile + ' | sha256sum | head --bytes=-4 || true'
-    #print(cmd)
-    output = get_shell_cmd_output(cmd).strip()
-    #verbose("output of git_hash_sha256:\n" + output, LEVEL_3)
-    if output:
-        g_git_file_hash_cache[afile] = output
-        return output
-    return ''
-
-
-def get_git_file_hash(afile, use_cache=True):
+def get_file_hash(afile, hash_alg="sha1", use_cache=True):
     '''
     Get the git object hash value of a file.
     :param afile: the file to calculate the git hash or digest.
+    :param hash_alg: the hashing algorithm, either SHA1 or SHA256
     '''
-    if use_cache and afile in g_git_file_hash_cache:
-        return g_git_file_hash_cache[afile]
-    if args.hashtype and args.hashtype.lower() == "sha256":
-        return get_git_file_hash_sha256(afile)
-    cmd = 'git hash-object ' + cmd_quote(afile) + ' || true'
+    if use_cache:
+        afile_key = afile + "." + hash_alg
+        if afile_key in g_git_file_hash_cache:
+            return g_git_file_hash_cache[afile_key]
+    if hash_alg == "sha256":
+        cmd = 'printf "blob $(wc -c < ' + afile + ')\\0" | cat - ' + afile + ' 2>/dev/null | sha256sum | head --bytes=-4 || true'
+    else:
+        cmd = 'git hash-object ' + cmd_quote(afile) + ' 2>/dev/null || true'
     #print(cmd)
     output = get_shell_cmd_output(cmd).strip()
-    #verbose("output of git_hash:\n" + output, LEVEL_3)
+    #verbose("output of get_file_hash:\n" + output, LEVEL_3)
     if output:
-        g_git_file_hash_cache[afile] = output
+        if use_cache:
+            g_git_file_hash_cache[afile_key] = output
         return output
     return ''
 
@@ -969,20 +979,39 @@ g_githash_cache_initial_size = 0
 # the below ld linker implicit object files are also cached
 g_githash_link_objects_list = ("crtbeginS.o", "crtendS.o", "Scrt1.o", "crti.o", "crtn.o", "crt1.o", "crtbegin.o", "crtend.o", "liblto_plugin.so")
 
-def get_git_file_hash_with_cache(afile):
+def get_git_file_hash_with_cache(afile, hash_alg="sha1"):
     '''
     Check the githash cache before calling "git hash-object".
     Also update the githash cache after calling "git hash-object".
     :param afile: the file to get git-hash
     '''
-    if g_githash_cache and afile in g_githash_cache:
-        return g_githash_cache[afile]
-    ahash = get_git_file_hash(afile)
-    if not args.no_githash_cache_file and afile[-2:] == ".h" or os.path.basename(afile) in g_githash_link_objects_list:
+    afile_key = afile + "." + hash_alg
+    if g_githash_cache and afile_key in g_githash_cache:
+        return g_githash_cache[afile_key]
+    ahash = get_file_hash(afile, hash_alg)
+    if not args.no_githash_cache_file and (afile[-2:] == ".h" or os.path.basename(afile) in g_githash_link_objects_list):
         # only cache header files or the ld linker implicit object files
         verbose("Saving header githash cache, hash: " + ahash + " afile: " + afile, LEVEL_3)
-        g_githash_cache[afile] = ahash
+        g_githash_cache[afile_key] = ahash
     return ahash
+
+
+def get_infile_hashes(infiles, hash_alg):
+    '''
+    Get hashes for a list of input files
+    :param infiles: a list of input files
+    returns a dict of {infile : hash}
+    '''
+    global g_githash_cache
+    if not args.no_githash_cache_file and not g_githash_cache:
+        global g_githash_cache_initial_size
+        if len(infiles) > 4 and os.path.exists(g_githash_cache_file):
+            g_githash_cache = load_json_db(g_githash_cache_file)
+            g_githash_cache_initial_size = len(g_githash_cache)
+            verbose("load_json_db githash cache db, initial_size: " + str(g_githash_cache_initial_size), LEVEL_3)
+    if len(infiles) > 4:
+        return {infile:get_git_file_hash_with_cache(infile, hash_alg) for infile in infiles}
+    return {infile:get_file_hash(infile, hash_alg) for infile in infiles}
 
 
 def get_build_tool_version(prog, pwd):
@@ -1013,23 +1042,19 @@ def get_build_tool_version(prog, pwd):
     return ''
 
 
-def get_build_tool_info(prog, pwd):
+def get_build_tool_info(prog, pwd, hash_alg):
     '''
     Get the build tool information.
     :param prog: the program binary
     :param pwd: present working directory of the shell command
     '''
-    if g_githash_cache and prog in g_githash_cache:
-        return g_githash_cache[prog]
     afile = get_real_path(prog, pwd)
-    ahash = get_git_file_hash(afile)
+    ahash = get_file_hash(afile, hash_alg)
     version_output = get_build_tool_version(prog, pwd)
-    verbose("Saving build_tool githash cache, hash: " + ahash + " afile: " + afile, LEVEL_3)
     if version_output:
         ret = "build_tool: " + ahash + " path: " + get_noroot_path(afile) + " tool_version: " + version_output
     else:
         ret = "build_tool: " + ahash + " path: " + get_noroot_path(afile)
-    g_githash_cache[prog] = ret
     return ret
 
 
@@ -1037,32 +1062,13 @@ def get_build_tool_info(prog, pwd):
 #### Start of gitbom ADG doc save routines ####
 ############################################################
 
-def save_gitbom_doc(gitbom_doc_file, destdir, checksum=''):
-    '''
-    Save the generated gitBOM doc file to destdir.
-    :param gitbom_doc_file: the generated gitBOM doc file to save
-    :param destdir: destination directory to store the created gitBOM doc file
-    :param checksum: the githash of gitbom_doc_file
-    returns the saved gitbom doc file path
-    '''
-    if checksum:
-        ahash = checksum
-    else:
-        ahash = get_git_file_hash(gitbom_doc_file, use_cache=False)
-    subdir = os.path.join(destdir, ahash[:2])
-    object_file = os.path.join(subdir, ahash[2:])
-    if not os.path.exists(object_file):
-        cmd = 'mkdir -p ' + subdir + ' && /usr/bin/cp ' + gitbom_doc_file + ' ' + object_file + ' || true'
-        os.system(cmd)
-    return object_file
-
-
-def create_gitbom_doc_text(infiles, infile_checksums, destdir):
+def create_gitbom_doc_text(infiles, infile_checksums, destdir, hash_alg="sha1"):
     """
     Create the gitBOM doc text contents
     :param infiles: the list of input files
     :param infile_checksums: a dict of checksums of input files
     :param destdir: destination directory to create the gitbom doc file
+    :param hash_alg: the hashing algorithm, sha1 or sha256
     """
     if not infiles:
         return ''
@@ -1075,7 +1081,7 @@ def create_gitbom_doc_text(infiles, infile_checksums, destdir):
             verbose("Read bom_id " + bom_id + " from symlink for blob " + ahash, LEVEL_4)
         # if symlink does not exist, we try to extract the embedded bom_id in the infile if configured
         if not bom_id and args.read_bomid_from_file_for_adg:
-            bom_id = get_embedded_bom_id_of_elf_file(infile)
+            bom_id = get_embedded_bom_id_of_elf_file(infile, hash_alg)
             if bom_id:
                 verbose("Read bom_id " + bom_id + " from ELF file for blob " + ahash, LEVEL_4)
         if bom_id:
@@ -1083,24 +1089,6 @@ def create_gitbom_doc_text(infiles, infile_checksums, destdir):
         lines.append(line)
     lines.sort()
     return '\n'.join(lines) + '\n'
-
-
-def create_gitbom_doc(infiles, infile_checksums, destdir):
-    """
-    Create the gitBOM doc text contents
-    :param infiles: the list of input files
-    :param infile_checksums: a dict of checksums of input files
-    :param destdir: destination directory to create the gitbom doc file
-    returns the file path of the created gitBOM doc.
-    """
-    #print("entering create_gitbom_doc: infile_checksums: " + str(infile_checksums))
-    lines = create_gitbom_doc_text(infiles, infile_checksums, destdir)
-    output_file = os.path.join(g_tmpdir, "bomsh_temp_gitbom_file")
-    write_text_file(output_file, lines)
-    object_dir = os.path.join(destdir, "objects")
-    ahash = get_git_file_hash(output_file, use_cache=False)
-    verbose("created ADG doc, doc_id: " + ahash + " #infiles: " + str(len(infiles)), LEVEL_4)
-    return save_gitbom_doc(output_file, object_dir, ahash)
 
 
 def get_hash_of_adg_doc(adg_doc_file):
@@ -1177,136 +1165,41 @@ def create_symlink_for_adg_doc(ahash, adg_doc, destdir):
     return symlink
 
 
-g_embed_bom_script_sha1 = '''
-git hash-object HELLO_GITBOM_FILE | head --bytes=-1 | xxd -r -p > /tmp/bomsh_bom_gitref_file
-if objdump -s -j .bom HELLO_FILE >/dev/null 2>/dev/null ; then
-  objcopy --update-section .bom=/tmp/bomsh_bom_gitref_file HELLO_FILE HELLO_WITH_BOM_FILE
+g_embed_bom_script = '''
+if objdump -s -j .note.gitbom HELLO_FILE >/dev/null 2>/dev/null ; then
+  GITBOM_BUILD_MODE= objcopy --update-section .note.gitbom=NOTE_FILE --set-section-flags .note.gitbom=alloc,readonly --set-section-alignment .note.gitbom=4 HELLO_FILE >/dev/null 2>/dev/null
 else
-  objcopy --add-section .bom=/tmp/bomsh_bom_gitref_file HELLO_FILE HELLO_WITH_BOM_FILE
+  GITBOM_BUILD_MODE= objcopy --add-section .note.gitbom=NOTE_FILE --set-section-flags .note.gitbom=alloc,readonly --set-section-alignment .note.gitbom=4 HELLO_FILE >/dev/null 2>/dev/null
 fi
 '''
 
-g_embed_bom_script_sha256 = '''
-printf "blob $(wc -c < HELLO_GITBOM_FILE)\\0" | cat - HELLO_GITBOM_FILE | sha256sum | head --bytes=-4 | xxd -r -p > /tmp/bomsh_bom_gitref_file
-if objdump -s -j .bom HELLO_FILE >/dev/null 2>/dev/null ; then
-  objcopy --update-section .bom=/tmp/bomsh_bom_gitref_file HELLO_FILE HELLO_WITH_BOM_FILE
-else
-  objcopy --add-section .bom=/tmp/bomsh_bom_gitref_file HELLO_FILE HELLO_WITH_BOM_FILE
-fi
-'''
-
-def embed_gitbom_hash_elf_section(afile, gitbom_doc, outfile):
-    """
-    Embed the .bom ELF section into an ELF file.
-    :param afile: the ELF file to insert the embedded .bom section
-    :param gitbom_doc: gitBOM doc for this afile
-    :param outfile: output file with the .bom ELF section
-    """
-    #verbose("afile: " + afile + "gitbom_doc: " + gitbom_doc + " outfile: " + outfile)
-    if args.hashtype and args.hashtype.lower() == "sha256":
-        embed_script = g_embed_bom_script_sha256
-    else:
-        embed_script = g_embed_bom_script_sha1
-    embed_script = embed_script.replace("HELLO_FILE", afile).replace("HELLO_GITBOM_FILE", gitbom_doc).replace("HELLO_WITH_BOM_FILE", outfile)
-    #verbose("The embed_bom script:" + embed_script)
-    get_shell_cmd_output(embed_script)
-
-
-def gitbom_may_embed_bomid(outfile, adg_doc, outfile_checksum, prog):
-    '''
-    Check to see if we want to embed bomid section into outfile
-    :param outfile: the output file
-    :param adg_doc: the ADG doc whose bomid is to be embedded
-    :param outfile_checksum: the checksum of the output file, must not be empty
-    :param prog: the program binary
-    returns the new file hash if embedded
-    '''
-    #print("gitbom_may_embed_bomid, prog: " + prog + " outfile: " + outfile + " adg_doc: " + adg_doc)
-    # check if prog is among the configured command list to embed bomid
-    if prog not in g_embed_bom_after_commands:
-        return outfile_checksum
-    verbose("Embed bomid into outfile: " + outfile + " adg_doc: " + adg_doc + " prog: " + prog, LEVEL_3)
-    embed_gitbom_hash_elf_section(outfile, adg_doc, outfile)
-    return get_git_file_hash(outfile, use_cache=False)
-
-
-def create_adg_and_symlink(outfile, infiles, outfile_checksum='', infile_checksums='', prog='', skip_embed_bomid=False):
-    '''
-    Create ADG doc for a list of infiles and create a symlink for the outfile
-    It will also embed bom_id into the outfile if requested
-
-    :param outfile: the output file
-    :param infiles: a list of input files
-    :param outfile_checksum: the checksum of the output file, must not be empty
-    :param infile_checksums: a dict of checksums of input files
-    :param prog: the program binary
-    '''
-    #print("entering create_adg_and_symlink, outfile: " + outfile + " outfile_checksum: " + outfile_checksum + " infiles: " + str(infiles) + " infile_checksums: " + str(infile_checksums))
-    # infiles and outfile must not be empty
-    if not outfile or not infiles:
-        return outfile_checksum
-    if not outfile_checksum:
-        outfile_checksum = get_git_file_hash(outfile)
-    destdir = g_bomdir
-    adg_doc = ''
-    if not infile_checksums:
-        infile_checksums = {infile: get_git_file_hash_with_cache(infile) for infile in infiles}
-    if len(infiles) == 1:  # this is unary transform, special handling may be needed
-        if outfile_checksum == infile_checksums[infiles[0]]:
-            verbose("Unary transform with same input and output file, do nothing", LEVEL_3)
-            return outfile_checksum
-        #print("this is unary transform, infile: " + infiles[0] + " outfile: " + outfile)
-        adg_doc_infile = read_symlink_for_adg_doc(infile_checksums[infiles[0]], destdir)
-        if adg_doc_infile and not args.new_gitbom_doc_for_unary_transform:
-            adg_doc = adg_doc_infile
-            verbose("Unary transform for out file " + outfile + ", reuse ADG doc " + adg_doc, LEVEL_3)
-    if not adg_doc:
-        adg_doc = create_gitbom_doc(infiles, infile_checksums, destdir)
-    # see if bomid-embedding is needed, which can potentially change outfile_checksum
-    if not skip_embed_bomid:
-        outfile_checksum = gitbom_may_embed_bomid(outfile, adg_doc, outfile_checksum, prog)
-    # Finally create the symlink for the outfile_checksum
-    symlink = create_symlink_for_adg_doc(outfile_checksum, adg_doc, destdir)
-    return outfile_checksum
-
-
-def record_raw_info(outfile, infiles, pwd, argv_str, pid='', prog='', outfile_checksum='', infile_checksums='', ignore_this_record=False, skip_embed_bomid=False):
+def gitbom_record_hash(outfile_checksum, outfile, infiles, infile_checksums, pwd, argv_str, pid='', prog='', hash_alg="sha1", ignore_this_record=False):
     '''
     Record the raw info for a list of infiles and outfile
 
+    :param outfile_checksum: the checksum of the output file
     :param outfile: the output file
     :param infiles: a list of input files
+    :param infile_checksums: a dict of checksums of input files
     :param pwd: present working directory of the shell command
     :param argv_str: the full command with all its command line options/parameters
     :param pid: PID of the shell command
     :param prog: the program binary
-    :param outfile_checksum: the checksum of the output file
-    :param infile_checksums: a dict of checksums of input files
+    :param hash_alg: the hashing algorithm, sha1 or sha256
     :param ignore_this_record: info only, ignore this record for create_bom processing
-    :param skip_embed_bomid: skip embedding bomid to outfile
     '''
     # infiles can be empty, but outfile must not be empty
     if not outfile:
         return ''
     if not infiles:
         verbose("Warning: infiles is empty in record_raw! outfile: " + outfile + " prog: " + prog)
-    if not args.no_githash_cache_file:
-        global g_githash_cache
-        global g_githash_cache_initial_size
-        if len(infiles) > 1 and not g_githash_cache and os.path.exists(g_githash_cache_file):
-            g_githash_cache = load_json_db(g_githash_cache_file)
-            g_githash_cache_initial_size = len(g_githash_cache)
-            verbose("load_json_db githash cache db, initial_size: " + str(g_githash_cache_initial_size), LEVEL_3)
     if not outfile_checksum:
-        outfile_checksum = get_git_file_hash(outfile)
+        outfile_checksum = get_file_hash(outfile, hash_alg)
     if not infile_checksums:
-        infile_checksums = {infile: get_git_file_hash_with_cache(infile) for infile in infiles}
-    if not args.create_no_adg and not ignore_this_record:
-        # Create the ADG docs and symlinks before recording the raw info
-        outfile_checksum = create_adg_and_symlink(outfile, infiles, outfile_checksum, infile_checksums, prog, skip_embed_bomid)
+        infile_checksums = get_infile_hashes(infiles, hash_alg)
     bomid = ''
     if args.record_raw_bomid:
-        bomid = get_embedded_bom_id_of_elf_file(outfile)
+        bomid = get_embedded_bom_id_of_elf_file(outfile, hash_alg)
     if bomid:
         lines = ["\noutfile: " + outfile_checksum + " path: " + get_noroot_path(outfile) + " bomid: " + bomid,]
     else:
@@ -1317,11 +1210,8 @@ def record_raw_info(outfile, infiles, pwd, argv_str, pid='', prog='', outfile_ch
             cve_result = cve_check_rule_for_file(infile)
         bomid = ''
         if args.record_raw_bomid:
-            bomid = get_embedded_bom_id_of_elf_file(infile)
-        if infile_checksums:
-            infile_str = "infile: " + infile_checksums[infile] + " path: " + get_noroot_path(infile)
-        else:
-            infile_str = "infile: " + get_git_file_hash_with_cache(infile) + " path: " + get_noroot_path(infile)
+            bomid = get_embedded_bom_id_of_elf_file(infile, hash_alg)
+        infile_str = "infile: " + infile_checksums[infile] + " path: " + get_noroot_path(infile)
         if cve_result:
             infile_str += cve_result
         if bomid:
@@ -1331,15 +1221,147 @@ def record_raw_info(outfile, infiles, pwd, argv_str, pid='', prog='', outfile_ch
         lines.append("ignore_this_record: information only")
     lines.append("build_cmd: " + argv_str)
     if args.record_build_tool and prog:
-        build_tool_info = get_build_tool_info(prog, pwd)
+        build_tool_info = get_build_tool_info(prog, pwd, hash_alg)
         lines.append(build_tool_info)
     if pid:
         lines.append("==== End of raw info for PID " + pid + " process\n\n")
     else:
         lines.append("==== End of raw info for this process\n\n")
     outstr = '\n'.join(lines)
-    append_text_file(g_raw_logfile, outstr)
+    append_text_file(g_raw_logfile + "." + hash_alg, outstr)
     return outstr
+
+
+def gitbom_create_temp_adg_doc(infiles, infile_hashes, destdir, hash_alg):
+    '''
+    Create the temporary ADG doc for a list of infiles and their hashes
+    :param infiles: a list of input files
+    :param infile_hashes: a dict of {infile => hash}
+    :param destdir: the destination directory to save this ADG doc file
+    :param hash_alg: the hashing algorithm, sha1 or sha256
+    '''
+    lines = create_gitbom_doc_text(infiles, infile_hashes, destdir, hash_alg)
+    output_file = os.path.join(g_tmpdir, "bomsh_temp_gitbom_file." + hash_alg)
+    firstline = "gitoid:blob:" + hash_alg + "\n"
+    write_text_file(output_file, firstline + lines)
+    verbose("Create temp ADG doc: " + output_file + " for #infiles: " + str(len(infiles)), LEVEL_4)
+    return output_file
+
+
+def gitbom_rename_adg_doc(adg_doc, adg_hash, destdir):
+    '''
+    Rename temporary ADG doc to its .gitbom/objects/xx/yy..yy file.
+    :param adg_doc: the temporary ADG doc file
+    :param adg_hash: the sha1 or sha256 hash of the ADG doc file
+    :param destdir: the destination directory to save this ADG doc file
+    '''
+    verbose("created ADG doc, doc_id: " + adg_hash, LEVEL_4)
+    object_dir = os.path.join(destdir, "objects", adg_hash[:2])
+    object_file = os.path.join(object_dir, adg_hash[2:])
+    if not os.path.exists(object_file):
+        cmd = 'mkdir -p ' + object_dir + ' && mv ' + adg_doc + ' ' + object_file + ' || true'
+        os.system(cmd)
+    return object_file
+
+
+def gitbom_embed_bomid_elf(outfile, bomid_sha1, bomid_sha256):
+    '''
+    Embed bomid ELF note section into outfile
+    :param outfile: the output file
+    :param bomid_sha1: the bomid string of SHA1 hash
+    :param bomid_sha256: the bomid string of SHA256 hash
+    '''
+    if not bomid_sha1 and not bomid_sha256:
+        return
+    note = b''
+    if bomid_sha1:
+        note += b'\x07\x00\x00\x00\x14\x00\x00\x00\x01\x00\x00\x00\x47\x49\x54\x42\x4f\x4d\x00\x00' + bytes.fromhex(bomid_sha1)
+    if bomid_sha256:
+        note += b'\x07\x00\x00\x00\x20\x00\x00\x00\x02\x00\x00\x00\x47\x49\x54\x42\x4f\x4d\x00\x00' + bytes.fromhex(bomid_sha256)
+    afile = os.path.join(g_tmpdir, "bomsh_hook_bomid")
+    #afile = os.path.join(g_tmpdir, "bomsh_hook_bomid_pid" + str(os.getpid()))
+    write_binary_file(afile, note)
+    embed_script = g_embed_bom_script.replace("HELLO_FILE", outfile).replace("NOTE_FILE", afile)
+    get_shell_cmd_output(embed_script)
+    #os.remove(afile)
+    verbose("Embed bomid into outfile: " + outfile + " bomid_sha1: " + bomid_sha1 + " bomid_sha256: " + bomid_sha256, LEVEL_3)
+
+
+def gitbom_create_adg_and_record_hash(outfile, infiles, infile_hashes, adg_doc, adg_hash, pwd, argv_str, pid='', prog='', outhash='', hash_alg="sha1", ignore_this_record=False):
+    '''
+    Create ADG docs and record the raw info for a list of infiles and outfile
+
+    :param outfile: the output file
+    :param infiles: a list of input files
+    :param infile_hashes: a dict of {infile => hash}
+    :param adg_doc: the temporary ADG doc file
+    :param adg_hash: the sha1 or sha256 hash of the ADG doc file
+    :param pwd: present working directory of the shell command
+    :param argv_str: the full command with all its command line options/parameters
+    :param pid: PID of the shell command
+    :param prog: the program binary
+    :param outhash: the checksum of the output file
+    :param hash_alg: the hashing algorithm, sha1 or sha256
+    :param ignore_this_record: info only, ignore this record for create_bom processing
+    '''
+    verbose("Entering gitbom_create_adg_and_record_hash, outhash: " + outhash + " outfile: " + outfile, LEVEL_4)
+    if not outhash:
+        outhash = get_file_hash(outfile, hash_alg, use_cache=False)
+    destdir = g_bomdir
+    if not infile_hashes:
+        infile_hashes = get_infile_hashes(infiles, hash_alg)
+        if not args.create_no_adg and not ignore_this_record:
+            adg_doc = gitbom_create_temp_adg_doc(infiles, infile_hashes, destdir, hash_alg)
+            adg_hash = get_file_hash(adg_doc, hash_alg, use_cache=False)
+    if not args.create_no_adg and not ignore_this_record:
+        new_adg_doc = gitbom_rename_adg_doc(adg_doc, adg_hash, destdir)
+        create_symlink_for_adg_doc(outhash, new_adg_doc, destdir)
+    gitbom_record_hash(outhash, outfile, infiles, infile_hashes, pwd, argv_str, pid=pid, prog=prog, hash_alg=hash_alg, ignore_this_record=ignore_this_record)
+
+
+def record_raw_info(outfile, infiles, pwd, argv_str, pid='', prog='', outfile_checksum='', infile_checksums='', ignore_this_record=False):
+    '''
+    Not just record the raw info for a list of infiles and outfile.
+    The gitBOM extra work to do for the build step
+
+    :param outfile: the output file
+    :param infiles: a list of input files
+    :param pwd: present working directory of the shell command
+    :param argv_str: the full command with all its command line options/parameters
+    :param pid: PID of the shell command
+    :param prog: the program binary
+    :param outfile_checksum: the checksum of the output file
+    :param infile_checksums: a dict of checksums of input files, { hash_alg : { infile : hash } }
+    :param ignore_this_record: info only, ignore this record for create_bom processing
+    '''
+    sha1_infile_hashes = []
+    sha1_adg_doc = ''
+    sha1_adg_hash = ''
+    sha256_infile_hashes = []
+    sha256_adg_doc = ''
+    sha256_adg_hash = ''
+    destdir = g_bomdir
+    # bom_id embedding must occur before creating gitBOM doc and symlink, also before recording hashes of output file
+    if not args.no_auto_embed_bom_for_compiler_linker and not ignore_this_record:
+        if "sha1" in g_hashtypes:
+            if infile_checksums and "sha1" in infile_checksums:
+                sha1_infile_hashes = infile_checksums["sha1"]
+            else:
+                sha1_infile_hashes = get_infile_hashes(infiles, "sha1")
+            sha1_adg_doc = gitbom_create_temp_adg_doc(infiles, sha1_infile_hashes, destdir, "sha1")
+            sha1_adg_hash = get_file_hash(sha1_adg_doc, "sha1", use_cache=False)
+        if "sha256" in g_hashtypes:
+            if infile_checksums and "sha256" in infile_checksums:
+                sha256_infile_hashes = infile_checksums["sha256"]
+            else:
+                sha256_infile_hashes = get_infile_hashes(infiles, "sha256")
+            sha256_adg_doc = gitbom_create_temp_adg_doc(infiles, sha256_infile_hashes, destdir, "sha256")
+            sha256_adg_hash = get_file_hash(sha256_adg_doc, "sha256", use_cache=False)
+        gitbom_embed_bomid_elf(outfile, sha1_adg_hash, sha256_adg_hash)
+    if "sha1" in g_hashtypes:
+        gitbom_create_adg_and_record_hash(outfile, infiles, sha1_infile_hashes, sha1_adg_doc, sha1_adg_hash, pwd, argv_str, pid, prog=prog, ignore_this_record=ignore_this_record, hash_alg="sha1")
+    if "sha256" in g_hashtypes:
+        gitbom_create_adg_and_record_hash(outfile, infiles, sha256_infile_hashes, sha256_adg_doc, sha256_adg_hash, pwd, argv_str, pid, prog=prog, ignore_this_record=ignore_this_record, hash_alg="sha256")
 
 ############################################################
 #### End of hash/checksum routines ####
@@ -1461,6 +1483,26 @@ def escape_shell_command(gcc_cmd):
     return gcc_cmd
 
 
+def rerun_shell_command(pwd, gcc_cmd):
+    '''
+    Try to rerun a shell command, usually gcc_cmd or ld_cmd
+    '''
+    if g_shell_cmd_rootdir != "/":
+        chroot_pwd = pwd
+        if pwd.startswith(g_shell_cmd_rootdir):
+            chroot_pwd = pwd[len(g_shell_cmd_rootdir):]
+        if not chroot_pwd:
+            chroot_pwd = "/"
+        cmd = 'chroot ' + g_shell_cmd_rootdir + ' sh -c "cd ' + chroot_pwd + " ; " + escape_shell_command(gcc_cmd) + '" 2>/dev/null || true'
+    else:
+        mypwd = pwd
+        if not mypwd:
+            mypwd = "/"
+        cmd = "cd " + mypwd + " ; " + escape_shell_command(gcc_cmd) + " 2>/dev/null || true"
+    verbose("rerun shell cmd: " + cmd)
+    get_shell_cmd_output(cmd)
+
+
 def get_c_file_depend_files(gcc_cmd, pwd):
     '''
     Get all the depend files for a gcc command which compiles C source code file
@@ -1559,13 +1601,17 @@ def handle_gcc_ctoexe_command(prog, pwddir, argv_str, pid, outfile, infiles):
     :param pwddir: the present working directory for the command
     :param argv_str: the full command with all its command line options/parameters
     :param pid: PID of the shell command
+    :param outfile: the output file
+    :param infiles: the list of input files
     returns the outfile
     '''
-    ldout_file = get_bomsh_ldout_file(get_git_file_hash(outfile))
-    if not os.path.exists(ldout_file):
-        verbose("Warning: ldout file is not found, simply record outfile/infiles for this command")
-        record_raw_info(outfile, infiles, pwddir, argv_str, pid, prog=prog)
-        return outfile
+    ldout_files = { hash_alg: get_bomsh_ldout_file(get_file_hash(outfile, hash_alg)) for hash_alg in g_hashtypes }
+    for hash_alg in ldout_files:
+        ldout_file = ldout_files[hash_alg]
+        if not os.path.exists(ldout_file):
+            verbose("Warning: ldout file is not found, simply record outfile/infiles for this command")
+            record_raw_info(outfile, infiles, pwddir, argv_str, pid, prog=prog)
+            return outfile
     cfiles = get_source_files_in_files(infiles)
     if not args.no_dependent_headers:
         if len(cfiles) == 1:
@@ -1575,22 +1621,30 @@ def handle_gcc_ctoexe_command(prog, pwddir, argv_str, pid, outfile, infiles):
             depends_list = get_c_file_depend_files_multi(argv_str, pwddir, cfiles)
     else:
         depends_list = [(afile, (afile,)) for afile in cfiles]
-    tmp_infiles = get_tmp_infiles_from_ldout_file(ldout_file)
-    if len(depends_list) != len(tmp_infiles):
-        verbose("Warning: #depends " + str(len(depends_list)) + " is not equal to #tmp_infiles " + str(len(tmp_infiles)) + ", simply record outfile/infiles for this command")
-        record_raw_info(outfile, infiles, pwddir, argv_str, pid, prog=prog)
-        return outfile
-    new_depends_list = []
-    for i in range(len(tmp_infiles)):
-        new_depends_list.append( (tmp_infiles[i][0], tmp_infiles[i][1], depends_list[i][1]) )
-    #print("handle_gcc_ctoexe_command, the new depends_list: " + str(new_depends_list))
-    for depends in new_depends_list:
-        # no need to embed bomid for intermediate /tmp/cc*.o files
-        record_raw_info(depends[1], depends[2], pwddir, argv_str, pid, prog=prog, outfile_checksum=depends[0], skip_embed_bomid=True)
-    outfile_infiles = get_outfile_infiles_from_ldout_file(ldout_file)
-    record_raw_info(outfile, outfile_infiles[1].keys(), pwddir, argv_str, pid, prog=prog, outfile_checksum=outfile_infiles[0][0], infile_checksums=outfile_infiles[1])
+    # Read all text lines from ldout_files
+    ldout_lines = { hash_alg: read_text_file( ldout_files[hash_alg] ).splitlines() for hash_alg in ldout_files }
+    d_tmp_infiles = { hash_alg: get_tmp_infiles_from_ldout_lines( ldout_lines[hash_alg] ) for hash_alg in ldout_lines }
+    for hash_alg in g_hashtypes:
+        tmp_infiles = d_tmp_infiles[hash_alg]
+        # number of depends_list must match number of tmp_infiles
+        new_depends_list = [ (tmp_infiles[i][0], tmp_infiles[i][1], depends_list[i][1]) for i in range(len(depends_list)) ]
+        #print("handle_gcc_ctoexe_command, the new depends_list: " + str(new_depends_list))
+        for depends in new_depends_list:
+            # no need to embed bomid for intermediate /tmp/cc*.o files, so skip calling gitbom_embed_bomid_elf
+            # but we still try to create ADG docs and record the hashes of output and input files.
+            gitbom_create_adg_and_record_hash(depends[1], depends[2], '', '', '', pwddir, argv_str, pid, prog=prog, outhash=depends[0], hash_alg=hash_alg)
+            #record_raw_info(depends[1], depends[2], pwddir, argv_str, pid, prog=prog, outfile_checksum=depends[0], skip_embed_bomid=True)
+    d_infiles = { hash_alg: get_infiles_from_ldout_lines( ldout_lines[hash_alg] ) for hash_alg in ldout_files }
+    new_infiles = []
+    for hash_alg in d_infiles:
+        new_infiles = d_infiles[hash_alg].keys()
+        # sha1 and sha256 should have the exactly same list of infiles
+        break
+    # still try to embed bomid for the output file
+    record_raw_info(outfile, new_infiles, pwddir, argv_str, pid, prog=prog, infile_checksums=d_infiles)
     # the ldout file can now be removed
-    os.remove(ldout_file)
+    for hash_alg in ldout_files:
+        os.remove(ldout_files[hash_alg])
     return outfile
 
 
@@ -1641,25 +1695,24 @@ def process_gcc_command(prog, pwddir, argv_str, pid):
     return outfile
 
 
-def is_there_any_tmp_o_file(afiles):
+def get_first_tmp_o_file(afiles):
     '''
-    Whether there is any /tmp/cc*.o file in a list of files
+    Get the first one if there is any /tmp/cc*.o file in a list of files
     '''
     for afile in afiles:
         bfile = get_noroot_path(afile)
-        if bfile[:5] == "/tmp/":
-            return True
-    return False
+        if bfile[:5] == "/tmp/" and bfile[-2:] == ".o":
+            return afile
+    return ''
 
 
-def get_tmp_infiles_from_ldout_file(ldout_file):
+def get_tmp_infiles_from_ldout_lines(ldout_lines):
     '''
     Get a list of /tmp/cc*.o files from LD out file
     :param ldout_file: the ldout file that stores the record raw_info for this LD command
     '''
     infiles = []
-    lines = read_text_file(ldout_file).splitlines()
-    for line in lines:
+    for line in ldout_lines:
         if line[:8] == "infile: ":
             tokens = line.split()
             infile = tokens[3]
@@ -1668,22 +1721,17 @@ def get_tmp_infiles_from_ldout_file(ldout_file):
     return infiles
 
 
-def get_outfile_infiles_from_ldout_file(ldout_file):
+def get_infiles_from_ldout_lines(ldout_lines):
     '''
-    Get both the outfile and the list of infiles from LD out file
+    Get the list of infiles and their hashes from LD out file
     :param ldout_file: the ldout file that stores the record raw_info for this LD command
     '''
-    outfile = ('', '')
     infiles = {}
-    lines = read_text_file(ldout_file).splitlines()
-    for line in lines:
+    for line in ldout_lines:
         if line[:8] == "infile: ":
             tokens = line.split()
             infiles[tokens[3]] = tokens[1]
-        elif line[:9] == "outfile: ":
-            tokens = line.split()
-            outfile = (tokens[1], tokens[3])
-    return (outfile, infiles)
+    return infiles
 
 
 def is_gcc_invoked_ld_cmd(argv_str):
@@ -1702,13 +1750,13 @@ def get_bomsh_ldout_file(ahash):
     return os.path.join(g_tmpdir, "bomsh_hook_ldout." + ahash)
 
 
-def write_bomsh_ldout_file(outfile, raw_str):
+def write_bomsh_ldout_file(outfile, raw_str, hash_alg="sha1"):
     '''
     Write a file to indicate an outfile is linker output
     :param prog: the program binary
     :param raw_str: the str to write, this is actually the raw-info recorded for this LD cmd
     '''
-    ahash = get_git_file_hash(outfile)
+    ahash = get_file_hash(outfile, hash_alg)
     afile = get_bomsh_ldout_file(ahash)
     write_text_file(afile, raw_str)
 
@@ -1740,11 +1788,17 @@ def process_ld_command(prog, pwddir, argv_str, pid):
         return ''
     # explicitly remove shared libraries from the list of infiles
     infiles = [afile for afile in infiles if not is_shared_library(afile)]
-    if is_gcc_invoked_ld_cmd(argv_str) and is_there_any_tmp_o_file(infiles):
+    first_tmp_o = get_first_tmp_o_file(infiles)
+    if first_tmp_o and is_gcc_invoked_ld_cmd(argv_str):
+        if not args.no_auto_embed_bom_for_compiler_linker:
+            # insert a dummy .note.gitbom ELF section to be linked into the executable
+            gitbom_embed_bomid_elf(first_tmp_o, '1'*40, '2'*64)
+            rerun_shell_command(pwddir, argv_str)
         # this ld is invoked by gcc_ctoexe, and will be processed by later gcc, so this ld record is for info only
-        raw_str = record_raw_info(outfile, infiles, pwddir, argv_str, pid, prog=prog, ignore_this_record=True)
-        # write a bomsh_ldout file for use by later gcc cmd, which is the parent process
-        write_bomsh_ldout_file(outfile, raw_str)
+        for hash_alg in g_hashtypes:
+            raw_str = gitbom_record_hash('', outfile, infiles, '', pwddir, argv_str, pid=pid, ignore_this_record=True, hash_alg=hash_alg)
+            # Write the raw info to a file for later use by gcc
+            write_bomsh_ldout_file(outfile, raw_str, hash_alg)
     else:
         record_raw_info(outfile, infiles, pwddir, argv_str, pid, prog=prog)
     return outfile
@@ -1779,7 +1833,7 @@ def process_golang_command(prog, pwddir, argv_str):
     return outfile
 
 
-def save_pre_exec_file_hashes(afiles, pid):
+def save_pre_exec_file_hashes(afiles, pid, hash_alg="sha1"):
     '''
     Save the file hashes of pre_exec mode
     :param afiles: a list of files to save hashes
@@ -1787,19 +1841,19 @@ def save_pre_exec_file_hashes(afiles, pid):
     '''
     lines = []
     for afile in afiles:
-        ahash = get_git_file_hash(afile)
+        ahash = get_file_hash(afile, hash_alg)
         lines.append(ahash + ' ' + afile)
-    afile = os.path.join(g_tmpdir, "bomsh_hook_pid" + str(pid) + ".pre_exec_hashes")
+    afile = os.path.join(g_tmpdir, "bomsh_hook_pid" + str(pid) + ".pre_exec_hashes." + hash_alg)
     write_text_file(afile, '\n'.join(lines))
 
 
-def collect_pre_exec_file_hashes(pid):
+def collect_pre_exec_file_hashes(pid, hash_alg="sha1"):
     '''
     Collect the saved file hashes of pre_exec mode
     :param pid: the process PID, must not be empty
     returns a dict of file-path => hash mappings
     '''
-    afile = os.path.join(g_tmpdir, "bomsh_hook_pid" + str(pid) + ".pre_exec_hashes")
+    afile = os.path.join(g_tmpdir, "bomsh_hook_pid" + str(pid) + ".pre_exec_hashes." + hash_alg)
     lines = read_text_file(afile).splitlines()
     hashes = {}
     for line in lines:
@@ -1827,11 +1881,12 @@ def process_sepdebugcrcfix_command(prog, pwddir, argv_str, pid):
     verbose(prog + " infiles: " + str(infiles), LEVEL_3)
     # save hashes of infiles to a temp file for later use in post-exec mode
     if args.pre_exec:
-        save_pre_exec_file_hashes(infiles, pid)
+        for hash_alg in g_hashtypes:
+            save_pre_exec_file_hashes(infiles, pid, hash_alg)
     else:
-        hashes = collect_pre_exec_file_hashes(pid)
+        hashes = { hash_alg : collect_pre_exec_file_hashes(pid, hash_alg) for hash_alg in g_hashtypes }
         for infile in infiles:
-            record_raw_info(infile, [infile,], pwddir, argv_str, pid, infile_checksums=hashes)
+            record_raw_info(infile, [infile,], pwddir, argv_str, pid, prog=prog, infile_checksums=hashes)
     return ''
 
 
@@ -1854,16 +1909,17 @@ def process_generic_shell_command(prog, pwddir, argv_str, pid):
             # no need to record info for pre-exec mode
             return ''
         # outfile is different from infile, record info for post-exec mode only
-        record_raw_info(outfile, infiles, pwddir, argv_str)
+        record_raw_info(outfile, infiles, pwddir, argv_str, prog=prog)
         return outfile
     # there is no outfile or outfile is same as infile, need to handle both pre-exec and post-exec mode.
     # save hashes of infiles to a temp file for later use in post-exec mode
     if args.pre_exec:
-        save_pre_exec_file_hashes(infiles, pid)
+        for hash_alg in g_hashtypes:
+            save_pre_exec_file_hashes(infiles, pid, hash_alg)
     else:
-        hashes = collect_pre_exec_file_hashes(pid)
+        hashes = { hash_alg : collect_pre_exec_file_hashes(pid, hash_alg) for hash_alg in g_hashtypes }
         for infile in infiles:
-            record_raw_info(infile, [infile,], pwddir, argv_str, pid, infile_checksums=hashes)
+            record_raw_info(infile, [infile,], pwddir, argv_str, pid, prog=prog, infile_checksums=hashes)
     return outfile
 
 
@@ -1878,10 +1934,11 @@ def shell_command_record_same_file(prog, pwddir, argv_str, pid, cmdname):
         return ''
     # save hashes of infiles to a temp file for later use in post-exec mode
     if args.pre_exec:
-        save_pre_exec_file_hashes([outfile,], pid)
+        for hash_alg in g_hashtypes:
+            save_pre_exec_file_hashes([outfile,], pid, hash_alg)
     else:
-        hashes = collect_pre_exec_file_hashes(pid)
-        record_raw_info(outfile, [outfile,], pwddir, argv_str, pid, infile_checksums=hashes)
+        hashes = { hash_alg : collect_pre_exec_file_hashes(pid, hash_alg) for hash_alg in g_hashtypes }
+        record_raw_info(outfile, [outfile,], pwddir, argv_str, pid, prog=prog, infile_checksums=hashes)
     return outfile
 
 
@@ -1954,7 +2011,7 @@ def process_objcopy_command(prog, pwddir, argv_str, pid):
         shell_command_record_same_file(prog, pwddir, argv_str, pid, "objcopy")
         return outfile
     if not args.pre_exec:  # different input/output file, record only if post_exec
-        record_raw_info(outfile, [infile,], pwddir, argv_str)
+        record_raw_info(outfile, [infile,], pwddir, argv_str, prog=prog)
     return outfile
 
 
@@ -1973,7 +2030,7 @@ def process_bzImage_build_command(prog, pwddir, argv_str):
     outfile = get_real_path(tokens[-1], pwddir)
     infiles = tokens[1 : len(tokens)-1]
     infiles = [get_real_path(afile, pwddir) for afile in infiles]
-    record_raw_info(outfile, infiles, pwddir, argv_str)
+    record_raw_info(outfile, infiles, pwddir, argv_str, prog=prog)
     return outfile
 
 
@@ -2004,17 +2061,18 @@ def process_ar_command(prog, pwddir, argv_str, pid):
         if not args.pre_exec:  # no need to do anything for pre-exec mode
             if is_empty_archive(outfile):  # no need to record or process if it is empty archive
                 return outfile
-            record_raw_info(outfile, infiles, pwddir, argv_str)
+            record_raw_info(outfile, infiles, pwddir, argv_str, prog=prog)
         return outfile
     # this should be "ar -s archive" cmd, equivalent of "ranlib archive" cmd
     if is_empty_archive(outfile):  # no need to record or process if it is empty archive
         return outfile
     # save hashes of infiles to a temp file for later use in post-exec mode
     if args.pre_exec:
-        save_pre_exec_file_hashes([outfile,], pid)
+        for hash_alg in g_hashtypes:
+            save_pre_exec_file_hashes([outfile,], pid, hash_alg)
     else:
-        hashes = collect_pre_exec_file_hashes(pid)
-        record_raw_info(outfile, [outfile,], pwddir, argv_str, pid, infile_checksums=hashes)
+        hashes = { hash_alg : collect_pre_exec_file_hashes(pid, hash_alg) for hash_alg in g_hashtypes }
+        record_raw_info(outfile, [outfile,], pwddir, argv_str, pid, prog=prog, infile_checksums=hashes)
     return outfile
 
 
@@ -2057,19 +2115,29 @@ def process_jar_command(prog, pwddir, argv_str):
     return outfile
 
 
-def create_pkg_symlink(outfile):
+def create_pkg_symlink(outfile, hash_alg):
+    '''
+    Create symlink to ADG doc for .deb/.rpm package for user convenience
+    :param outfile: the .deb or .rpm output file
+    :param hash_alg: the hashing algorithm, sha1 or sha256
+    '''
+    symlink = os.path.join(g_bomdir, "symlinks", get_file_hash(outfile, hash_alg))
+    if os.path.exists(symlink):
+        # create additional symlink for convenience
+        adg_link = outfile + ".gitbom_adg." + hash_alg
+        pkgs_dir = os.path.join(g_bomdir, "pkgs")
+        adg_link2 = os.path.join(pkgs_dir, os.path.basename(outfile) + ".gitbom_adg." + hash_alg)
+        cmd = "ln -sfr " + symlink + " " + adg_link + " ; mkdir -p " + pkgs_dir + " ; ln -sfr " + symlink + " " + adg_link2
+        os.system(cmd)
+
+
+def create_pkg_symlinks(outfile):
     '''
     Create symlink to ADG doc for .deb/.rpm package for user convenience
     :param outfile: the .deb or .rpm output file
     '''
-    symlink = os.path.join(g_bomdir, "symlinks", get_git_file_hash(outfile))
-    if os.path.exists(symlink):
-        # create additional symlink for convenience
-        adg_link = outfile + ".gitbom_adg"
-        pkgs_dir = os.path.join(g_bomdir, "pkgs")
-        adg_link2 = os.path.join(pkgs_dir, os.path.basename(outfile) + ".gitbom_adg")
-        cmd = "ln -sfr " + symlink + " " + adg_link + " ; mkdir -p " + pkgs_dir + " ; ln -sfr " + symlink + " " + adg_link2
-        os.system(cmd)
+    for hash_alg in g_hashtypes:
+        create_pkg_symlink(outfile, hash_alg)
 
 
 def process_dpkg_deb_command(prog, pwddir, argv_str):
@@ -2083,18 +2151,11 @@ def process_dpkg_deb_command(prog, pwddir, argv_str):
     (outfile, infiles) = get_all_subfiles_in_dpkg_deb_cmdline(argv_str, pwddir)
     if not outfile or not infiles:
         return outfile
-    record_raw_info(outfile, infiles, pwddir, argv_str)
+    record_raw_info(outfile, infiles, pwddir, argv_str, prog=prog)
     if "scratch-space" in outfile:  # example like building package 'openosc-dbgsym' in 'debian/.debhelper/scratch-space/build-openosc/openosc-dbgsym_1.0.5-1_amd64.deb'
         # build_and_rename_deb pattern: $build_dir = "debian/.debhelper/scratch-space/build-${package}"
         return outfile
-    symlink = os.path.join(g_bomdir, "symlinks", get_git_file_hash(outfile))
-    if os.path.exists(symlink):
-        # create one additional symlink for convenience
-        adg_link = outfile + ".gitbom_adg"
-        pkgs_dir = os.path.join(g_bomdir, "pkgs")
-        adg_link2 = os.path.join(pkgs_dir, os.path.basename(outfile) + ".gitbom_adg")
-        cmd = "ln -sfr " + symlink + " " + adg_link + " ; mkdir -p " + pkgs_dir + " ; ln -sfr " + symlink + " " + adg_link2
-        os.system(cmd)
+    create_pkg_symlinks(outfile)
     return outfile
 
 
@@ -2112,10 +2173,10 @@ def process_rpmbuild_command(prog, pwddir, argv_str, pid):
         verbose("Warning: No RPM files generated by rpmbuild")
         return ''
     for outfile, infiles, unbundle_dir in rpmlist:
-        record_raw_info(outfile, infiles, pwddir, argv_str, pid)
+        record_raw_info(outfile, infiles, pwddir, argv_str, pid, prog=prog)
         os.system("rm -rf " + unbundle_dir)
         #shutil.rmtree(unbundle_dir)
-        create_pkg_symlink(outfile)
+        create_pkg_symlinks(outfile)
     return ''
 
 
@@ -2458,6 +2519,13 @@ def rtd_parse_options():
         g_cc_linkers.extend(args.cc_linkers.split(","))
     #if args.strip_programs:
     #    g_strip_progs.extend(args.strip_programs.split(","))
+    if args.hashtype:  # only sha1 and sha256 are supported for now
+        if "sha1" in args.hashtype:
+            g_hashtypes.append("sha1")
+        if "sha256" in args.hashtype:
+            g_hashtypes.append("sha256")
+    if not g_hashtypes:
+        g_hashtypes.append("sha1")
 
     return args
 
