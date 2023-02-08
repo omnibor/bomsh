@@ -15,7 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Bomsh script to generate gitBOM artifact tree and gitBOM docs from the bomsh_hook_raw_logfile generated during software build.
+Bomsh script to generate OmniBOR artifact tree and OmniBOR docs from the bomsh_hook_raw_logfile generated during software build.
 
 Use by Bomsh or Bomtrace.
 
@@ -51,7 +51,7 @@ g_tmpdir = "/tmp"
 g_raw_logfile = "/tmp/bomsh_hook_raw_logfile"
 g_logfile = "/tmp/bomsh_createbom_logfile"
 g_jsonfile = "/tmp/bomsh_createbom_jsonfile"
-g_bomdir = os.path.join(os.getcwd(), ".gitbom")
+g_bomdir = os.path.join(os.getcwd(), ".omnibor")
 g_object_bomdir = os.path.join(g_bomdir, "objects")
 g_bomsh_bomdir = os.path.join(g_bomdir, "metadata", "bomsh")
 g_with_bom_dir = os.path.join(g_bomsh_bomdir, "with-bom-files")
@@ -59,8 +59,8 @@ g_with_bom_dir = os.path.join(g_bomsh_bomdir, "with-bom-files")
 # the constructed hash-tree DB from bomsh_hook_raw_logfile
 # { githash of binary file => list of githashes + metadata }
 g_treedb = {}
-# g_bomdb stores the binary file githash to gitBOM doc githash mapping
-# { githash of binary file => githash of its gitBOM doc }
+# g_bomdb stores the binary file githash to OmniBOR doc githash mapping
+# { githash of binary file => githash of its OmniBOR doc }
 g_bomdb = {}
 # g_pre_exec_db temporarily stores the pre-exec checksum of the same input/output file for strip/ranlib commands.
 g_pre_exec_db = {}
@@ -206,9 +206,9 @@ def find_all_regular_files(builddir):
 
 def save_gitbom_doc(gitbom_doc_file, destdir, checksum=''):
     '''
-    Save the generated gitBOM doc file to destdir.
-    :param gitbom_doc_file: the generated gitBOM doc file to save
-    :param destdir: destination directory to store the created gitBOM doc file
+    Save the generated OmniBOR doc file to destdir.
+    :param gitbom_doc_file: the generated OmniBOR doc file to save
+    :param destdir: destination directory to store the created OmniBOR doc file
     :param checksum: the githash of gitbom_doc_file
     '''
     if checksum:
@@ -225,9 +225,9 @@ def save_gitbom_doc(gitbom_doc_file, destdir, checksum=''):
 
 def create_gitbom_doc_text(infiles, db):
     """
-    Create the gitBOM doc text contents
+    Create the OmniBOR doc text contents
     :param infiles: the list of checksum for input files
-    :param db: gitBOM DB with {file-hash => its gitBOM hash} mapping
+    :param db: OmniBOR DB with {file-hash => its OmniBOR hash} mapping
     """
     if not infiles:
         return ''
@@ -246,11 +246,11 @@ def create_gitbom_doc_text(infiles, db):
 
 def create_gitbom_doc(infile_hashes, db, destdir):
     """
-    Create the gitBOM doc text contents
+    Create the OmniBOR doc text contents
     :param infile_hashes: the list of input file hashes
-    :param db: gitBOM DB with {file-hash => its gitBOM hash} mapping
+    :param db: OmniBOR DB with {file-hash => its OmniBOR hash} mapping
     :param destdir: destination directory to create the gitbom doc file
-    returns the git-hash of the created gitBOM doc.
+    returns the git-hash of the created OmniBOR doc.
     """
     lines = create_gitbom_doc_text(infile_hashes, db)
     output_file = os.path.join(g_tmpdir, "bomsh_temp_gitbom_file")
@@ -277,7 +277,7 @@ def embed_gitbom_hash_elf_section(afile, gitbom_doc, outfile):
     """
     Embed the .bom ELF section into an ELF file.
     :param afile: the ELF file to insert the embedded .bom section
-    :param gitbom_doc: gitBOM doc for this afile
+    :param gitbom_doc: OmniBOR doc for this afile
     :param outfile: output file with the .bom ELF section
     """
     #verbose("afile: " + afile + "gitbom_doc: " + gitbom_doc + " outfile: " + outfile)
@@ -290,7 +290,7 @@ def embed_gitbom_hash_archive_entry(afile, gitbom_doc, outfile):
     """
     Embed the .bom archive entry into an archive file.
     :param afile: the archive file to insert the embedded .bom archive entry
-    :param gitbom_doc: gitBOM doc for this afile
+    :param gitbom_doc: OmniBOR doc for this afile
     :param outfile: output file with the .bom archive entry
     """
     #verbose("afile: " + afile + "gitbom_doc: " + gitbom_doc + " outfile: " + outfile)
@@ -307,27 +307,27 @@ def embed_gitbom_hash_archive_entry(afile, gitbom_doc, outfile):
 
 def update_gitbom_dir(bomdir, infiles, checksum, outfile):
     '''
-    Update the gitBOM directory with hashes of input files and outfile
-    :param bomdir: the gitBOM directory
+    Update the OmniBOR directory with hashes of input files and outfile
+    :param bomdir: the OmniBOR directory
     :param infiles: a list of the hashes of input files
     :param checksum: the checksum/hash of the output file
     :param outfile: the output file
     '''
     if not infiles:
-        verbose("Warning: infile is empty, skipping gitBOM doc update for outfile " + outfile)
+        verbose("Warning: infile is empty, skipping OmniBOR doc update for outfile " + outfile)
         return
     if len(infiles) == 1 and not args.new_gitbom_doc_for_unary_transform and infiles[0] in g_bomdb:
         gitbom_doc_hash = g_bomdb[infiles[0]]
-        verbose("Unary transform, reused gitBOM file " + gitbom_doc_hash + " for outfile " + outfile)
+        verbose("Unary transform, reused OmniBOR file " + gitbom_doc_hash + " for outfile " + outfile)
     else:
         gitbom_doc_hash = create_gitbom_doc(infiles, g_bomdb, g_object_bomdir)
-        verbose("Created gitBOM file " + gitbom_doc_hash + " for outfile " + outfile)
+        verbose("Created OmniBOR file " + gitbom_doc_hash + " for outfile " + outfile)
     # record the checksum => gitbom_doc_hash/bom_id mapping
     g_bomdb[checksum] = gitbom_doc_hash
     if not args.embed_bom_section:
         return
     if not os.path.isfile(outfile) or get_git_file_hash(outfile) != checksum:
-        verbose("Warning: outfile with checksum " + checksum + " does not exist, skip embedding gitBOM for outfile " + outfile)
+        verbose("Warning: outfile with checksum " + checksum + " does not exist, skip embedding OmniBOR for outfile " + outfile)
         return
     if not is_elf_file(outfile):  # archive file must also contain valid ELF files.
         verbose("Warning: outfile " + outfile + " is not ELF file, skipping embedding .bom section")
@@ -477,20 +477,20 @@ def update_hash_tree_node_hashtree(db, ahash, outfile, infiles, argv_str, pid=''
 
 def update_hash_tree_db_and_gitbom(db, record):
     """
-    Update the hash tree DB and the gitBOM doc for an output file.
+    Update the hash tree DB and the OmniBOR doc for an output file.
 
     :param db: the hash tree DB to update
     :param record: the raw_info record for a single shell command
     """
     if "ignore_this_record" in record:
-        verbose("Warning: ignore_this_record for outfile " + record["outfile"][1] + ", skipping hash tree and gitBOM doc update")
+        verbose("Warning: ignore_this_record for outfile " + record["outfile"][1] + ", skipping hash tree and OmniBOR doc update")
         return
     checksum, outfile = record["outfile"]
-    verbose("\n=== Update treedb and gitBOM for checksum: " + checksum + " outfile: " + outfile, LEVEL_0)
+    verbose("\n=== Update treedb and OmniBOR for checksum: " + checksum + " outfile: " + outfile, LEVEL_0)
     if not checksum and outfile:  # for llvm-gitbom generated .metadata files, which have empty checksum for outfile
         checksum = outfile
     if not checksum:
-        verbose("Warning: empty checksum for outfile " + outfile + ", skipping hash tree and gitBOM doc update")
+        verbose("Warning: empty checksum for outfile " + outfile + ", skipping hash tree and OmniBOR doc update")
         return
     pid = ''
     if "pid" in record:
@@ -536,11 +536,11 @@ def process_lseek_lines_file(lseek_lines_file):
     :param lseek_lines_file: the cache file containing the number of lines previously read from raw_logfile
     returns the lseek_lines to start reading from raw_logfile
     """
-    jsonfile = os.path.join(g_bomsh_bomdir, "bomsh_gitbom_doc_mapping")
+    jsonfile = os.path.join(g_bomsh_bomdir, "bomsh_omnibor_doc_mapping")
     if lseek_lines_file and os.path.exists(jsonfile):
         global g_bomdb
         g_bomdb = load_json_db(jsonfile)
-        verbose("\nLoad the gitBOM DOCDB " + str(len(g_bomdb)) + " checksums from existing file: " + jsonfile)
+        verbose("\nLoad the OmniBOR DOCDB " + str(len(g_bomdb)) + " checksums from existing file: " + jsonfile)
     if lseek_lines_file and os.path.exists(g_jsonfile):
         global g_treedb
         g_treedb = load_json_db(g_jsonfile)
@@ -637,15 +637,15 @@ def read_raw_logfile(raw_logfile):
 
 def save_gitbom_dbs():
     '''
-    Save all gitBOM databases to JSON file, and print summary.
+    Save all OmniBOR databases to JSON file, and print summary.
     '''
     # Finally save the updated DB to the JSON file
     save_json_db(g_jsonfile, g_treedb)
-    # always save a copy in gitBOM repo's metadata/bomsh or g_bomsh_bomdir directory
+    # always save a copy in OmniBOR repo's metadata/bomsh or g_bomsh_bomdir directory
     if g_bomsh_bomdir:
-        jsonfile = os.path.join(g_bomsh_bomdir, "bomsh_gitbom_doc_mapping")
+        jsonfile = os.path.join(g_bomsh_bomdir, "bomsh_omnibor_doc_mapping")
         save_json_db(jsonfile, g_bomdb)
-        treedb_jsonfile = os.path.join(g_bomsh_bomdir, "bomsh_gitbom_treedb")
+        treedb_jsonfile = os.path.join(g_bomsh_bomdir, "bomsh_omnibor_treedb")
         os.system("cp " + g_jsonfile + " " + treedb_jsonfile)
         raw_logfile = os.path.join(g_bomsh_bomdir, "bomsh_hook_raw_logfile")
         os.system("cp " + g_raw_logfile + " " + raw_logfile)
@@ -678,7 +678,7 @@ def unbundle_package(pkgfile, destdir=''):
 
 def process_package_file(pkgfile):
     '''
-    Process a single package file. Unbundle the package, create the outfile/infiles record, and update gitBOM repo.
+    Process a single package file. Unbundle the package, create the outfile/infiles record, and update OmniBOR repo.
 
     :param pkgfile: the RPM/DEB package file to process
     '''
@@ -777,14 +777,14 @@ def rtd_parse_options():
     Parse command options.
     """
     parser = argparse.ArgumentParser(
-        description = "This tool parses bomsh_hook_raw_logfile and generates artifact tree and gitBOM docs")
+        description = "This tool parses bomsh_hook_raw_logfile and generates artifact tree and OmniBOR docs")
     parser.add_argument("--version",
                     action = "version",
                     version=VERSION)
     parser.add_argument('-r', '--raw_logfile',
                     help = "the raw_logfile from bomsh_hook script to read and process")
     parser.add_argument('-b', '--bom_dir',
-                    help = "the directory to store the generated gitBOM doc files")
+                    help = "the directory to store the generated OmniBOR doc files")
     parser.add_argument('-l', '--logfile',
                     help = "the log file for verbose output")
     parser.add_argument('--lseek_lines_file',
@@ -792,19 +792,19 @@ def rtd_parse_options():
     parser.add_argument('--tmpdir',
                     help = "tmp directory, which is /tmp by default")
     parser.add_argument('-j', '--jsonfile',
-                    help = "the generated gitBOM artifact tree JSON file")
+                    help = "the generated OmniBOR artifact tree JSON file")
     parser.add_argument('-p', '--package_files',
-                    help = "an extra comma-separated list of RPM/DEB package files to create gitBOM docs")
+                    help = "an extra comma-separated list of RPM/DEB package files to create OmniBOR docs")
     parser.add_argument('--hashtype',
                     help = "the hash type, like sha1/sha256, the default is sha1")
     parser.add_argument('--dependency_criteria',
                     help = "the criteria for dependency, like normal/broad/compact, the default is normal")
     parser.add_argument("-g", "--new_gitbom_doc_for_unary_transform",
                     action = "store_true",
-                    help = "generate new gitBOM doc/identifier for single input/output file transform")
+                    help = "generate new OmniBOR doc/identifier for single input/output file transform")
     parser.add_argument("--not_generate_gitbom_doc",
                     action = "store_true",
-                    help = "do not generate gitBOM docs")
+                    help = "do not generate OmniBOR docs")
     parser.add_argument("--embed_bom_section",
                     action = "store_true",
                     help = "embed the .bom ELF section or archive entry")

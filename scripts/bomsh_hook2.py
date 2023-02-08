@@ -47,7 +47,7 @@ LEVEL_4 = 4
 args = None
 
 g_tmpdir = "/tmp"
-g_bomdir = os.path.join(os.getcwd(), ".gitbom")
+g_bomdir = os.path.join(os.getcwd(), ".omnibor")
 g_raw_logfile = "/tmp/bomsh_hook_raw_logfile"
 g_trace_logfile = "/tmp/bomsh_hook_trace_logfile"
 g_logfile = "/tmp/bomsh_hook_logfile"
@@ -174,12 +174,12 @@ def find_specific_file(builddir, filename, maxdepth=0):
 
 def get_embedded_bom_id_of_elf_file(afile, hash_alg):
     '''
-    Get the embedded 20 or 32 bytes githash of the associated gitBOM doc for an ELF file.
-    :param afile: the file to extract the embedded .note.gitbom ELF section.
+    Get the embedded 20 or 32 bytes githash of the associated OmniBOR doc for an ELF file.
+    :param afile: the file to extract the embedded .note.omnibor ELF section.
     :param hash_alg: the hashing algorithm, sha1 or sha256
     '''
     abspath = os.path.abspath(afile)
-    cmd = 'readelf -x .note.gitbom ' + cmd_quote(afile) + ' 2>/dev/null || true'
+    cmd = 'readelf -x .note.omnibor ' + cmd_quote(afile) + ' 2>/dev/null || true'
     output = get_shell_cmd_output(cmd)
     if not output:
         return ''
@@ -1064,7 +1064,7 @@ def get_build_tool_info(prog, pwd, hash_alg):
 
 def create_gitbom_doc_text(infiles, infile_checksums, destdir, hash_alg="sha1"):
     """
-    Create the gitBOM doc text contents
+    Create the OmniBOR doc text contents
     :param infiles: the list of input files
     :param infile_checksums: a dict of checksums of input files
     :param destdir: destination directory to create the gitbom doc file
@@ -1103,7 +1103,7 @@ def get_hash_of_adg_doc(adg_doc_file):
 
 def read_symlink_for_adg_doc(ahash, destdir):
     """
-    Read the symlink file of artifact hash, to get the gitBOM doc
+    Read the symlink file of artifact hash, to get the OmniBOR doc
     :param ahash: the artifact hash to read symlink for
     :param destdir: destination directory to store the gitbom doc file and symlinks
     returns the real path of the ADG doc that this symlink file pointing to
@@ -1142,7 +1142,7 @@ def update_symlink_dir_for_artifact_conflict(ahash, old_adg_doc, adg_doc, destdi
 
 def create_symlink_for_adg_doc(ahash, adg_doc, destdir):
     """
-    Create the symlink to the gitBOM doc for an artifact ID
+    Create the symlink to the OmniBOR doc for an artifact ID
     :param ahash: the hash of output file, that is, the artifact ID
     :param adg_doc: the created ADG doc to create symlink for
     :param destdir: destination directory to store the gitbom doc file
@@ -1166,10 +1166,10 @@ def create_symlink_for_adg_doc(ahash, adg_doc, destdir):
 
 
 g_embed_bom_script = '''
-if objdump -s -j .note.gitbom HELLO_FILE >/dev/null 2>/dev/null ; then
-  GITBOM_BUILD_MODE= objcopy --update-section .note.gitbom=NOTE_FILE --set-section-flags .note.gitbom=alloc,readonly --set-section-alignment .note.gitbom=4 HELLO_FILE >/dev/null 2>/dev/null
+if objdump -s -j .note.omnibor HELLO_FILE >/dev/null 2>/dev/null ; then
+  GITBOM_BUILD_MODE= objcopy --update-section .note.omnibor=NOTE_FILE --set-section-flags .note.omnibor=alloc,readonly --set-section-alignment .note.omnibor=4 HELLO_FILE >/dev/null 2>/dev/null
 else
-  GITBOM_BUILD_MODE= objcopy --add-section .note.gitbom=NOTE_FILE --set-section-flags .note.gitbom=alloc,readonly --set-section-alignment .note.gitbom=4 HELLO_FILE >/dev/null 2>/dev/null
+  GITBOM_BUILD_MODE= objcopy --add-section .note.omnibor=NOTE_FILE --set-section-flags .note.omnibor=alloc,readonly --set-section-alignment .note.omnibor=4 HELLO_FILE >/dev/null 2>/dev/null
 fi
 '''
 
@@ -1250,7 +1250,7 @@ def gitbom_create_temp_adg_doc(infiles, infile_hashes, destdir, hash_alg):
 
 def gitbom_rename_adg_doc(adg_doc, adg_hash, destdir):
     '''
-    Rename temporary ADG doc to its .gitbom/objects/xx/yy..yy file.
+    Rename temporary ADG doc to its .omnibor/objects/xx/yy..yy file.
     :param adg_doc: the temporary ADG doc file
     :param adg_hash: the sha1 or sha256 hash of the ADG doc file
     :param destdir: the destination directory to save this ADG doc file
@@ -1275,9 +1275,9 @@ def gitbom_embed_bomid_elf(outfile, bomid_sha1, bomid_sha256):
         return
     note = b''
     if bomid_sha1:
-        note += b'\x07\x00\x00\x00\x14\x00\x00\x00\x01\x00\x00\x00\x47\x49\x54\x42\x4f\x4d\x00\x00' + bytes.fromhex(bomid_sha1)
+        note += b'\x08\x00\x00\x00\x14\x00\x00\x00\x01\x00\x00\x00\x4f\x4d\x4e\x49\x42\x4f\x52\x00' + bytes.fromhex(bomid_sha1)
     if bomid_sha256:
-        note += b'\x07\x00\x00\x00\x20\x00\x00\x00\x02\x00\x00\x00\x47\x49\x54\x42\x4f\x4d\x00\x00' + bytes.fromhex(bomid_sha256)
+        note += b'\x08\x00\x00\x00\x20\x00\x00\x00\x02\x00\x00\x00\x4f\x4d\x4e\x49\x42\x4f\x52\x00' + bytes.fromhex(bomid_sha256)
     afile = os.path.join(g_tmpdir, "bomsh_hook_bomid")
     #afile = os.path.join(g_tmpdir, "bomsh_hook_bomid_pid" + str(os.getpid()))
     write_binary_file(afile, note)
@@ -1322,7 +1322,7 @@ def gitbom_create_adg_and_record_hash(outfile, infiles, infile_hashes, adg_doc, 
 def record_raw_info(outfile, infiles, pwd, argv_str, pid='', prog='', outfile_checksum='', infile_checksums='', ignore_this_record=False):
     '''
     Not just record the raw info for a list of infiles and outfile.
-    The gitBOM extra work to do for the build step
+    The OmniBOR extra work to do for the build step
 
     :param outfile: the output file
     :param infiles: a list of input files
@@ -1341,7 +1341,7 @@ def record_raw_info(outfile, infiles, pwd, argv_str, pid='', prog='', outfile_ch
     sha256_adg_doc = ''
     sha256_adg_hash = ''
     destdir = g_bomdir
-    # bom_id embedding must occur before creating gitBOM doc and symlink, also before recording hashes of output file
+    # bom_id embedding must occur before creating OmniBOR doc and symlink, also before recording hashes of output file
     if not args.no_auto_embed_bom_for_compiler_linker and not ignore_this_record:
         if "sha1" in g_hashtypes:
             if infile_checksums and "sha1" in infile_checksums:
@@ -1791,7 +1791,7 @@ def process_ld_command(prog, pwddir, argv_str, pid):
     first_tmp_o = get_first_tmp_o_file(infiles)
     if first_tmp_o and is_gcc_invoked_ld_cmd(argv_str):
         if not args.no_auto_embed_bom_for_compiler_linker:
-            # insert a dummy .note.gitbom ELF section to be linked into the executable
+            # insert a dummy .note.omnibor ELF section to be linked into the executable
             gitbom_embed_bomid_elf(first_tmp_o, '1'*40, '2'*64)
             rerun_shell_command(pwddir, argv_str)
         # this ld is invoked by gcc_ctoexe, and will be processed by later gcc, so this ld record is for info only
@@ -2124,9 +2124,9 @@ def create_pkg_symlink(outfile, hash_alg):
     symlink = os.path.join(g_bomdir, "symlinks", get_file_hash(outfile, hash_alg))
     if os.path.exists(symlink):
         # create additional symlink for convenience
-        adg_link = outfile + ".gitbom_adg." + hash_alg
+        adg_link = outfile + ".omnibor_adg." + hash_alg
         pkgs_dir = os.path.join(g_bomdir, "pkgs")
-        adg_link2 = os.path.join(pkgs_dir, os.path.basename(outfile) + ".gitbom_adg." + hash_alg)
+        adg_link2 = os.path.join(pkgs_dir, os.path.basename(outfile) + ".omnibor_adg." + hash_alg)
         cmd = "ln -sfr " + symlink + " " + adg_link + " ; mkdir -p " + pkgs_dir + " ; ln -sfr " + symlink + " " + adg_link2
         os.system(cmd)
 
@@ -2419,7 +2419,7 @@ def rtd_parse_options():
     parser.add_argument('-r', '--raw_logfile',
                     help = "the raw log file, to store input/output file checksums")
     parser.add_argument('-b', '--bom_dir',
-                    help = "the directory to store the generated gitBOM doc files")
+                    help = "the directory to store the generated OmniBOR doc files")
     parser.add_argument('-l', '--logfile',
                     help = "the log file, must be absolute path, not relative path")
     parser.add_argument('-w', '--watched_programs',
@@ -2451,9 +2451,9 @@ def rtd_parse_options():
     parser.add_argument("--no_dependent_headers",
                     action = "store_true",
                     help = "not include C header files for hash tree dependency")
-    parser.add_argument("--new_gitbom_doc_for_unary_transform",
+    parser.add_argument("--new_omnibor_doc_for_unary_transform",
                     action = "store_true",
-                    help = "generate new gitBOM doc/identifier for single input/output file transform")
+                    help = "generate new OmniBOR doc/identifier for single input/output file transform")
     parser.add_argument("--record_raw_bomid",
                     action = "store_true",
                     help = "record raw info for bom_id of input/output files if it exists")
