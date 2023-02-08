@@ -1,5 +1,5 @@
 diff --git a/src/execve.c b/src/execve.c
-index a9224543b..75286be02 100644
+index a9224543b..0cf84fe17 100644
 --- a/src/execve.c
 +++ b/src/execve.c
 @@ -14,6 +14,314 @@
@@ -219,7 +219,7 @@ index a9224543b..75286be02 100644
 +	sprintf(cwd_file, "/proc/%d/cwd", tcp->pid);
 +	int bytes = readlink(cwd_file, pwddir, PATH_MAX);
 +	if (bytes == -1) {
-+		tprintf("Bomtrace failed to readlink cwd\n");
++		//tprintf("Bomtrace failed to readlink cwd\n");
 +		return NULL;
 +	}
 +	pwddir[bytes] = 0;
@@ -338,10 +338,10 @@ index a9224543b..75286be02 100644
  	printpath(tcp, tcp->u_arg[index + 0]);
  	tprint_arg_next();
 diff --git a/src/strace.c b/src/strace.c
-index 7370275e1..ea15252c3 100644
+index 4e710db80..f41c5129b 100644
 --- a/src/strace.c
 +++ b/src/strace.c
-@@ -2854,6 +2854,73 @@ init(int argc, char *argv[])
+@@ -2954,6 +2954,73 @@ init(int argc, char *argv[])
  		((followfork && !output_separately) || nprocs > 1);
  }
  
@@ -415,7 +415,7 @@ index 7370275e1..ea15252c3 100644
  static struct tcb *
  pid2tcb(const int pid)
  {
-@@ -3542,6 +3609,35 @@ trace_syscall(struct tcb *tcp, unsigned int *sig)
+@@ -3652,6 +3719,35 @@ trace_syscall(struct tcb *tcp, unsigned int *sig)
  	}
  }
  
@@ -441,7 +441,7 @@ index 7370275e1..ea15252c3 100644
 +		sprintf(hook_cmd, "%s.pid%d %s", bomsh_hook_cmd1, pid, bomsh_hook_cmd22);
 +	}
 +        if (system(hook_cmd) == -1) {
-+		tprintf("Bomsh failed to hook for pid: %d cmd: %s\n", pid, hook_cmd);
++		//tprintf("Bomsh failed to hook for pid: %d cmd: %s\n", pid, hook_cmd);
 +        //} else {
 +	//	tprintf("Bomsh succeeded to hook for pid: %d cmd: %s\n", pid, hook_cmd);
 +	}
@@ -451,7 +451,7 @@ index 7370275e1..ea15252c3 100644
  /* Returns true iff the main trace loop has to continue. */
  static bool
  dispatch_event(const struct tcb_wait_data *wd)
-@@ -3670,6 +3766,9 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3780,6 +3876,9 @@ dispatch_event(const struct tcb_wait_data *wd)
  		break;
  
  	case TE_EXITED:
@@ -461,7 +461,7 @@ index 7370275e1..ea15252c3 100644
  		print_exited(current_tcp, current_tcp->pid, status);
  		droptcb(current_tcp);
  		return true;
-@@ -3868,7 +3967,8 @@ int
+@@ -3981,7 +4080,8 @@ int
  main(int argc, char *argv[])
  {
  	setlocale(LC_ALL, "");

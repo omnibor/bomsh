@@ -272,11 +272,11 @@ def get_embedded_bom_id_of_jar_file(afile):
 def get_embedded_bom_id_of_elf_file(afile, hash_alg):
     '''
     Get the embedded 20 or 32 bytes githash of the associated gitBOM doc for an ELF file.
-    :param afile: the file to extract the embedded .note.gitbom ELF section.
+    :param afile: the file to extract the embedded .note.omnibor ELF section.
     :param hash_alg: the hashing algorithm, sha1 or sha256
     '''
     abspath = os.path.abspath(afile)
-    cmd = 'readelf -x .note.gitbom ' + cmd_quote(afile) + ' 2>/dev/null || true'
+    cmd = 'readelf -x .note.omnibor ' + cmd_quote(afile) + ' 2>/dev/null || true'
     output = get_shell_cmd_output(cmd)
     if not output:
         return ''
@@ -356,7 +356,7 @@ def get_embedded_bom_id2(afile):
 
 # the file blob checksum (blob_id) => gitBOM doc (bom_id) mapping cache DB.
 g_gitbom_doc_db = {}
-# the gitBOM doc bom_id => gitBOM doc file path mapping cache DB. Needed when gitBOM docs are stored in multiple .gitbom/objects/ directories.
+# the gitBOM doc bom_id => gitBOM doc file path mapping cache DB. Needed when gitBOM docs are stored in multiple .omnibor/objects/ directories.
 g_gitbom_docfile_db = {}
 
 def create_gitbom_node_of_blob_id(afile):
@@ -432,7 +432,7 @@ def get_node_id_from_checksum_line(checksum_line):
 
 def get_all_gitbom_doc_files_in_dir(topdir, is_topdir=True):
     '''
-    Get all the gitBOM doc files stored in a directory, which contains multiple .gitbom/objects directories.
+    Get all the gitBOM doc files stored in a directory, which contains multiple .omnibor/objects directories.
     :param topdir: the top directory to store all gitBOM docs
     :param is_topdir: is it the top directory?
     returns a dict of {bomid => gitBOM doc file}
@@ -443,9 +443,9 @@ def get_all_gitbom_doc_files_in_dir(topdir, is_topdir=True):
         hexchar_num = 62
     topdir_abspath = os.path.abspath(topdir)
     if is_topdir:
-        #cmd = 'find ' + topdir_abspath + ' -path "*.gitbom/objects/[0-9a-f][0-9a-f]/*" -type f || true'
+        #cmd = 'find ' + topdir_abspath + ' -path "*.omnibor/objects/[0-9a-f][0-9a-f]/*" -type f || true'
         # to interoperate with gitbom-llvm implementation
-        cmd = 'find ' + topdir_abspath + ' -name "' + hexchar * hexchar_num + '" -path "*.gitbom/objects/[0-9a-f][0-9a-f]/*" -type f || true'
+        cmd = 'find ' + topdir_abspath + ' -name "' + hexchar * hexchar_num + '" -path "*.omnibor/objects/[0-9a-f][0-9a-f]/*" -type f || true'
     else:
         cmd = 'find ' + topdir_abspath + ' -name "' + hexchar * hexchar_num + '" -path "*/objects/[0-9a-f][0-9a-f]/*" -type f || true'
     verbose(cmd, LEVEL_3)
@@ -584,11 +584,11 @@ def create_gitbom_doc_treedb_for_files(bomdir, afiles, use_checksum_line=True):
     ##returns a dict with checksum (blob_id) as key (even if bom_id exists for blob_id)
     '''
     bom_db = {}
-    jsonfile = os.path.join(bomdir, "metadata", "bomsh", "bomsh_gitbom_doc_mapping")
+    jsonfile = os.path.join(bomdir, "metadata", "bomsh", "bomsh_omnibor_doc_mapping")
     if os.path.exists(jsonfile):
         bom_db = load_json_db(jsonfile)
     else:
-        jsonfile = os.path.join(bomdir, ".gitbom", "metadata", "bomsh", "bomsh_gitbom_doc_mapping")
+        jsonfile = os.path.join(bomdir, ".omnibor", "metadata", "bomsh", "bomsh_omnibor_doc_mapping")
         if os.path.exists(jsonfile):
             bom_db = load_json_db(jsonfile)
     object_bomdir = os.path.join(bomdir, "objects")
@@ -781,12 +781,12 @@ def find_cve_lists_for_checksums(checksums, is_bom_id=False):
         save_json_db(g_jsonfile + "-details.json", tree)
     if args.copyout_bomdir:  # Copy out necessary gitBOM docs only and truncated metadata files
         copy_all_bomdoc_in_tree(tree, args.copyout_bomdir)
-        # Truncate the .gitbom/metadata/bomsh/* files too
+        # Truncate the .omnibor/metadata/bomsh/* files too
         metadata_dir = ""
         if args.bom_topdir:
             metadata_dir = os.path.join(args.bom_topdir, "metadata", "bomsh")
             if not os.path.exists(metadata_dir):
-                metadata_dir = os.path.join(args.bom_topdir, ".gitbom", "metadata", "bomsh")
+                metadata_dir = os.path.join(args.bom_topdir, ".omnibor", "metadata", "bomsh")
         if not os.path.exists(metadata_dir) and args.bom_dir:
             metadata_dir = os.path.join(args.bom_dir, "metadata", "bomsh")
         if os.path.exists(metadata_dir):
@@ -1302,7 +1302,7 @@ def copy_truncated_raw_logfile(raw_logfile, blob_ids, outfile_path):
 
 def copy_truncated_gitbom_doc_mapping(afile, blob_ids, outfile_path, mapping_db={}):
     """
-    Create a truncated copy of the bomsh_gitbom_doc_mapping file, blob_id => bom_id
+    Create a truncated copy of the bomsh_omnibor_doc_mapping file, blob_id => bom_id
     """
     if mapping_db:
         save_json_db(outfile_path, mapping_db)
@@ -1319,7 +1319,7 @@ def copy_truncated_gitbom_doc_mapping(afile, blob_ids, outfile_path, mapping_db=
 
 def copy_truncated_gitbom_treedb(afile, blob_ids, outfile_path):
     """
-    Create a truncated copy of the bomsh_gitbom_treedb file, whose node key is blob_id, and node value is hash_tree of list of blob_ids + metadata
+    Create a truncated copy of the bomsh_omnibor_treedb file, whose node key is blob_id, and node value is hash_tree of list of blob_ids + metadata
     """
     db = load_json_db(afile)
     new_db = {}
@@ -1342,13 +1342,13 @@ def copy_truncated_metadata_files(tree, destdir, metadata_dir):
     if os.path.exists(raw_logfile):
         new_raw_logfile = os.path.join(destdir, "bomsh_hook_raw_logfile")
         copy_truncated_raw_logfile(raw_logfile, blob_ids, new_raw_logfile)
-    mapping_file = os.path.join(metadata_dir, "bomsh_gitbom_doc_mapping")
+    mapping_file = os.path.join(metadata_dir, "bomsh_omnibor_doc_mapping")
     if os.path.exists(mapping_file):
-        new_mapping_file = os.path.join(destdir, "bomsh_gitbom_doc_mapping")
+        new_mapping_file = os.path.join(destdir, "bomsh_omnibor_doc_mapping")
         copy_truncated_gitbom_doc_mapping(mapping_file, blob_ids, new_mapping_file, new_mapping_db)
-    treedb_file = os.path.join(metadata_dir, "bomsh_gitbom_treedb")
+    treedb_file = os.path.join(metadata_dir, "bomsh_omnibor_treedb")
     if os.path.exists(treedb_file):
-        new_treedb_file = os.path.join(destdir, "bomsh_gitbom_treedb")
+        new_treedb_file = os.path.join(destdir, "bomsh_omnibor_treedb")
         copy_truncated_gitbom_treedb(treedb_file, blob_ids, new_treedb_file)
 
 
@@ -1510,7 +1510,7 @@ def get_all_extra_blobid_in_tree(tree, metadata_dir, get_new_mapping=False):
     tree_blob_ids = set(get_all_blobid_in_tree(tree))
     # Also get those blob IDs that share the same bom_id in the tree
     bomids = set(get_all_bomid_in_tree(tree))
-    mapping_file = os.path.join(metadata_dir, "bomsh_gitbom_doc_mapping")
+    mapping_file = os.path.join(metadata_dir, "bomsh_omnibor_doc_mapping")
     new_mapping_db = {}
     if not os.path.exists(mapping_file):
         return (tree_blob_ids, new_mapping_db)
@@ -1648,7 +1648,7 @@ def main():
         g_metadata_db = load_json_db(args.metadata_db_file)
     elif args.bom_dir:
         bomsh_bomdir = os.path.join(args.bom_dir, "metadata", "bomsh")
-        jsonfile = os.path.join(bomsh_bomdir, "bomsh_gitbom_treedb")
+        jsonfile = os.path.join(bomsh_bomdir, "bomsh_omnibor_treedb")
         if os.path.exists(jsonfile):
             g_metadata_db = load_json_db(jsonfile)
     global g_checksum_db
