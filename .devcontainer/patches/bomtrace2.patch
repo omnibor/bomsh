@@ -442,7 +442,7 @@ index a9224543b..817c94a66 100644
  	printpath(tcp, tcp->u_arg[index + 0]);
  	tprint_arg_next();
 diff --git a/src/open.c b/src/open.c
-index d7654d7e8..4e7255121 100644
+index 6356c5831..4320bcb4d 100644
 --- a/src/open.c
 +++ b/src/open.c
 @@ -110,9 +110,147 @@ tprint_open_modes(unsigned int flags)
@@ -594,10 +594,10 @@ index d7654d7e8..4e7255121 100644
  	printpath(tcp, tcp->u_arg[offset]);
  	tprint_arg_next();
 diff --git a/src/strace.c b/src/strace.c
-index 6e4f8221f..4c8a4db7f 100644
+index 4e710db80..62a8ce323 100644
 --- a/src/strace.c
 +++ b/src/strace.c
-@@ -2848,6 +2848,492 @@ init(int argc, char *argv[])
+@@ -2954,6 +2954,492 @@ init(int argc, char *argv[])
  		((followfork && !output_separately) || nprocs > 1);
  }
  
@@ -1090,7 +1090,7 @@ index 6e4f8221f..4c8a4db7f 100644
  static struct tcb *
  pid2tcb(const int pid)
  {
-@@ -3586,6 +4072,10 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3702,6 +4188,10 @@ dispatch_event(const struct tcb_wait_data *wd)
  		ATTRIBUTE_FALLTHROUGH;
  
  	case TE_SYSCALL_STOP:
@@ -1101,7 +1101,7 @@ index 6e4f8221f..4c8a4db7f 100644
  		if (trace_syscall(current_tcp, &restart_sig) < 0) {
  			/*
  			 * ptrace() failed in trace_syscall().
-@@ -3664,6 +4154,9 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3780,6 +4270,9 @@ dispatch_event(const struct tcb_wait_data *wd)
  		break;
  
  	case TE_EXITED:
@@ -1111,7 +1111,7 @@ index 6e4f8221f..4c8a4db7f 100644
  		print_exited(current_tcp, current_tcp->pid, status);
  		droptcb(current_tcp);
  		return true;
-@@ -3696,6 +4189,13 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3812,6 +4305,13 @@ dispatch_event(const struct tcb_wait_data *wd)
  			}
  		}
  
@@ -1125,7 +1125,7 @@ index 6e4f8221f..4c8a4db7f 100644
  		if (detach_on_execve) {
  			if (current_tcp->flags & TCB_SKIP_DETACH_ON_FIRST_EXEC) {
  				current_tcp->flags &= ~TCB_SKIP_DETACH_ON_FIRST_EXEC;
-@@ -3862,7 +4362,8 @@ int
+@@ -3981,7 +4481,8 @@ int
  main(int argc, char *argv[])
  {
  	setlocale(LC_ALL, "");
@@ -1136,11 +1136,11 @@ index 6e4f8221f..4c8a4db7f 100644
  	exit_code = !nprocs;
  
 diff --git a/src/syscall.c b/src/syscall.c
-index 92aaee092..1cce6269e 100644
+index cc37aa30c..517cbe809 100644
 --- a/src/syscall.c
 +++ b/src/syscall.c
-@@ -770,6 +770,19 @@ print_injected_note(struct tcb *tcp)
- 		tprints(" (DELAYED)");
+@@ -787,6 +787,19 @@ print_erestart(const char *err_short, const char *err_long)
+ 	tprints_sysret_string("strerror", err_long);
  }
  
 +extern int bomsh_openat_mode;
@@ -1159,14 +1159,14 @@ index 92aaee092..1cce6269e 100644
  int
  syscall_exiting_trace(struct tcb *tcp, struct timespec *ts, int res)
  {
-@@ -947,6 +960,10 @@ syscall_exiting_trace(struct tcb *tcp, struct timespec *ts, int res)
+@@ -964,6 +977,10 @@ syscall_exiting_trace(struct tcb *tcp, struct timespec *ts, int res)
+ 				if ((current_klongsize < sizeof(tcp->u_rval)) ||
  				    ((kernel_ulong_t) tcp->u_rval <= INT_MAX)) {
- 					tprints("= ");
  					printfd(tcp, tcp->u_rval);
 +					if (bomsh_openat_mode) {
 +						// record the fd for later match with close syscall
 +						bomsh_record_openat_fd(tcp);
 +					}
  				} else {
- 					tprintf("= %" PRI_kld, tcp->u_rval);
+ 					PRINT_VAL_D(tcp->u_rval);
  				}
