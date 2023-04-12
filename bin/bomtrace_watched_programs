@@ -21,6 +21,7 @@ arch/x86/boot/tools/build
 ./tools/bpf/resolve_btfids/resolve_btfids
 ./scripts/sortextable
 ./scripts/sorttable
+scripts/sign-file
 /usr/lib/golang/pkg/tool/linux_amd64/compile
 /usr/lib/golang/pkg/tool/linux_amd64/link
 ---
@@ -36,6 +37,10 @@ arch/x86/boot/tools/build
 ./tools/bpf/resolve_btfids/resolve_btfids
 ./scripts/sortextable
 ./scripts/sorttable
+scripts/sign-file
 ===
 ./configure
 /usr/bin/dh_auto_test
++++
+/usr/bin/dpkg-buildpackage
+/usr/bin/rpmbuild
