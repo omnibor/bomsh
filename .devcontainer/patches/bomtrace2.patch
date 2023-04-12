@@ -1,8 +1,8 @@
 diff --git a/src/execve.c b/src/execve.c
-index a9224543b..817c94a66 100644
+index a9224543b..e42169ad9 100644
 --- a/src/execve.c
 +++ b/src/execve.c
-@@ -14,6 +14,425 @@
+@@ -14,6 +14,443 @@
  
  #include "defs.h"
  
@@ -25,10 +25,8 @@ index a9224543b..817c94a66 100644
 +{
 +        int i = 0; int len = 0; char *p = argv[i];
 +        char *buf = NULL;
-+        len = get_argv_length(argv);
-+        buf = malloc(len);
++        buf = malloc(get_argv_length(argv));
 +        if (!buf) { return buf; }
-+        len = 0;
 +        while(p) {
 +                strcpy(buf + len, p);
 +                len += strlen(p) + 1;
@@ -36,7 +34,9 @@ index a9224543b..817c94a66 100644
 +                i++;
 +                p = argv[i];
 +        }
-+        buf[len - 1] = 0;
++        if (len > 0) {
++		buf[len - 1] = 0;
++	}
 +        return buf;
 +}
 +
@@ -250,6 +250,9 @@ index a9224543b..817c94a66 100644
 +extern int bomsh_is_pre_exec_program(char *prog);
 +extern int bomsh_is_watched_program(char *prog);
 +extern int bomsh_is_detach_on_pid_program(char *prog);
++extern pid_t *bomsh_umbrella_pid_stack;
++extern int bomsh_umbrella_pid_top;
++extern int bomsh_is_umbrella_program(char *prog);
 +extern void bomsh_hook_program(int pid, int pre_exec_mode, const char *suffix);
 +
 +int bomsh_check_file_permission(char *path, char *pwd, char *root, int amode);
@@ -306,33 +309,48 @@ index a9224543b..817c94a66 100644
 +// otherwise, recording fails, returns 0
 +static int bomsh_record_command(struct tcb *tcp, const unsigned int index)
 +{
-+	char *rootdir = bomsh_get_rootdir(tcp);
-+	if (!rootdir) {
-+		return 0;
-+	}
-+	char *pwd = bomsh_get_pwd(tcp);
-+	if (!pwd) {
-+                free(rootdir);
-+		return 0;
-+	}
 +	char *path = copy_path(tcp, tcp->u_arg[index + 0]);
 +        if (!path) {
-+                free(rootdir);
-+                free(pwd);
 +                return 0;
 +        }
 +	if (bomsh_is_detach_on_pid_program(path)) {
 +		// no need to record this command or follow its child processes
 +		bomsh_detach_on_pid = tcp->pid;
-+                free(rootdir);
-+		free(pwd);
++		if (g_bomsh_config.logfile) {
++			char info_str[64];
++			sprintf(info_str, "\n\nInfo: umbrella_top=%d bomsh detach pid %d\n", bomsh_umbrella_pid_top, tcp->pid);
++			bomsh_write_file(g_bomsh_config.logfile, info_str, "a");
++		}
++		free(path);
++		return 0;
++	}
++	if (bomsh_is_umbrella_program(path)) {
++		bomsh_umbrella_pid_top ++;
++		bomsh_umbrella_pid_stack[bomsh_umbrella_pid_top] = tcp->pid;
++		if (g_bomsh_config.logfile) {
++			char info_str[64];
++			sprintf(info_str, "\n\nInfo: top=%d enter bomsh umbrella pid %d\n", bomsh_umbrella_pid_top, tcp->pid);
++			bomsh_write_file(g_bomsh_config.logfile, info_str, "a");
++		}
++	}
++	if (bomsh_umbrella_pid_stack && bomsh_umbrella_pid_top < 0) {
++		// no need to record this command since there is no umbrella process
 +		free(path);
 +		return 0;
 +	}
 +	if( !bomsh_is_watched_program(path) ) {
 +		// file is not watched
++		free(path);
++		return 0;
++	}
++	char *rootdir = bomsh_get_rootdir(tcp);
++	if (!rootdir) {
++		free(path);
++		return 0;
++	}
++	char *pwd = bomsh_get_pwd(tcp);
++	if (!pwd) {
 +                free(rootdir);
-+		free(pwd);
 +		free(path);
 +		return 0;
 +	}
@@ -361,6 +379,7 @@ index a9224543b..817c94a66 100644
 +		free(pwd);
 +	}
 +	free(rootdir);
++	// rootdir has been freed. pwd is either freed, or pwd_line is same as pwd, which will be freed
 +	char *argv_str = copy_argv_array(tcp, tcp->u_arg[index + 1]);
 +        if (!argv_str) {
 +		free(pwd_line);
@@ -372,7 +391,6 @@ index a9224543b..817c94a66 100644
 +        int len = len1 + len2 + strlen(argv_str) + 3;
 +        char * cmd_data = malloc(len + 1);  // allocate the memory
 +        if (!cmd_data) {
-+                free(rootdir);
 +                free(pwd);
 +                free(path);
 +                free(argv_str);
@@ -428,7 +446,7 @@ index a9224543b..817c94a66 100644
  static void
  printargv(struct tcb *const tcp, kernel_ulong_t addr)
  {
-@@ -96,6 +515,12 @@ printargc(struct tcb *const tcp, kernel_ulong_t addr)
+@@ -96,6 +533,12 @@ printargc(struct tcb *const tcp, kernel_ulong_t addr)
  static void
  decode_execve(struct tcb *tcp, const unsigned int index)
  {
@@ -594,10 +612,10 @@ index 6356c5831..4320bcb4d 100644
  	printpath(tcp, tcp->u_arg[offset]);
  	tprint_arg_next();
 diff --git a/src/strace.c b/src/strace.c
-index 4e710db80..62a8ce323 100644
+index 7a58bdbd6..42182d955 100644
 --- a/src/strace.c
 +++ b/src/strace.c
-@@ -2954,6 +2954,492 @@ init(int argc, char *argv[])
+@@ -2958,6 +2958,531 @@ init(int argc, char *argv[])
  		((followfork && !output_separately) || nprocs > 1);
  }
  
@@ -634,10 +652,17 @@ index 4e710db80..62a8ce323 100644
 +static char **bomsh_detach_on_pid_programs = 0;
 +static int bomsh_num_watched_programs = 0;
 +static int bomsh_num_detach_on_pid_programs = 0;
++// umbrella pid feature to improve performance
++// only the child processes of umbrella process are recorded and run hookup
++static char **bomsh_umbrella_programs = 0;
++static int bomsh_num_umbrella_programs = 0;
++pid_t *bomsh_umbrella_pid_stack = 0;
++int bomsh_umbrella_pid_top = -1;
 +
 +int bomsh_is_pre_exec_program(char *prog);
 +int bomsh_is_watched_program(char *prog);
 +int bomsh_is_detach_on_pid_program(char *prog);
++int bomsh_is_umbrella_program(char *prog);
 +
 +extern void bomsh_write_file(const char *filepath, const char *data, const char *mode);
 +
@@ -716,6 +741,15 @@ index 4e710db80..62a8ce323 100644
 +	return bomsh_is_program_inlist(prog, bomsh_detach_on_pid_programs, bomsh_num_detach_on_pid_programs);
 +}
 +
++// check if a program is in the umbrella list.
++int bomsh_is_umbrella_program(char *prog)
++{
++	if (!bomsh_umbrella_programs) {  // there is no any umbrella program, so matching none.
++		return 0;
++	}
++	return bomsh_is_program_inlist(prog, bomsh_umbrella_programs, bomsh_num_umbrella_programs);
++}
++
 +// Extract list of programs from the string and save them into an array of pointers.
 +// The programs_str contains the list of programs separated by newline character.
 +static char **
@@ -762,6 +796,7 @@ index 4e710db80..62a8ce323 100644
 + * Empty line or line starting with '#' character will be ignored.
 + * pre-exec mode programs are also in this file, separated by an exact line of "---"
 + * detach_on_pid programs are also in this file, separated by an exact line of "==="
++ * umbrella programs are also in this file, separated by an exact line of "+++"
 + */
 +static char **
 +bomsh_read_watched_programs(char *prog_file)
@@ -770,6 +805,12 @@ index 4e710db80..62a8ce323 100644
 +	if (!bomsh_watched_programs_str) {
 +		fprintf(stderr, "Cannot open the watched program list file\n");
 +		return NULL;
++	}
++	// must search sep_line in reversed order, since we set NULL character
++	char *plus_sep_line = strstr(bomsh_watched_programs_str, "+++");
++        if (plus_sep_line) {
++		*plus_sep_line = 0;
++		plus_sep_line += 4;  // move to start of umbrella program list
 +	}
 +	char *equal_sep_line = strstr(bomsh_watched_programs_str, "===");
 +        if (equal_sep_line) {
@@ -789,7 +830,19 @@ index 4e710db80..62a8ce323 100644
 +	if (equal_sep_line) {
 +		bomsh_detach_on_pid_programs = bomsh_get_watched_programs(equal_sep_line, &bomsh_num_detach_on_pid_programs);
 +	}
-+	if (!watched_progs && !bomsh_detach_on_pid_programs && !bomsh_pre_exec_programs) {
++	if (plus_sep_line) {
++		bomsh_umbrella_programs = bomsh_get_watched_programs(plus_sep_line, &bomsh_num_umbrella_programs);
++		if (bomsh_umbrella_programs) {
++			bomsh_umbrella_pid_stack = malloc(sizeof(pid_t) * 64);
++			//fprintf(stderr, "alloc umbrella_stack: %p pid_top: %d\n", bomsh_umbrella_pid_stack, bomsh_umbrella_pid_top);
++			if (!bomsh_umbrella_pid_stack) {
++				fprintf(stderr, "Failed to alloc memory.");
++			}
++		}
++	}
++
++	if (!watched_progs && !bomsh_detach_on_pid_programs && !bomsh_pre_exec_programs && !bomsh_umbrella_programs) {
++		// only if there is no any programs, then we can delete this string
 +		free(bomsh_watched_programs_str);
 +		return NULL;
 +	}
@@ -797,7 +850,10 @@ index 4e710db80..62a8ce323 100644
 +	bomsh_print_programs(watched_progs, bomsh_num_watched_programs, "watched_progs");
 +	bomsh_print_programs(bomsh_pre_exec_programs, bomsh_num_pre_exec_programs, "pre_exec_progs");
 +	bomsh_print_programs(bomsh_detach_on_pid_programs, bomsh_num_detach_on_pid_programs, "detach_on_pid");
++	bomsh_print_programs(bomsh_umbrella_programs, bomsh_num_umbrella_programs, "umbrella_progs");
 +#endif
++	// bomsh_watched_programs_str contains strings that are referenced by pointers of some progs
++	// thus its memory must not be freed.
 +	return watched_progs;
 +}
 +
@@ -899,6 +955,7 @@ index 4e710db80..62a8ce323 100644
 +static void
 +bomsh_print_configs(void)
 +{
++	fprintf(stderr, "\nPrinting bomtrace configs:\n");
 +	fprintf(stderr, "hook_script_file: %s\n", g_bomsh_config.hook_script_file);
 +	fprintf(stderr, "hook_script_cmdopt: %s\n", g_bomsh_config.hook_script_cmdopt);
 +	fprintf(stderr, "shell_cmd_file: %s\n", g_bomsh_config.shell_cmd_file);
@@ -1009,7 +1066,7 @@ index 4e710db80..62a8ce323 100644
 +	static const char *bomsh_argv2[] = {"-f", "-s99999", "-e", "trace=execve", "--seccomp-bpf", "-qqq"};
 +	const char **bomsh_argv;
 +	int bomsh_argc;
-+	outfname = "/tmp/bomsh_hook_strace_logfile";
++	outfname = "/dev/null";
 +	memset(&g_bomsh_config, 0, sizeof(g_bomsh_config));
 +
 +	while ((c = getopt_long(argc, argv, bomsh_optstring, bomsh_longopts, NULL)) != EOF) {
@@ -1090,7 +1147,7 @@ index 4e710db80..62a8ce323 100644
  static struct tcb *
  pid2tcb(const int pid)
  {
-@@ -3702,6 +4188,10 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3706,6 +4231,10 @@ dispatch_event(const struct tcb_wait_data *wd)
  		ATTRIBUTE_FALLTHROUGH;
  
  	case TE_SYSCALL_STOP:
@@ -1101,17 +1158,28 @@ index 4e710db80..62a8ce323 100644
  		if (trace_syscall(current_tcp, &restart_sig) < 0) {
  			/*
  			 * ptrace() failed in trace_syscall().
-@@ -3780,6 +4270,9 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3784,6 +4313,20 @@ dispatch_event(const struct tcb_wait_data *wd)
  		break;
  
  	case TE_EXITED:
 +		//tprintf("yongkui exited pid: %d status: %d\n", current_tcp->pid, status);
-+		// Run the hook program to do analysis
-+		bomsh_hook_program(current_tcp->pid, 0, "");
++		if (!bomsh_umbrella_pid_stack || (bomsh_umbrella_pid_stack && bomsh_umbrella_pid_top >= 0)) {
++			// Run the hook program to do analysis
++			bomsh_hook_program(current_tcp->pid, 0, "");
++		}
++		if (bomsh_umbrella_pid_stack && bomsh_umbrella_pid_top >= 0 &&
++			current_tcp->pid == bomsh_umbrella_pid_stack[bomsh_umbrella_pid_top]) {
++			if (g_bomsh_config.logfile) {
++				char info_str[64];
++				sprintf(info_str, "\n\nInfo: top=%d leave bomsh umbrella pid %d\n", bomsh_umbrella_pid_top, current_tcp->pid);
++				bomsh_write_file(g_bomsh_config.logfile, info_str, "a");
++			}
++			bomsh_umbrella_pid_top--;
++		}
  		print_exited(current_tcp, current_tcp->pid, status);
  		droptcb(current_tcp);
  		return true;
-@@ -3812,6 +4305,13 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3816,6 +4359,13 @@ dispatch_event(const struct tcb_wait_data *wd)
  			}
  		}
  
@@ -1125,7 +1193,7 @@ index 4e710db80..62a8ce323 100644
  		if (detach_on_execve) {
  			if (current_tcp->flags & TCB_SKIP_DETACH_ON_FIRST_EXEC) {
  				current_tcp->flags &= ~TCB_SKIP_DETACH_ON_FIRST_EXEC;
-@@ -3981,7 +4481,8 @@ int
+@@ -3985,7 +4535,8 @@ int
  main(int argc, char *argv[])
  {
  	setlocale(LC_ALL, "");

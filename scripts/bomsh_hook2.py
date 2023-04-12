@@ -752,14 +752,13 @@ def get_all_subfiles_in_dpkg_deb_cmdline(dpkgline, pwd):
     if len(new_tokens) == 1:  # this is "dpkg-deb --build debian/openosc" cmd
         output_file = debdir + ".deb"  # the ouput archive is debdir.deb
     elif len(new_tokens) == 2:  # this is "dpkg-deb -b debian/openosc .." cmd
-        output_file = new_tokens[1]  # if this is a file, then it will be the output archive
+        output_file = get_real_path(new_tokens[1], pwd)  # if this is a file, then it will be the output archive
         if os.path.isdir(output_file):  # if this is a dir, then it will be dir/name_version_arch.deb output archive
             name, version, arch = read_name_ver_arch_from_deb_control(control_file)
             output_file = os.path.join(output_file, name + "_" + version + "_" + arch + ".deb")
     else:
         verbose("Warning: unsupported dpkg-deb cmd: " + dpkgline)
         return ('', [])
-    output_file = get_real_path(output_file, pwd)
     subfiles = find_all_regular_files(debdir)
     return (output_file, subfiles)
 
@@ -1165,11 +1164,13 @@ def create_symlink_for_adg_doc(ahash, adg_doc, destdir):
     return symlink
 
 
+# The "--set-section-alignment <name>=<align>" option was introduced in objcopy 2.33 version.
+# so "--set-section-alignment .note.omnibor=4" cannot yet be used for objcopy < 2.33 version
 g_embed_bom_script = '''
 if objdump -s -j .note.omnibor HELLO_FILE >/dev/null 2>/dev/null ; then
-  GITBOM_BUILD_MODE= objcopy --update-section .note.omnibor=NOTE_FILE --set-section-flags .note.omnibor=alloc,readonly --set-section-alignment .note.omnibor=4 HELLO_FILE >/dev/null 2>/dev/null
+  GITBOM_BUILD_MODE= objcopy --update-section .note.omnibor=NOTE_FILE --set-section-flags .note.omnibor=alloc,readonly HELLO_FILE >/dev/null 2>/dev/null
 else
-  GITBOM_BUILD_MODE= objcopy --add-section .note.omnibor=NOTE_FILE --set-section-flags .note.omnibor=alloc,readonly --set-section-alignment .note.omnibor=4 HELLO_FILE >/dev/null 2>/dev/null
+  GITBOM_BUILD_MODE= objcopy --add-section .note.omnibor=NOTE_FILE --set-section-flags .note.omnibor=alloc,readonly HELLO_FILE >/dev/null 2>/dev/null
 fi
 '''
 
@@ -1341,19 +1342,19 @@ def record_raw_info(outfile, infiles, pwd, argv_str, pid='', prog='', outfile_ch
     sha256_adg_doc = ''
     sha256_adg_hash = ''
     destdir = g_bomdir
+    if "sha1" in g_hashtypes and infile_checksums and "sha1" in infile_checksums:
+        sha1_infile_hashes = infile_checksums["sha1"]
+    if "sha256" in g_hashtypes and infile_checksums and "sha256" in infile_checksums:
+        sha256_infile_hashes = infile_checksums["sha256"]
     # bom_id embedding must occur before creating OmniBOR doc and symlink, also before recording hashes of output file
     if not args.no_auto_embed_bom_for_compiler_linker and not ignore_this_record:
         if "sha1" in g_hashtypes:
-            if infile_checksums and "sha1" in infile_checksums:
-                sha1_infile_hashes = infile_checksums["sha1"]
-            else:
+            if not sha1_infile_hashes:
                 sha1_infile_hashes = get_infile_hashes(infiles, "sha1")
             sha1_adg_doc = gitbom_create_temp_adg_doc(infiles, sha1_infile_hashes, destdir, "sha1")
             sha1_adg_hash = get_file_hash(sha1_adg_doc, "sha1", use_cache=False)
         if "sha256" in g_hashtypes:
-            if infile_checksums and "sha256" in infile_checksums:
-                sha256_infile_hashes = infile_checksums["sha256"]
-            else:
+            if not sha256_infile_hashes:
                 sha256_infile_hashes = get_infile_hashes(infiles, "sha256")
             sha256_adg_doc = gitbom_create_temp_adg_doc(infiles, sha256_infile_hashes, destdir, "sha256")
             sha256_adg_hash = get_file_hash(sha256_adg_doc, "sha256", use_cache=False)
@@ -1935,10 +1936,18 @@ def shell_command_record_same_file(prog, pwddir, argv_str, pid, cmdname):
     # save hashes of infiles to a temp file for later use in post-exec mode
     if args.pre_exec:
         for hash_alg in g_hashtypes:
-            save_pre_exec_file_hashes([outfile,], pid, hash_alg)
+            if cmdname == "sign-file":
+                x509_path = get_real_path(tokens[-2], pwddir)
+                save_pre_exec_file_hashes([outfile, x509_path,], pid, hash_alg)
+            else:
+                save_pre_exec_file_hashes([outfile,], pid, hash_alg)
     else:
         hashes = { hash_alg : collect_pre_exec_file_hashes(pid, hash_alg) for hash_alg in g_hashtypes }
-        record_raw_info(outfile, [outfile,], pwddir, argv_str, pid, prog=prog, infile_checksums=hashes)
+        if cmdname == "sign-file":
+            x509_path = get_real_path(tokens[-2], pwddir)
+            record_raw_info(outfile, [outfile, x509_path,], pwddir, argv_str, pid, prog=prog, infile_checksums=hashes)
+        else:
+            record_raw_info(outfile, [outfile,], pwddir, argv_str, pid, prog=prog, infile_checksums=hashes)
     return outfile
 
 
@@ -1984,6 +1993,42 @@ def process_install_command(prog, pwddir, argv_str):
     infiles = [infile,]
     record_raw_info(outfile, infiles, pwddir, argv_str)
     return outfile
+
+
+def process_sign_file_command(prog, pwddir, argv_str, pid):
+    '''
+    Process the sign-file command
+    Usage: scripts/sign-file [-dp] <hash algo> <key> <x509> <module> [<dest>]
+           scripts/sign-file -s <raw sig> <hash algo> <x509> <module> [<dest>]
+    :param prog: the program binary
+    :param pwddir: the present working directory for the command
+    :param argv_str: the full command with all its command line options/parameters
+    '''
+    tokens = argv_str.split()
+    if len(tokens) < 5:
+        verbose("Warning: not interested in this short sign-file command", LEVEL_1)
+        return ''
+    new_tokens = []
+    for token in tokens[1:]:
+        if token == "-s":
+            found_raw_sig_opt = True
+        elif token[0] != '-':
+            new_tokens.append(token)
+    if len(new_tokens) not in (4,5):
+        verbose("Warning: not interested in this mal-formed sign-file command", LEVEL_1)
+        return ''
+    module_name = new_tokens[3]
+    if len(new_tokens) == 5 and module_name != new_tokens[4]:
+        outfile = get_real_path(new_tokens[4], pwddir)
+        infile = get_real_path(module_name, pwddir)
+        x509_path = get_real_path(new_tokens[2], pwddir)
+        if not args.pre_exec:  # different input/output file, record only if post_exec
+            record_raw_info(outfile, [infile, x509_path,], pwddir, argv_str, prog=prog)
+        return outfile
+    else:
+        # the input and output file are the same file
+        shell_command_record_same_file(prog, pwddir, argv_str, pid, "sign-file")
+        return get_real_path(module_name, pwddir)
 
 
 def process_objcopy_command(prog, pwddir, argv_str, pid):
@@ -2227,6 +2272,8 @@ def process_shell_command(prog, pwd_str, argv_str, pid_str):
     #    outfile = process_install_command(prog, pwddir, argv_str)
     elif prog == "/usr/bin/rustc":
         outfile = process_rustc_command(prog, pwddir, argv_str)
+    elif prog == "scripts/sign-file":
+        outfile = process_sign_file_command(prog, pwddir, argv_str, pid)
     elif prog == "bomsh_openat_file":
         outfile = process_samefile_converter_command(prog, pwddir, argv_str, pid)
     elif prog == "/usr/bin/javac":
@@ -2544,12 +2591,12 @@ def main():
 
     if args.pre_exec:
         # Fewer number of programs to watch in pre_exec mode
-        progs_to_watch = g_samefile_converters + g_strip_progs + ["/usr/bin/ar", "/usr/bin/objcopy", "/usr/bin/dwz", "/usr/lib/rpm/sepdebugcrcfix", "bomsh_openat_file"]
+        progs_to_watch = g_samefile_converters + g_strip_progs + ["/usr/bin/ar", "/usr/bin/objcopy", "/usr/bin/dwz", "/usr/lib/rpm/sepdebugcrcfix", "scripts/sign-file", "bomsh_openat_file"]
         if args.watched_pre_exec_programs:
             progs_to_watch.extend(args.watched_pre_exec_programs.split(","))
     else:
         progs_to_watch = g_cc_compilers + g_cc_linkers + g_samefile_converters + g_strip_progs + ["/usr/bin/ar", "/usr/bin/objcopy", "arch/x86/boot/tools/build",
-                     "/usr/bin/rustc", "/usr/bin/dwz", "/usr/lib/rpm/sepdebugcrcfix", "bomsh_openat_file", "/usr/bin/javac", "/usr/bin/jar"]
+                     "/usr/bin/rustc", "/usr/bin/dwz", "/usr/lib/rpm/sepdebugcrcfix", "scripts/sign-file", "bomsh_openat_file", "/usr/bin/javac", "/usr/bin/jar"]
         if not args.create_no_adg_for_pkgs:
             progs_to_watch.extend( ("/usr/bin/dpkg-deb", "/usr/bin/rpmbuild") )
         if args.watched_programs:

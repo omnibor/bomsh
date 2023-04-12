@@ -1,8 +1,8 @@
 diff --git a/src/execve.c b/src/execve.c
-index a9224543b..0cf84fe17 100644
+index a9224543b..01403c9ed 100644
 --- a/src/execve.c
 +++ b/src/execve.c
-@@ -14,6 +14,314 @@
+@@ -14,6 +14,316 @@
  
  #include "defs.h"
  
@@ -36,7 +36,9 @@ index a9224543b..0cf84fe17 100644
 +                i++;
 +                p = argv[i];
 +        }
-+        buf[len - 1] = 0;
++        if (len > 0) {
++		buf[len - 1] = 0;
++	}
 +        return buf;
 +}
 +
@@ -317,7 +319,7 @@ index a9224543b..0cf84fe17 100644
  static void
  printargv(struct tcb *const tcp, kernel_ulong_t addr)
  {
-@@ -96,6 +404,19 @@ printargc(struct tcb *const tcp, kernel_ulong_t addr)
+@@ -96,6 +406,19 @@ printargc(struct tcb *const tcp, kernel_ulong_t addr)
  static void
  decode_execve(struct tcb *tcp, const unsigned int index)
  {
@@ -338,10 +340,10 @@ index a9224543b..0cf84fe17 100644
  	printpath(tcp, tcp->u_arg[index + 0]);
  	tprint_arg_next();
 diff --git a/src/strace.c b/src/strace.c
-index 4e710db80..f41c5129b 100644
+index 7a58bdbd6..71e8f634d 100644
 --- a/src/strace.c
 +++ b/src/strace.c
-@@ -2954,6 +2954,73 @@ init(int argc, char *argv[])
+@@ -2958,6 +2958,73 @@ init(int argc, char *argv[])
  		((followfork && !output_separately) || nprocs > 1);
  }
  
@@ -415,7 +417,7 @@ index 4e710db80..f41c5129b 100644
  static struct tcb *
  pid2tcb(const int pid)
  {
-@@ -3652,6 +3719,35 @@ trace_syscall(struct tcb *tcp, unsigned int *sig)
+@@ -3656,6 +3723,35 @@ trace_syscall(struct tcb *tcp, unsigned int *sig)
  	}
  }
  
@@ -451,7 +453,7 @@ index 4e710db80..f41c5129b 100644
  /* Returns true iff the main trace loop has to continue. */
  static bool
  dispatch_event(const struct tcb_wait_data *wd)
-@@ -3780,6 +3876,9 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3784,6 +3880,9 @@ dispatch_event(const struct tcb_wait_data *wd)
  		break;
  
  	case TE_EXITED:
@@ -461,7 +463,7 @@ index 4e710db80..f41c5129b 100644
  		print_exited(current_tcp, current_tcp->pid, status);
  		droptcb(current_tcp);
  		return true;
-@@ -3981,7 +4080,8 @@ int
+@@ -3985,7 +4084,8 @@ int
  main(int argc, char *argv[])
  {
  	setlocale(LC_ALL, "");
