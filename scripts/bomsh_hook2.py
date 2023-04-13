@@ -1305,16 +1305,16 @@ def gitbom_create_adg_and_record_hash(outfile, infiles, infile_hashes, adg_doc, 
     :param hash_alg: the hashing algorithm, sha1 or sha256
     :param ignore_this_record: info only, ignore this record for create_bom processing
     '''
-    verbose("Entering gitbom_create_adg_and_record_hash, outhash: " + outhash + " outfile: " + outfile, LEVEL_4)
+    verbose("Entering gitbom_create_adg_and_record_hash, outhash: " + outhash + " outfile: " + outfile + " adg_doc: " + adg_doc, LEVEL_4)
     if not outhash:
         outhash = get_file_hash(outfile, hash_alg, use_cache=False)
     destdir = g_bomdir
     if not infile_hashes:
         infile_hashes = get_infile_hashes(infiles, hash_alg)
-        if not args.create_no_adg and not ignore_this_record:
+    if not args.create_no_adg and not ignore_this_record:
+        if not adg_doc:
             adg_doc = gitbom_create_temp_adg_doc(infiles, infile_hashes, destdir, hash_alg)
             adg_hash = get_file_hash(adg_doc, hash_alg, use_cache=False)
-    if not args.create_no_adg and not ignore_this_record:
         new_adg_doc = gitbom_rename_adg_doc(adg_doc, adg_hash, destdir)
         create_symlink_for_adg_doc(outhash, new_adg_doc, destdir)
     gitbom_record_hash(outhash, outfile, infiles, infile_hashes, pwd, argv_str, pid=pid, prog=prog, hash_alg=hash_alg, ignore_this_record=ignore_this_record)
