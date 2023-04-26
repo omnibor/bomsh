@@ -35,6 +35,8 @@ Multiple Python scripts are developed to work together with these tools.
 - bomsh_create_cve.py script, which scans git repo and creates CVE database.
 - bomsh_search_cve.py script, which creates OmniBOR artifact tree for a binary file, and searches the CVE database and attaches the CVE search result to the OmniBOR artifact tree.
 - bomsh_pstree.py script, which analyzes strace logfile and creates various pstree files and indented strace logfile.
+- debrebuild script, which is a slight modification of the Debian debrebuild.pl script, to fix a few issues and support a new --srctardir option.
+- bomsh_rebuild_deb.py script, which rebuilds a Debian package from its buildinfo, and generates its OmniBOR documents.
 
 Compile Bombash and Bomtrace from Source
 ----------------------------------------
@@ -770,6 +772,48 @@ This holds true for other build-reproducible software like RPM packages, etc.
 
 For reproducible build, the -n option must be specified when running bomsh_hook2.py script, in order to not embed any .note.omnibor section into the generated binary files.
 This requires the use of "-c bomtrace.conf" option when running bomtrace2.
+
+A new bomsh_rebuild_deb.py script has been created to help with this use scenario. This script utilizes Docker container to automatically set up the environment.
+To rebuild an officially released Debian package like hostname 3.23 version, find its buildinfo file on the buildinfos.debian.net website, and then do the below:
+
+    $ git clone URL-of-this-git-repo bomsh
+    $ wget https://buildinfos.debian.net/buildinfo-pool/h/hostname/hostname_3.23_amd64.buildinfo
+    $ scripts/bomsh_rebuild_deb.py -f hostname_3.23_amd64.buildinfo
+    $ ls -tl bomsher_out/*
+    $ wget wget https://buildinfos.debian.net/buildinfo-pool/s/sysstat/sysstat_12.2.0-2_amd64.buildinfo
+    $ scripts/bomsh_rebuild_deb.py -f sysstat_12.2.0-2_amd64.buildinfo
+    $ ls -tl bomsher_out/*
+    $ wget https://buildinfos.debian.net/buildinfo-pool/l/linux/linux_5.10.84-1_amd64.buildinfo
+    $ scripts/bomsh_rebuild_deb.py -f linux_5.10.84-1_amd64.buildinfo
+    $ ls -tl bomsher_out/*
+
+Then the rebuilt .deb files are in the bomsher_out/debs directory.
+The generated OmniBOR documents are in the bomsher_out/omnibor directory.
+For your convenience, the bomsher_out/omnibor/pkgs/*.omnibor_adg.* and bomsher_out/debs/*.omnibor_adg.* files
+are the created symlinks to the top level OmniBOR documents of your packages.
+Also the relevant bomsh logfiles are in the bomsher_out/bomsh_logfiles directory.
+
+Even if it is not an officially released Debian package, for example, the openosc package,
+if it is reproducible, you can provide its source tarball and .dsc file, and then do the same:
+
+```
+$ git clone URL-of-this-git-repo bomsh
+$ cat >Dockerfile.openosc <<EOL
+FROM debian:bullseye
+
+RUN apt-get update && apt-get install -y git build-essential debhelper ; \\
+    rm -rf /var/lib/apt/lists/* ;
+
+RUN cd /root ; git clone https://github.com/cisco/OpenOSC.git ; \\
+    cd /root/OpenOSC ; sed -i 's/dpkg-buildpackage -b -uc -us/dpkg-buildpackage -F -uc -us/' Makefile.am ; \\
+    autoreconf -vfi && ./configure && make deb ;
+
+CMD cp /root/openosc_* /out
+EOL
+$ docker run -it --rm -v ${PWD}:/out $(docker build -q -f Dockerfile.openosc)
+$ scripts/bomsh_rebuild_deb.py -f ./openosc*.buildinfo -s .
+$ ls -tl bomsher_out/*
+```
 
 Using bomsh, we have successfully reproduced the build for some officially released versions of Debian packages: hostname, linux (Linux-kernel), openssl, sysstat, etc.
 We also created a repo to store these OmniBOR docs.
