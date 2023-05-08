@@ -316,7 +316,7 @@ def update_gitbom_dir(bomdir, infiles, checksum, outfile):
     if not infiles:
         verbose("Warning: infile is empty, skipping OmniBOR doc update for outfile " + outfile)
         return
-    if len(infiles) == 1 and not args.new_gitbom_doc_for_unary_transform and infiles[0] in g_bomdb:
+    if len(infiles) == 1 and not args.new_omnibor_doc_for_unary_transform and infiles[0] in g_bomdb:
         gitbom_doc_hash = g_bomdb[infiles[0]]
         verbose("Unary transform, reused OmniBOR file " + gitbom_doc_hash + " for outfile " + outfile)
     else:
@@ -799,7 +799,7 @@ def rtd_parse_options():
                     help = "the hash type, like sha1/sha256, the default is sha1")
     parser.add_argument('--dependency_criteria',
                     help = "the criteria for dependency, like normal/broad/compact, the default is normal")
-    parser.add_argument("-g", "--new_gitbom_doc_for_unary_transform",
+    parser.add_argument("-g", "--new_omnibor_doc_for_unary_transform",
                     action = "store_true",
                     help = "generate new OmniBOR doc/identifier for single input/output file transform")
     parser.add_argument("--not_generate_gitbom_doc",

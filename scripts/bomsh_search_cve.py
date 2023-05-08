@@ -66,7 +66,12 @@ g_tmpdir = "/tmp"
 g_jsonfile = "/tmp/bomsh_search_jsonfile"
 # All the CVE lists to store CVEs in the search result tree
 g_cvelist_keys = ("NoCVElist", "CVElist", "FixedCVElist", "cvehint_CVElist", "cvehint_FixedCVElist")
-g_metadata_keys = ["file_path", "file_paths", "build_cmd"] + list(g_cvelist_keys)
+# the below are metadata keys that should not be recursed by tree recursion
+g_metadata_keys = ["file_path", "file_paths", "build_cmd", "cvehints", "swh_path"] + list(g_cvelist_keys)
+# The top level software heritage (SWH) directory
+g_swh_dir = ''
+# a list of source blob files directory for SWH tree
+g_swh_src_blob_dir = []
 
 #
 # Helper routines
@@ -171,6 +176,22 @@ def save_json_db(db_file, db, indentation=4):
     else:
         with f:
             json.dump(db, f, indent=indentation, sort_keys=True)
+
+
+def find_all_regular_files_in_dirs(builddirs):
+    """
+    Find all regular files in the build dirs, excluding symbolic link files.
+
+    It simply runs the shell's find command and saves the result.
+
+    :param builddir: a list of directories
+    :returns a list that contains all the regular file names.
+    """
+    adirs = ' '.join([cmd_quote(adir) for adir in builddirs])
+    findcmd = "find " + adirs + ' -type f -print || true '
+    output = subprocess.check_output(findcmd, shell=True, universal_newlines=True)
+    files = output.splitlines()
+    return files
 
 
 ############################################################
@@ -409,6 +430,22 @@ def create_gitbom_node_of_checksum_line(afile):
     return lines
 
 
+def get_blob_id_from_checksum_line(checksum_line):
+    '''
+    Get the gitBOM blob ID from a line in the gitBOM doc.
+    The checksum line can be: 40-character SHA1 checksum, "blob SHA1", or "blob SHA1 bom SHA1", or "SHA1"
+    The checksum line can be: 64-character SHA256 checksum, "blob SHA256", or "blob SHA256 bom SHA256", or "SHA256"
+    :param checksum_line: the checksum line provided
+    returns the blob ID
+    '''
+    if "blob " == checksum_line[:5]:
+        if args.hashtype and args.hashtype.lower() == "sha256":
+            return checksum_line[5:69]
+        else:
+            return checksum_line[5:45]
+    return checksum_line.strip()
+
+
 def get_node_id_from_checksum_line(checksum_line):
     '''
     Get the gitBOM hash-tree node ID from a line in the gitBOM doc.
@@ -572,9 +609,73 @@ def update_gitbom_doc_treedb_for_checksum_line(object_bomdir, checksum, bom_id, 
         blobid, bomid = get_blob_bom_id_from_checksum_line(line)
         if bomid:
             update_gitbom_doc_treedb_for_checksum_line(object_bomdir, blobid, bomid, treedb)
+            # well, the below update to g_gitbom_doc_db is not necessary but useful
+            if blobid in g_gitbom_doc_db and g_gitbom_doc_db[blobid] != bomid:
+                verbose("Warning: blob " + blobid + " has two bom_ids, old: " + g_gitbom_doc_db[blobid] + " new: " + bomid, LEVEL_1)
+            g_gitbom_doc_db[blobid] = bomid
+
+
+def create_gitbom_doc_treedb_for_checksums(bomdir, checksums, use_checksum_line=True):
+    '''
+    Create the gitBOM doc hash-tree DB for a list of files, from the gitBOM docs in the bomdir.
+    :param bomdir: the gitBOM repo directory to store all gitBOM docs and metadata
+    :param checksums: a list of checksums (blob IDs) for files, it can be a dict, then its value is its bom_id
+    :param use_checksum_line: a flag to use the full checksum line as node of treedb
+    returns a dict with bom_id as key (except for the nodes with is_self_hashtree attribute, which has blob_id as key and is top level node only)
+    ##returns a dict with checksum (blob_id) as key (even if bom_id exists for blob_id)
+    '''
+    bom_db = {}
+    jsonfile = os.path.join(bomdir, "metadata", "bomsh", "bomsh_omnibor_doc_mapping")
+    if os.path.exists(jsonfile):
+        bom_db = load_json_db(jsonfile)
+    else:
+        jsonfile = os.path.join(bomdir, ".omnibor", "metadata", "bomsh", "bomsh_omnibor_doc_mapping")
+        if os.path.exists(jsonfile):
+            bom_db = load_json_db(jsonfile)
+    object_bomdir = os.path.join(bomdir, "objects")
+    is_dict = isinstance(checksums, dict)
+    treedb = {}
+    for checksum in checksums:
+        if is_dict:
+            bom_id = checksums[checksum]
+        else:
+            bom_id = ''
+        if not bom_id:
+            print("Warning: No embedded .bom section in blob ID: " + checksum)
+            if bom_db and checksum in bom_db:
+                bom_id = bom_db[checksum]
+                print("From recorded gitBOM mappings, found bom_id " + bom_id + " for blob ID: " + checksum)
+            if not bom_id:
+                print("Warning: No recorded bom_id mapping for blob ID: " + checksum)
+                continue
+        verbose("blob_id: " + checksum + " bom_id: " + bom_id)
+        #verbose("blob_id: " + checksum + " bom_id: " + bom_id + " file: " + afile)
+        if use_checksum_line:
+            # Add below blob_id to bom_id mapping for convenience, which has the is_self_hashtree attribute to distinguish from regular nodes.
+            checksum_line = "blob " + checksum + " bom " + bom_id
+            treedb[checksum] = {"hash_tree": [checksum_line,], "is_self_hashtree": True}
+            # this treedb will use bom_id as node key, except for the above is_self_hashtree node
+            update_gitbom_doc_treedb_for_checksum_line(object_bomdir, checksum, bom_id, treedb)
+        else:
+            # this treedb will use blob_id as node key
+            update_gitbom_doc_treedb_for_bomid(object_bomdir, checksum, bom_id, treedb)
+    return treedb
 
 
 def create_gitbom_doc_treedb_for_files(bomdir, afiles, use_checksum_line=True):
+    '''
+    Create the gitBOM doc hash-tree DB for a list of files, from the gitBOM docs in the bomdir.
+    :param bomdir: the gitBOM repo directory to store all gitBOM docs and metadata
+    :param afiles: a list of files which may contain embedded .bom section
+    :param use_checksum_line: a flag to use the full checksum line as node of treedb
+    returns a dict with bom_id as key (except for the nodes with is_self_hashtree attribute, which has blob_id as key and is top level node only)
+    ##returns a dict with checksum (blob_id) as key (even if bom_id exists for blob_id)
+    '''
+    checksums = {get_git_file_hash(afile) : get_embedded_bom_id(afile) for afile in afiles}
+    return create_gitbom_doc_treedb_for_checksums(bomdir, checksums, use_checksum_line)
+
+
+def create_gitbom_doc_treedb_for_files2(bomdir, afiles, use_checksum_line=True):
     '''
     Create the gitBOM doc hash-tree DB for a list of files, from the gitBOM docs in the bomdir.
     :param bomdir: the gitBOM repo directory to store all gitBOM docs and metadata
@@ -615,6 +716,22 @@ def create_gitbom_doc_treedb_for_files(bomdir, afiles, use_checksum_line=True):
             # this treedb will use blob_id as node key
             update_gitbom_doc_treedb_for_bomid(object_bomdir, checksum, bom_id, treedb)
     return treedb
+
+
+def build_swh_source_blob_db_for_dirs(adirs):
+    '''
+    build the blob ID to file_path mappings for a list of directories.
+    :param adirs: a list of directories
+    returns a dict of { blob ID => file_path } mappings
+    '''
+    blob_db = {}
+    afiles = find_all_regular_files_in_dirs(adirs)
+    for afile in afiles:
+        blob_id = get_git_file_hash(afile)
+        if blob_id not in blob_db:
+            blob_db[blob_id] = afile
+    return blob_db
+
 
 ############################################################
 #### End of embedded .bom section handling routines ####
@@ -688,6 +805,12 @@ def create_hash_tree_for_checksum(checksum, ancestors, checksum_db, checksum_lin
             metadata = get_metadata_for_checksum_from_db(g_metadata_db, checksum, which_list)
             if metadata:
                 entry[which_list] = metadata
+        '''
+        if args.software_heritage_save_dir:  # only add swh_path for leaf nodes
+            swh_path = os.path.join(args.software_heritage_save_dir, checksum)
+            if os.path.exists(swh_path):
+                entry['swh_path'] = swh_path
+        '''
         # the shallow copy of the checksum node is used, this should be fine
         g_checksum_cache_db[checksum_line] = entry
         return entry
@@ -757,9 +880,10 @@ def collect_cve_list_from_hash_tree(tree_db, which_list):
     if type(tree_db) is not dict:  # for "NOT_FOUND" or "RECURSION_LOOP_DETECTED"
         return []
     ret = []
-    non_checksum_keys = ("file_path", "file_paths") + g_cvelist_keys
+    #non_checksum_keys = ("file_path", "file_paths") + g_cvelist_keys
     for checksum in tree_db:
-        if checksum in non_checksum_keys:
+        #if checksum in non_checksum_keys:
+        if checksum in g_metadata_keys:
             if checksum == which_list:
                 ret.extend(tree_db[checksum])
             continue
@@ -771,9 +895,9 @@ def collect_cve_list_from_hash_tree(tree_db, which_list):
 def find_cve_lists_for_checksums(checksums, is_bom_id=False):
     '''
     find all the CVEs for a list of checksums.
-    :param checksums: the list of checksums to find CVEs
+    :param checksums: the list of checksums to find CVEs. either blob_id or bom_id is fine
     '''
-    if is_bom_id:
+    if g_bomid_db:
         tree = create_hash_tree_for_checksums(checksums, g_bomid_db)
     else:
         tree = create_hash_tree_for_checksums(checksums, g_checksum_db)
@@ -794,14 +918,17 @@ def find_cve_lists_for_checksums(checksums, is_bom_id=False):
             copy_truncated_metadata_files(tree, new_metadata_dir, metadata_dir)
     if args.subtree_collapsed_bomdir:  # Copy out necessary gitBOM docs only and with subtree-collapsed
         copy_subtree_collapsed_bomdocs_in_tree(tree, args.subtree_collapsed_bomdir)
-    if args.software_heritage_save_dir:
-        download_tree_blobs_from_software_heritage(tree, args.software_heritage_save_dir)
+    if g_swh_dir and args.download_from_swh:
+        download_tree_blobs_from_software_heritage(tree, os.path.join(g_swh_dir, "downloads"))
     # Check if there are any new blob IDs that do not exist in g_cvedb
     blobs = check_nonexistent_cve_blob_ids(tree)
     if blobs:
         print("Warning: the CVE search result may be inaccurate, since " + str(len(blobs)) + " blob IDs are not found in CVE DB")
         # Download blobs from softwareHeritage and check against CVE rules
-        destdir = os.path.join(g_tmpdir, "bomsh_swh_save_dir")
+        if g_swh_dir:
+            destdir = os.path.join(g_swh_dir, "downloads")
+        else:
+            destdir = os.path.join(g_tmpdir, "bomsh_swh_save_dir")
         afiles = download_blobs_from_software_heritage(blobs, destdir)
         verbose("For your convenience, " + str(len(afiles)) + " CVEDB-non-existent blob files are downloaded from SoftwareHeritage to directory: " + destdir)
         if afiles and args.cve_check_dir:
@@ -811,7 +938,20 @@ def find_cve_lists_for_checksums(checksums, is_bom_id=False):
             verbose("Here is CVE check results of downloaded SWH blobs: " + json.dumps(cve_results, indent=4, sort_keys=True), LEVEL_3)
             update_hash_tree_with_cve_results(tree, cve_results)
             if g_jsonfile and args.verbose > 1:
-                save_json_db(g_jsonfile + "-details_swh.json", tree)
+                save_json_db(g_jsonfile + "-details_cve_swh.json", tree)
+    if g_swh_dir:
+        verbose("Updating swh_path for the search result tree...", LEVEL_1)
+        blob_db = {}
+        if g_swh_src_blob_dir:
+            blob_db = build_swh_source_blob_db_for_dirs(g_swh_src_blob_dir)
+            if blob_db and args.verbose > 1:
+                save_json_db(g_jsonfile + "-source_blob_db.json", blob_db)
+        update_tree_blobs_with_software_heritage_path(tree, os.path.join(g_swh_dir, "downloads"), blob_db)
+        if g_jsonfile and args.verbose > 1:
+            save_json_db(g_jsonfile + "-details_swh.json", tree)
+    if args.create_swh_tree_dir:
+        verbose("Creating the SWH tree in directory: " + args.create_swh_tree_dir, LEVEL_1)
+        create_swh_tree(tree, os.path.abspath(args.create_swh_tree_dir))
     ret = {}
     for checksum in checksums:
         if checksum in tree:
@@ -915,9 +1055,10 @@ def get_all_blob_ids_for_src_files_internal(node_key, tree_db, src_files, result
     '''
     if not isinstance(tree_db, dict):  # for "NOT_FOUND" or "RECURSION_LOOP_DETECTED"
         return
-    non_checksum_keys = ("file_path", "file_paths") + g_cvelist_keys
+    #non_checksum_keys = ("file_path", "file_paths") + g_cvelist_keys
     for checksum in tree_db:
-        if checksum in non_checksum_keys:
+        #if checksum in non_checksum_keys:
+        if checksum in g_metadata_keys:
             if checksum == "file_path":
                 afile = tree_db[checksum]
                 src_file = get_cve_check_source_file(afile, src_files)
@@ -1036,6 +1177,84 @@ def download_tree_blobs_from_software_heritage(tree, destdir):
     """
     blobs = get_all_blobs_in_tree(tree)
     return download_blobs_from_software_heritage(blobs, destdir)
+
+
+def update_tree_blobs_with_software_heritage_path(tree, destdir, blob_db, depth=0):
+    """
+    Update the gitBOM tree with swh_path of downloaded SoftwareHeritage archive.
+    :param tree: the top level tree node of the gitBOM tree with metadata details
+    :param destdir: the destination directory of the saved downloaded files
+    :param blob_db: a dict of { blob_id => file_path } mappings
+    :param depth: tree level, top level is depth 0
+    This function recurses on itself.
+    """
+    if not isinstance(tree, dict):
+        return
+    verbose("\nupdate_tree_blobs_with_swh_path at depth " + str(depth) + " with " + str(len(tree)) + " keys: " + str(list(tree)[:5]), LEVEL_4)
+    for checksum_line in tree:
+        blob_id = get_blob_id_from_checksum_line(checksum_line)
+        if len(blob_id) not in (40, 64):
+            continue
+        subtree = tree[checksum_line]
+        if blob_id in blob_db:
+            swh_path = blob_db[blob_id]
+            subtree['swh_path'] = swh_path
+        else:
+            swh_path = os.path.join(destdir, blob_id)
+            if os.path.exists(swh_path) and os.path.getsize(swh_path) > 0:
+                subtree['swh_path'] = swh_path
+        update_tree_blobs_with_software_heritage_path(subtree, destdir, blob_db, depth + 1)
+
+
+def update_tree_blobs_with_software_heritage_path2(tree, destdir, depth=0):
+    """
+    Update the gitBOM tree with swh_path of downloaded SoftwareHeritage archive.
+    :param tree: the top level tree node of the gitBOM tree with metadata details
+    :param destdir: the destination directory of the saved downloaded files
+    :param depth: tree level, top level is depth 0
+    This function recurses on itself.
+    """
+    if not isinstance(tree, dict):
+        return
+    verbose("\nupdate_tree_blobs_with_swh_path at depth " + str(depth) + " with " + str(len(tree)) + " keys: " + str(list(tree)[:5]), LEVEL_4)
+    for checksum_line in tree:
+        subtree = tree[checksum_line]
+        if checksum_line[:5] == "blob " and " bom " not in checksum_line:  # leaf node
+            tokens = checksum_line.split()
+            swh_path = os.path.join(destdir, tokens[1])
+            if os.path.exists(swh_path):
+                subtree['swh_path'] = swh_path
+            continue
+        if depth == 0 or checksum_line[:5] == "blob " and " bom " in checksum_line:  # bom node or top level
+           update_tree_blobs_with_software_heritage_path(subtree, destdir, depth + 1)
+
+
+def create_swh_tree(tree, destdir, depth=0):
+    """
+    Create the gitBOM tree in a directory with swh_path of downloaded SoftwareHeritage archive as symlinks.
+    :param tree: the top level tree node of the gitBOM tree with metadata details
+    :param destdir: the destination directory of the saved downloaded files
+    :param depth: tree level, top level is depth 0
+    This function recurses on itself.
+    """
+    if not isinstance(tree, dict):
+        return
+    verbose("\ncreate_swh_tree at depth " + str(depth) + " with " + str(len(tree)) + " keys: " + str(list(tree)[:5]), LEVEL_4)
+    for checksum_line in tree:
+        subtree = tree[checksum_line]
+        newdir = os.path.join(destdir, checksum_line.replace(' ', '-'))
+        blob_id = get_blob_id_from_checksum_line(checksum_line)
+        if len(blob_id) not in (40, 64):
+            # newdir is actually a file, create this new text file
+            if checksum_line == 'swh_path':
+                cmd = 'ln -sfr ' + cmd_quote(subtree) + ' ' + cmd_quote(newdir) + ' || true'
+                os.system(cmd)
+            else:
+                write_text_file(newdir, str(subtree))
+            continue
+        if not os.path.exists(newdir):
+            os.makedirs(newdir)
+        create_swh_tree(subtree, newdir, depth + 1)
 
 
 def get_all_blobs_in_tree_internal(tree, blob_set):
@@ -1571,9 +1790,9 @@ def rtd_parse_options():
                     help = "the CVE database file, with git blob ID to CVE mappings")
     parser.add_argument('-r', '--raw_checksums_file',
                     help = "the raw checksum database file generated by bomsh_hook or bomsh_create_bom script")
-    parser.add_argument('-b', '--bom_topdir',
+    parser.add_argument('--bom_topdir',
                     help = "the top directory which usually contains multiple subdirs to store the generated gitBOM doc files")
-    parser.add_argument('--bom_dir',
+    parser.add_argument('-b', '--bom_dir',
                     help = "the single directory to store the generated gitBOM doc files")
     parser.add_argument('-e', '--cve_list_to_search',
                     help = "the comma-separated CVE list to search vulnerable git blob IDs")
@@ -1591,8 +1810,15 @@ def rtd_parse_options():
                     help = "the output JSON file for the search result")
     parser.add_argument('--cve_check_dir',
                     help = "the directory to store all CVE checking rules files")
+    parser.add_argument("--software_source_blob_dir",
+                    help = "a comma-separated directories with source blob files")
     parser.add_argument("--software_heritage_save_dir",
                     help = "the directory to save the source files if they exist in SoftwareHeritage")
+    parser.add_argument("--download_from_swh",
+                    action = "store_true",
+                    help = "download source blob files from SoftwareHeritage archive website")
+    parser.add_argument("--create_swh_tree_dir",
+                    help = "create a directory of OmniBOR tree with swh_path symlinks")
     parser.add_argument('--hashtype',
                     help = "the hash type, like sha1/sha256, the default is sha1")
     parser.add_argument('--copyout_bomdir',
@@ -1627,6 +1853,13 @@ def rtd_parse_options():
         g_jsonfile = os.path.join(g_tmpdir, "bomsh_search_jsonfile")
     if args.jsonfile:
         g_jsonfile = args.jsonfile
+    global g_swh_dir
+    if args.software_heritage_save_dir:
+        g_swh_dir = os.path.abspath(args.software_heritage_save_dir)
+        if not os.path.exists(g_swh_dir):
+            os.makedirs(g_swh_dir)
+    if args.software_source_blob_dir:
+        g_swh_src_blob_dir.extend([os.path.abspath(adir) for adir in args.software_source_blob_dir.split(",")])
 
     print ("Your command line is:")
     print (" ".join(sys.argv))
@@ -1666,6 +1899,8 @@ def main():
         verbose("There are " + str(len(g_gitbom_docfile_db)) + " total gitBOM docs in directory " + bom_dir)
         if args.files_to_search_cve:
             g_bomid_db = create_gitbom_doc_treedb_for_files(bom_dir, args.files_to_search_cve.split(","))
+        elif args.checksums_to_search_cve:
+            g_bomid_db = create_gitbom_doc_treedb_for_checksums(bom_dir, args.checksums_to_search_cve.split(","))
         else:
             g_bomid_db = create_gitbom_doc_treedb(bom_dir)
     if args.verbose > 2:
@@ -1674,6 +1909,7 @@ def main():
         else:
             save_json_db(g_jsonfile + "-treedb.json", g_checksum_db)
         save_json_db(g_jsonfile + "-bomdocdb.json", g_gitbom_docfile_db)
+        save_json_db(g_jsonfile + "-bom-mappings.json", g_gitbom_doc_db)
 
     cve_result = {}
     if args.files_to_search_cve:

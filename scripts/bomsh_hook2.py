@@ -27,7 +27,10 @@ import sys
 import os
 import subprocess
 import json
-import yaml
+try:
+    import yaml
+except ImportError:
+    pass
 
 # for special filename handling with shell
 try:
@@ -1240,8 +1243,15 @@ def gitbom_create_temp_adg_doc(infiles, infile_hashes, destdir, hash_alg):
     :param infile_hashes: a dict of {infile => hash}
     :param destdir: the destination directory to save this ADG doc file
     :param hash_alg: the hashing algorithm, sha1 or sha256
+    returns the temporary ADG doc or the real ADG doc if unary transform with bom_id already.
     '''
     lines = create_gitbom_doc_text(infiles, infile_hashes, destdir, hash_alg)
+    if len(infiles) == 1 and not args.new_omnibor_doc_for_unary_transform and " bom " in lines:
+        # unary transform with bom_id already, reuse the bom_id
+        adg_hash = lines.strip().split()[3]
+        object_dir = os.path.join(destdir, "objects", adg_hash[:2])
+        object_file = os.path.join(object_dir, adg_hash[2:])
+        return object_file
     output_file = os.path.join(g_tmpdir, "bomsh_temp_gitbom_file." + hash_alg)
     firstline = "gitoid:blob:" + hash_alg + "\n"
     write_text_file(output_file, firstline + lines)
@@ -1295,7 +1305,7 @@ def gitbom_create_adg_and_record_hash(outfile, infiles, infile_hashes, adg_doc, 
     :param outfile: the output file
     :param infiles: a list of input files
     :param infile_hashes: a dict of {infile => hash}
-    :param adg_doc: the temporary ADG doc file
+    :param adg_doc: the temporary ADG doc file, or real ADG doc file
     :param adg_hash: the sha1 or sha256 hash of the ADG doc file
     :param pwd: present working directory of the shell command
     :param argv_str: the full command with all its command line options/parameters
@@ -1315,7 +1325,10 @@ def gitbom_create_adg_and_record_hash(outfile, infiles, infile_hashes, adg_doc, 
         if not adg_doc:
             adg_doc = gitbom_create_temp_adg_doc(infiles, infile_hashes, destdir, hash_alg)
             adg_hash = get_file_hash(adg_doc, hash_alg, use_cache=False)
-        new_adg_doc = gitbom_rename_adg_doc(adg_doc, adg_hash, destdir)
+        if os.path.basename(adg_doc).startswith("bomsh_temp_gitbom_file"):
+            new_adg_doc = gitbom_rename_adg_doc(adg_doc, adg_hash, destdir)
+        else:  # must be real ADG doc
+            new_adg_doc = adg_doc
         create_symlink_for_adg_doc(outhash, new_adg_doc, destdir)
     gitbom_record_hash(outhash, outfile, infiles, infile_hashes, pwd, argv_str, pid=pid, prog=prog, hash_alg=hash_alg, ignore_this_record=ignore_this_record)
 
@@ -2498,7 +2511,7 @@ def rtd_parse_options():
     parser.add_argument("--no_dependent_headers",
                     action = "store_true",
                     help = "not include C header files for hash tree dependency")
-    parser.add_argument("--new_omnibor_doc_for_unary_transform",
+    parser.add_argument("-g", "--new_omnibor_doc_for_unary_transform",
                     action = "store_true",
                     help = "generate new OmniBOR doc/identifier for single input/output file transform")
     parser.add_argument("--record_raw_bomid",
