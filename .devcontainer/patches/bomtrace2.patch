@@ -1,11 +1,29 @@
 diff --git a/src/execve.c b/src/execve.c
-index a9224543b..e42169ad9 100644
+index a9224543b..49ec5d841 100644
 --- a/src/execve.c
 +++ b/src/execve.c
-@@ -14,6 +14,443 @@
+@@ -14,6 +14,484 @@
  
  #include "defs.h"
  
++extern struct bomsh_configs {
++        char *hook_script_file;
++        char *hook_script_cmdopt;
++        char *shell_cmd_file;
++        char *logfile;
++        char *syscalls;
++        int skip_checking_prog_access;
++} g_bomsh_config;
++
++extern int bomsh_detach_on_pid;
++extern int bomsh_is_pre_exec_program(char *prog);
++extern int bomsh_is_watched_program(char *prog);
++extern int bomsh_is_detach_on_pid_program(char *prog);
++extern pid_t *bomsh_umbrella_pid_stack;
++extern int bomsh_umbrella_pid_top;
++extern int bomsh_is_umbrella_program(char *prog);
++extern void bomsh_hook_program(int pid, int pre_exec_mode, const char *suffix);
++
 +// calculate the string length of the space-character separated argv array.
 +// the calculated length includes the ending NULL character.
 +static int get_argv_length(char **argv)
@@ -193,6 +211,18 @@ index a9224543b..e42169ad9 100644
 +	return strdup(path);
 +}
 +
++void bomsh_write_file(const char *filepath, const char *data, const char *mode);
++
++// write some data to a file
++void bomsh_write_file(const char *filepath, const char *data, const char *mode)
++{
++        FILE *fp = fopen(filepath, mode);
++        if (fp != NULL) {
++                fputs(data, fp);
++                fclose(fp);
++        }
++}
++
 +char * bomsh_get_rootdir(struct tcb *tcp);
 +
 +// get root directory for a traced process.
@@ -225,35 +255,28 @@ index a9224543b..e42169ad9 100644
 +	return strdup(pwddir);
 +}
 +
-+void bomsh_write_file(const char *filepath, const char *data, const char *mode);
++char * bomsh_get_stdin_file(struct tcb *tcp);
 +
-+// write some data to a file
-+void bomsh_write_file(const char *filepath, const char *data, const char *mode)
++// get fd0/stdin file for a traced process.
++char * bomsh_get_stdin_file(struct tcb *tcp)
 +{
-+        FILE *fp = fopen(filepath, mode);
-+        if (fp != NULL) {
-+                fputs(data, fp);
-+                fclose(fp);
-+        }
++	char cwd_file[32] = "";
++	static char stdin_file[PATH_MAX] = "";
++	sprintf(cwd_file, "/proc/%d/fd/0", tcp->pid);
++	int bytes = readlink(cwd_file, stdin_file, PATH_MAX);
++	if (bytes == -1) {
++	       return NULL;
++	}
++	stdin_file[bytes] = 0;
++	if (strncmp(stdin_file, "/dev/", 5) == 0 || strncmp(stdin_file, "pipe:[", 6) == 0) {
++		if (g_bomsh_config.logfile) {
++			bomsh_write_file(g_bomsh_config.logfile, "\n\nNot-regular stdin_file: ", "a");
++			bomsh_write_file(g_bomsh_config.logfile, stdin_file, "a");
++		}
++		return NULL;
++	}
++	return strdup(stdin_file);
 +}
-+
-+extern struct bomsh_configs {
-+        char *hook_script_file;
-+        char *hook_script_cmdopt;
-+        char *shell_cmd_file;
-+        char *logfile;
-+        char *syscalls;
-+        int skip_checking_prog_access;
-+} g_bomsh_config;
-+
-+extern int bomsh_detach_on_pid;
-+extern int bomsh_is_pre_exec_program(char *prog);
-+extern int bomsh_is_watched_program(char *prog);
-+extern int bomsh_is_detach_on_pid_program(char *prog);
-+extern pid_t *bomsh_umbrella_pid_stack;
-+extern int bomsh_umbrella_pid_top;
-+extern int bomsh_is_umbrella_program(char *prog);
-+extern void bomsh_hook_program(int pid, int pre_exec_mode, const char *suffix);
 +
 +int bomsh_check_file_permission(char *path, char *pwd, char *root, int amode);
 +
@@ -386,14 +409,24 @@ index a9224543b..e42169ad9 100644
 +		free(path);
 +                return 0;
 +        }
++	// special handling of the patch command
++	char *stdin_file = NULL;
++	if (strcmp(path, "/usr/bin/patch") == 0) {
++		stdin_file = bomsh_get_stdin_file(tcp);
++	}
 +        len1 = strlen(pwd_line);
 +        len2 = strlen(path);
-+        int len = len1 + len2 + strlen(argv_str) + 3;
++        int len3 = strlen(argv_str);
++        int len = len1 + len2 + len3 + 3;
++	if (stdin_file) {
++		len += strlen(stdin_file) + 3;  // " < stdin_file"
++	}
 +        char * cmd_data = malloc(len + 1);  // allocate the memory
 +        if (!cmd_data) {
 +                free(pwd);
 +                free(path);
 +                free(argv_str);
++		if (stdin_file) free(stdin_file);
 +                return 0;
 +        }
 +        // now concatenate the 3 strings: pwd_line (pwd + rootdir), prog_path, argv_str
@@ -402,6 +435,17 @@ index a9224543b..e42169ad9 100644
 +        strcpy(cmd_data + len1 + 1, path);
 +        cmd_data[len1 + 1 + len2] = '\n';  // use newline character as separator
 +        strcpy(cmd_data + len1 + len2 + 2, argv_str);
++	// pwd_line and argv_str can be freed now, but not path
++	free(pwd_line);
++	free(argv_str);
++	// if stdin_file, then append " < stdin_file" to argv_str
++	if (stdin_file) {
++		cmd_data[len1 + len2 + len3 + 2] = ' ';
++		cmd_data[len1 + len2 + len3 + 3] = '<';
++		cmd_data[len1 + len2 + len3 + 4] = ' ';
++		strcpy(cmd_data + len1 + len2 + len3 + 5, stdin_file);
++		free(stdin_file);
++	}
 +        cmd_data[len - 1] = 0;  // must be null-terminated
 +        char pid_str[32];
 +        sprintf(pid_str, "pid: %d\n", tcp->pid);
@@ -416,9 +460,8 @@ index a9224543b..e42169ad9 100644
 +		if (g_bomsh_config.logfile) {
 +			bomsh_write_file(g_bomsh_config.logfile, "\nError: bomsh cmd file name too long\n", "a");
 +		}
-+                free(pwd_line);
 +                free(path);
-+                free(argv_str);
++                free(cmd_data);
 +		return 0;
 +	}
 +	cmd_file[sizeof(cmd_file)-1] = 0;
@@ -436,9 +479,7 @@ index a9224543b..e42169ad9 100644
 +		rc = 2;
 +	}
 +        // need to free the malloc'ed memory
-+	free(argv_str);
 +	free(path);
-+	free(pwd_line);
 +	free(cmd_data);
 +	return rc;
 +}
@@ -446,7 +487,7 @@ index a9224543b..e42169ad9 100644
  static void
  printargv(struct tcb *const tcp, kernel_ulong_t addr)
  {
-@@ -96,6 +533,12 @@ printargc(struct tcb *const tcp, kernel_ulong_t addr)
+@@ -96,6 +574,12 @@ printargc(struct tcb *const tcp, kernel_ulong_t addr)
  static void
  decode_execve(struct tcb *tcp, const unsigned int index)
  {
@@ -612,10 +653,10 @@ index 6356c5831..4320bcb4d 100644
  	printpath(tcp, tcp->u_arg[offset]);
  	tprint_arg_next();
 diff --git a/src/strace.c b/src/strace.c
-index 7a58bdbd6..42182d955 100644
+index 265c0c6dc..2a81ff825 100644
 --- a/src/strace.c
 +++ b/src/strace.c
-@@ -2958,6 +2958,531 @@ init(int argc, char *argv[])
+@@ -2979,6 +2979,531 @@ init(int argc, char *argv[])
  		((followfork && !output_separately) || nprocs > 1);
  }
  
@@ -773,7 +814,7 @@ index 7a58bdbd6..42182d955 100644
 +		ptr = strtok(NULL, delim);
 +	}
 +	if (i == 0) {  // need at least one watched program
-+		fprintf(stderr, "No watched program is read\n");
++		//fprintf(stderr, "No watched program is read\n");
 +		return NULL;
 +	}
 +ret_here:
@@ -1147,7 +1188,7 @@ index 7a58bdbd6..42182d955 100644
  static struct tcb *
  pid2tcb(const int pid)
  {
-@@ -3706,6 +4231,10 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3734,6 +4259,10 @@ dispatch_event(const struct tcb_wait_data *wd)
  		ATTRIBUTE_FALLTHROUGH;
  
  	case TE_SYSCALL_STOP:
@@ -1158,7 +1199,7 @@ index 7a58bdbd6..42182d955 100644
  		if (trace_syscall(current_tcp, &restart_sig) < 0) {
  			/*
  			 * ptrace() failed in trace_syscall().
-@@ -3784,6 +4313,20 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3812,6 +4341,20 @@ dispatch_event(const struct tcb_wait_data *wd)
  		break;
  
  	case TE_EXITED:
@@ -1179,7 +1220,7 @@ index 7a58bdbd6..42182d955 100644
  		print_exited(current_tcp, current_tcp->pid, status);
  		droptcb(current_tcp);
  		return true;
-@@ -3816,6 +4359,13 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3844,6 +4387,13 @@ dispatch_event(const struct tcb_wait_data *wd)
  			}
  		}
  
@@ -1193,7 +1234,7 @@ index 7a58bdbd6..42182d955 100644
  		if (detach_on_execve) {
  			if (current_tcp->flags & TCB_SKIP_DETACH_ON_FIRST_EXEC) {
  				current_tcp->flags &= ~TCB_SKIP_DETACH_ON_FIRST_EXEC;
-@@ -3985,7 +4535,8 @@ int
+@@ -4013,7 +4563,8 @@ int
  main(int argc, char *argv[])
  {
  	setlocale(LC_ALL, "");
@@ -1204,10 +1245,10 @@ index 7a58bdbd6..42182d955 100644
  	exit_code = !nprocs;
  
 diff --git a/src/syscall.c b/src/syscall.c
-index cc37aa30c..517cbe809 100644
+index c636ba37c..1a9e77f50 100644
 --- a/src/syscall.c
 +++ b/src/syscall.c
-@@ -787,6 +787,19 @@ print_erestart(const char *err_short, const char *err_long)
+@@ -788,6 +788,19 @@ print_erestart(const char *err_short, const char *err_long)
  	tprints_sysret_string("strerror", err_long);
  }
  
@@ -1227,7 +1268,7 @@ index cc37aa30c..517cbe809 100644
  int
  syscall_exiting_trace(struct tcb *tcp, struct timespec *ts, int res)
  {
-@@ -964,6 +977,10 @@ syscall_exiting_trace(struct tcb *tcp, struct timespec *ts, int res)
+@@ -978,6 +991,10 @@ syscall_exiting_trace(struct tcb *tcp, struct timespec *ts, int res)
  				if ((current_klongsize < sizeof(tcp->u_rval)) ||
  				    ((kernel_ulong_t) tcp->u_rval <= INT_MAX)) {
  					printfd(tcp, tcp->u_rval);

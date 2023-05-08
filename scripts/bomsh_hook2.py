@@ -2008,6 +2008,133 @@ def process_install_command(prog, pwddir, argv_str):
     return outfile
 
 
+def get_patch_file_from_line(line, strip_num):
+    '''
+    Get the file to patch from the ---, +++, or *** line of the patch.
+    :param line: the line in the patch file, which contains the file to patch
+    :param strip_num: the -pNUM value of the patch command
+    returns the file to patch
+    '''
+    tokens = line.split()
+    if len(tokens) not in (2, 5):
+        verbose("Warning: this patch line does not have 2 or 5 tokens, skip it: " + line, LEVEL_1)
+        return ''
+    afile = tokens[1]
+    if strip_num:
+        afile = "/".join(afile.split("/")[strip_num:])
+    return afile
+
+
+def select_the_patch_file(afile, bfile):
+    '''
+    Select the file to patch, from two candiates.
+    The file with shorter length is preferred if it exists.
+    One of the two files must exist for patch to succeed.
+    :param afile: the original file
+    :param bfile: the new file
+    '''
+    if afile == bfile:
+        return afile
+    if len(afile) <= len(bfile):
+        if os.path.exists(afile):
+            return afile
+        else:
+            return bfile
+    else:
+        if os.path.exists(bfile):
+            return bfile
+        else:
+            return afile
+
+
+def process_patch_command(prog, pwddir, argv_str, pid):
+    '''
+    Process the patch command.
+       patch [options] [originalfile [patchfile]]
+       patch -pnum < patchfile
+    Only the context/unified patch format is supported.
+    :param prog: the program binary
+    :param pwddir: the present working directory for the command
+    :param argv_str: the full command with all its command line options/parameters
+    '''
+    verbose("patch cmd: " + argv_str, LEVEL_1)
+    strip_num = 0
+    found_stdin = False
+    next_token_is_strip_num = False
+    tokens = argv_str.split()
+    new_tokens = []
+    for token in tokens[1:]:
+        if token in ("-p", "--strip"):
+            next_token_is_strip_num = True
+        elif next_token_is_strip_num:
+            strip_num = int(token)
+            next_token_is_strip_num = False
+        elif token.startswith("-p"):
+            strip_num = int(token[2:])
+        elif token.startswith("--strip="):
+            strip_num = int(token[8:])
+        elif token == "<":
+            found_stdin = True
+        elif token[0] != '-':
+            new_tokens.append(token)
+    if not (found_stdin or not found_stdin and len(new_tokens) == 2):
+        verbose("Warning: not interested in this form of patch command", LEVEL_1)
+        return ''
+    if not found_stdin:
+        # It must be the form of "patch originalfile patch-file".
+        infile = get_real_path(new_tokens[0], pwddir)
+        patch_file = get_real_path(new_tokens[1], pwddir)
+        if args.pre_exec:
+            for hash_alg in g_hashtypes:
+                # need to save the hash of the patch_file itself too
+                save_pre_exec_file_hashes([patch_file, infile], pid, hash_alg)
+        else:
+            hashes = { hash_alg : collect_pre_exec_file_hashes(pid, hash_alg) for hash_alg in g_hashtypes }
+            hash_alg0 = g_hashtypes[0]
+            old_hash = hashes[hash_alg0][infile]
+            if get_file_hash(infile, hash_alg0, False) == old_hash:
+                verbose("Warning: patch gets same checksum " + old_hash + " skip recording file " + infile)
+                return ''
+            record_raw_info(infile, [infile, patch_file], pwddir, argv_str, pid, prog=prog, infile_checksums=hashes)
+        return ''
+    # It must be the form of "patch -pNUM < patch-file".
+    if not new_tokens:
+        return ''
+    patch_file = get_real_path(new_tokens[-1], pwddir)
+    verbose("strip_num is " + str(strip_num) + " patch file is: " + patch_file, LEVEL_1)
+    afiles = []
+    with open(patch_file, 'r') as f:
+        for line in f:
+            if line[:4] in ('--- ', '+++ ', '*** '):  # found the file to patch
+                afile = get_patch_file_from_line(line, strip_num)
+                if afile:
+                    afiles.append(afile)
+    verbose("list of files to patch: " + str(afiles), LEVEL_1)
+    afiles = [get_real_path(afile, pwddir) for afile in afiles]
+    bfiles = []
+    for i in range(len(afiles)//2):
+        bfile = select_the_patch_file(afiles[2*i], afiles[2*i+1])
+        bfiles.append(bfile)
+    verbose("new list of files to patch: " + str(bfiles), LEVEL_1)
+    # outfile is same as infile, need to handle both pre-exec and post-exec mode.
+    # save hashes of infiles to a temp file for later use in post-exec mode
+    infiles = bfiles
+    if args.pre_exec:
+        for hash_alg in g_hashtypes:
+            # need to save the hash of the patch_file itself too
+            save_pre_exec_file_hashes(infiles + [patch_file,], pid, hash_alg)
+    else:
+        hashes = { hash_alg : collect_pre_exec_file_hashes(pid, hash_alg) for hash_alg in g_hashtypes }
+        hash_alg0 = g_hashtypes[0]
+        for infile in infiles:
+            old_hash = hashes[hash_alg0][infile]
+            if get_file_hash(infile, hash_alg0, False) == old_hash:
+                verbose("Warning: patch gets same checksum " + old_hash + " skip recording file " + infile)
+                continue
+            record_raw_info(infile, [infile, patch_file], pwddir, argv_str, pid, prog=prog, infile_checksums=hashes)
+    return ''
+
+
 def process_sign_file_command(prog, pwddir, argv_str, pid):
     '''
     Process the sign-file command
@@ -2285,6 +2412,8 @@ def process_shell_command(prog, pwd_str, argv_str, pid_str):
     #    outfile = process_install_command(prog, pwddir, argv_str)
     elif prog == "/usr/bin/rustc":
         outfile = process_rustc_command(prog, pwddir, argv_str)
+    elif prog == "/usr/bin/patch":
+        outfile = process_patch_command(prog, pwddir, argv_str, pid)
     elif prog == "scripts/sign-file":
         outfile = process_sign_file_command(prog, pwddir, argv_str, pid)
     elif prog == "bomsh_openat_file":
@@ -2604,11 +2733,12 @@ def main():
 
     if args.pre_exec:
         # Fewer number of programs to watch in pre_exec mode
-        progs_to_watch = g_samefile_converters + g_strip_progs + ["/usr/bin/ar", "/usr/bin/objcopy", "/usr/bin/dwz", "/usr/lib/rpm/sepdebugcrcfix", "scripts/sign-file", "bomsh_openat_file"]
+        progs_to_watch = g_samefile_converters + g_strip_progs + ["/usr/bin/ar", "/usr/bin/objcopy", "/usr/bin/dwz", "/usr/bin/patch",
+                "/usr/lib/rpm/sepdebugcrcfix", "scripts/sign-file", "bomsh_openat_file"]
         if args.watched_pre_exec_programs:
             progs_to_watch.extend(args.watched_pre_exec_programs.split(","))
     else:
-        progs_to_watch = g_cc_compilers + g_cc_linkers + g_samefile_converters + g_strip_progs + ["/usr/bin/ar", "/usr/bin/objcopy", "arch/x86/boot/tools/build",
+        progs_to_watch = g_cc_compilers + g_cc_linkers + g_samefile_converters + g_strip_progs + ["/usr/bin/ar", "/usr/bin/objcopy", "arch/x86/boot/tools/build", "/usr/bin/patch",
                      "/usr/bin/rustc", "/usr/bin/dwz", "/usr/lib/rpm/sepdebugcrcfix", "scripts/sign-file", "bomsh_openat_file", "/usr/bin/javac", "/usr/bin/jar"]
         if not args.create_no_adg_for_pkgs:
             progs_to_watch.extend( ("/usr/bin/dpkg-deb", "/usr/bin/rpmbuild") )
