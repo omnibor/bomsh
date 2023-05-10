@@ -12,6 +12,7 @@
 /usr/bin/gold
 /usr/bin/ranlib
 /usr/bin/dwz
+/usr/bin/patch
 /usr/bin/rustc
 /usr/bin/dpkg-deb
 /usr/bin/rpmbuild
@@ -32,6 +33,7 @@ scripts/sign-file
 /usr/bin/ar
 /usr/bin/ranlib
 /usr/bin/dwz
+/usr/bin/patch
 /usr/lib/rpm/debugedit
 /usr/lib/rpm/sepdebugcrcfix
 ./tools/bpf/resolve_btfids/resolve_btfids

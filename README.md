@@ -7,6 +7,7 @@ Table of Contents
 * [Generating OmniBOR Docs with Bomtrace2](#Generating-OmniBOR-Docs-with-Bomtrace2)
 * [Generating OmniBOR ADGs for Debian or RPM Packages with Bomtrace2](#Generating-OmniBOR-ADGs-for-Debian-or-RPM-Packages-with-Bomtrace2)
 * [Reducing Storage of Generated OmniBOR Docs](#Reducing-Storage-of-Generated-OmniBOR-Docs)
+* [Creating Index Database for Debian Source Packages](#Creating-Index-Database-for-Debian-Source-Packages)
 * [Creating CVE Database for Software](#Creating-CVE-Database-for-Software)
 * [Software Vulnerability CVE Search](#Software-Vulnerability-CVE-Search)
 * [Software Vulnerability CVE Search for JAVA Packages](#Software-Vulnerability-CVE-Search-for-JAVA-Packages)
@@ -37,6 +38,7 @@ Multiple Python scripts are developed to work together with these tools.
 - bomsh_pstree.py script, which analyzes strace logfile and creates various pstree files and indented strace logfile.
 - debrebuild script, which is a slight modification of the Debian debrebuild.pl script, to fix a few issues and support a new --srctardir option.
 - bomsh_rebuild_deb.py script, which rebuilds a Debian package from its buildinfo, and generates its OmniBOR documents.
+- bomsh_index_debrepo.py script, which creates a blob index database for source packages of Debian/Ubuntu repositories.
 
 Compile Bombash and Bomtrace from Source
 ----------------------------------------
@@ -443,6 +445,26 @@ Here is an example for Ubuntu kernel build:
     $ ./bomsh_search_cve.py --bom_dir .omnibor -f linux-image-unsigned-5.11.0-1028-aws_5.11.0-1028.31~20.04.1_amd64.deb --subtree_collapsed_bomdir collapse-bomdir --remove_sepstrs_in_doc
     $ # the below command recovers the newly created subtree-collapsed OmniBOR docs in the new recover-bomdir:
     $ ./bomsh_search_cve.py --bom_dir collapse-bomdir --copyout_bomdir recover-bomdir --insert_sepstrs_in_doc
+
+Creating Index Database for Debian Source Packages
+--------------------------------------------------
+
+It is very useful to have a metadata database for all the source files.
+A new bomsh_index_debrepo.py script is created for this purpose, which can create a blob indexing database for Debian/Ubuntu source packages.
+
+Here is an example of creating the database for some Debian/Ubuntu official releases:
+
+    $ git clone URL-of-this-git-repo bomsh
+    $ bomsh/scripts/bomsh_index_debrepo.py -d mydir -r bullseye,bookworm,focal,jammy --skip_download_if_exist -vv --first_n_packages 3
+    $ cat /tmp/bomsh-index-pkg-db.json /tmp/bomsh-index-db.json /tmp/bomsh-index-summary.json
+    $ bomsh/scripts/bomsh_index_debrepo.py -d mydir -r focal-updates,jammy-security,focal,jammy --first_n_packages 0 -m http://archive.ubuntu.com/ubuntu
+    $ cat /tmp/bomsh-index-summary.json
+
+The bomsh-index-pkg-db.json contains the { "package_name package_version" => list of blobs } mappings.
+The bomsh-index-db.json contains the { blob => list of packages } mappings.
+The bomsh-index-summary.json contains some summary information, the { deb_release => summary stats of num_packages, total_size } mappings.
+The full index database will be huge, and in the above example, we only do it for the first 3 packages in each release.
+To get only the bomsh-index-summary.json result, you can specify "--first_n_packages 0" option, which will not download or process any source package.
 
 Creating CVE Database for Software
 ----------------------------------
