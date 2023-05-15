@@ -58,7 +58,7 @@ g_cc_compilers = ["/usr/bin/gcc", "/usr/bin/clang", "/usr/bin/g++", "/usr/bin/cc
 g_cc_linkers = ["/usr/bin/ld", "/usr/bin/ld.bfd", "/usr/bin/ld.gold", "/usr/bin/ld.lld", "/usr/bin/gold"]
 g_strip_progs = ["/usr/bin/strip", "/usr/bin/eu-strip"]
 # list of binary converting programs of the same file
-g_samefile_converters = ["/usr/bin/ranlib", "./tools/objtool/objtool", "/usr/lib/rpm/debugedit",
+g_samefile_converters = ["/usr/bin/ranlib", "./tools/objtool/objtool", "/usr/lib/rpm/debugedit", "/usr/bin/debugedit",
                          "./scripts/sortextable", "./scripts/sorttable", "./tools/bpf/resolve_btfids/resolve_btfids"]
 g_embed_bom_after_commands = g_cc_compilers + g_cc_linkers + ["/usr/bin/eu-strip",]
 #g_embed_bom_after_commands = g_cc_compilers + g_cc_linkers + ["/usr/bin/eu-strip", "/usr/bin/ar"]
@@ -2397,7 +2397,7 @@ def process_shell_command(prog, pwd_str, argv_str, pid_str):
         outfile = process_objcopy_command(prog, pwddir, argv_str, pid)
     elif prog == "arch/x86/boot/tools/build":
         outfile = process_bzImage_build_command(prog, pwddir, argv_str)
-    elif prog == "/usr/lib/rpm/sepdebugcrcfix":
+    elif prog == "/usr/bin/sepdebugcrcfix" or prog == "/usr/lib/rpm/sepdebugcrcfix":
         outfile = process_sepdebugcrcfix_command(prog, pwddir, argv_str, pid)
     elif prog in g_strip_progs or prog == "/usr/bin/dwz":
         outfile = process_generic_shell_command(prog, pwddir, argv_str, pid)
@@ -2734,12 +2734,12 @@ def main():
     if args.pre_exec:
         # Fewer number of programs to watch in pre_exec mode
         progs_to_watch = g_samefile_converters + g_strip_progs + ["/usr/bin/ar", "/usr/bin/objcopy", "/usr/bin/dwz", "/usr/bin/patch",
-                "/usr/lib/rpm/sepdebugcrcfix", "scripts/sign-file", "bomsh_openat_file"]
+                "/usr/bin/sepdebugcrcfix", "/usr/lib/rpm/sepdebugcrcfix", "scripts/sign-file", "bomsh_openat_file"]
         if args.watched_pre_exec_programs:
             progs_to_watch.extend(args.watched_pre_exec_programs.split(","))
     else:
         progs_to_watch = g_cc_compilers + g_cc_linkers + g_samefile_converters + g_strip_progs + ["/usr/bin/ar", "/usr/bin/objcopy", "arch/x86/boot/tools/build", "/usr/bin/patch",
-                     "/usr/bin/rustc", "/usr/bin/dwz", "/usr/lib/rpm/sepdebugcrcfix", "scripts/sign-file", "bomsh_openat_file", "/usr/bin/javac", "/usr/bin/jar"]
+                     "/usr/bin/rustc", "/usr/bin/dwz", "/usr/bin/sepdebugcrcfix", "/usr/lib/rpm/sepdebugcrcfix", "scripts/sign-file", "bomsh_openat_file", "/usr/bin/javac", "/usr/bin/jar"]
         if not args.create_no_adg_for_pkgs:
             progs_to_watch.extend( ("/usr/bin/dpkg-deb", "/usr/bin/rpmbuild") )
         if args.watched_programs:

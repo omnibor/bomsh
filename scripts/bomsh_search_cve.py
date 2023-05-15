@@ -28,8 +28,11 @@ import os
 import shutil
 import subprocess
 import json
-import yaml
 import re
+try:
+    import yaml
+except ImportError:
+    pass
 
 # for special filename handling with shell
 try:

@@ -16,6 +16,8 @@
 /usr/bin/rustc
 /usr/bin/dpkg-deb
 /usr/bin/rpmbuild
+/usr/bin/debugedit
+/usr/bin/sepdebugcrcfix
 /usr/lib/rpm/debugedit
 /usr/lib/rpm/sepdebugcrcfix
 arch/x86/boot/tools/build
@@ -34,6 +36,8 @@ scripts/sign-file
 /usr/bin/ranlib
 /usr/bin/dwz
 /usr/bin/patch
+/usr/bin/debugedit
+/usr/bin/sepdebugcrcfix
 /usr/lib/rpm/debugedit
 /usr/lib/rpm/sepdebugcrcfix
 ./tools/bpf/resolve_btfids/resolve_btfids
