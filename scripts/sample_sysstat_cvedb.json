@@ -1,0 +1,59 @@
+{
+    "ad739fd04cd1a8bcaf6564c109e2d6ec46d0a754": {
+        "FixedCVElist": [
+            "CVE-2019-16167"
+        ],
+        "file_path": "CVE-2019-16167_memory-corruption-due-to-an-integer-overflow.patch"
+    },
+    "8338a9bd02683ee25fabfecbbdc1b4e630d9fed4": {
+        "FixedCVElist": [
+            "CVE-2022-39377"
+        ],
+        "file_path": "CVE-2022-39377-arithmetic-overflow-in-allocate-structures-on-32-bit-systems.patch"
+    },
+    "ea659e471014095e4317cc658a73e40359d00562": {
+        "CVElist": [
+            "CVE-2019-16167"
+        ],
+        "file_path": "sa_common.c"
+    },
+    "f9c87607a0b4e0dcc7e3f61d6d7cb557cb56a74d": {
+        "CVElist": [
+            "CVE-2022-39377"
+        ],
+        "FixedCVElist": [
+            "CVE-2019-16167"
+        ],
+        "file_path": "sa_common.c"
+    },
+    "18deff932c8bdd4305b663da9ab94c378c1113d2": {
+        "FixedCVElist": [
+            "CVE-2022-39377"
+        ],
+        "file_path": "sa_common.c"
+    },
+    "0051c16f591cd81be4368d80a3f06575b0eb5dcd": {
+        "FixedCVElist": [
+            "CVE-2022-39377"
+        ],
+        "file_path": "common.h"
+    },
+    "e9136fa0ccf5ca4acde74b8151bcd5299e3b431f": {
+        "CVElist": [
+            "CVE-2022-39377"
+        ],
+        "file_path": "common.h"
+    },
+    "e1d42081438363515ce1263a5a44264385c17638": {
+        "FixedCVElist": [
+            "CVE-2022-39377"
+        ],
+        "file_path": "common.c"
+    },
+    "fb3d2e29b604fce51ff085ad762d4be0e584b0f3": {
+        "CVElist": [
+            "CVE-2022-39377"
+        ],
+        "file_path": "common.c"
+    }
+}
