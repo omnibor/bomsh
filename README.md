@@ -3,6 +3,7 @@
 Table of Contents
 -----------------
 * [Overview](#Overview)
+* [Quick Start](#Quick-Start)
 * [Compile Bombash and Bomtrace from Source](#Compile-Bombash-and-Bomtrace-from-Source)
 * [Generating OmniBOR Docs with Bomtrace2](#Generating-OmniBOR-Docs-with-Bomtrace2)
 * [Generating OmniBOR ADGs for Debian or RPM Packages with Bomtrace2](#Generating-OmniBOR-ADGs-for-Debian-or-RPM-Packages-with-Bomtrace2)
@@ -37,8 +38,22 @@ Multiple Python scripts are developed to work together with these tools.
 - bomsh_search_cve.py script, which creates OmniBOR artifact tree for a binary file, and searches the CVE database and attaches the CVE search result to the OmniBOR artifact tree.
 - bomsh_pstree.py script, which analyzes strace logfile and creates various pstree files and indented strace logfile.
 - debrebuild script, which is a slight modification of the Debian debrebuild.pl script, to fix a few issues and support a new --srctardir option.
-- bomsh_rebuild_deb.py script, which rebuilds a Debian package from its buildinfo, and generates its OmniBOR documents.
+- bomsh_rebuild_deb.py script, which reproducibly rebuilds Debian packages from its buildinfo, and generates its OmniBOR documents.
+- bomsh_rebuild_rpm.py script, which rebuilds RPM packages from its source RPM, and generates its OmniBOR documents.
 - bomsh_index_debrepo.py script, which creates a blob index database for source packages of Debian/Ubuntu repositories.
+
+Quick Start
+-----------
+
+For a quick start of using the Bomsh tool, run the below command:
+
+    $ git clone URL-of-this-git-repo bomsh
+    $ wget http://vault.centos.org/8-stream/AppStream/Source/SPackages/sysstat-11.7.3-9.el8.src.rpm
+    $ bomsh/scripts/bomsh_rebuild_rpm.py -c alma+epel-8-x86_64 --docker_image_base almalinux:8 -s sysstat-11.7.3-9.el8.src.rpm -d bomsh/scripts/sample_sysstat_cvedb.json -o outdir
+    $ grep -B1 -A3 CVElist outdir/bomsher_out/bomsh_logfiles/bomsh_search_jsonfile-details.json
+
+Then explore and inspect all the output files in the outdir/bomsher_out directory, especially the outdir/bomsher_out/bomsh_logfiles/bomsh_hook_raw_logfile.sha1 file, which
+contains the list of build commands with details of output/input files that are recorded by the Bomsh tool.
 
 Compile Bombash and Bomtrace from Source
 ----------------------------------------

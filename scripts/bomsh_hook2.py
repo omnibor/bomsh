@@ -54,7 +54,7 @@ g_bomdir = os.path.join(os.getcwd(), ".omnibor")
 g_raw_logfile = "/tmp/bomsh_hook_raw_logfile"
 g_trace_logfile = "/tmp/bomsh_hook_trace_logfile"
 g_logfile = "/tmp/bomsh_hook_logfile"
-g_cc_compilers = ["/usr/bin/gcc", "/usr/bin/clang", "/usr/bin/g++", "/usr/bin/cc"]
+g_cc_compilers = ["/usr/bin/gcc", "/usr/bin/clang", "/usr/bin/g++", "/usr/bin/cc", "/usr/bin/x86_64-mageia-linux-gnu-gcc"]
 g_cc_linkers = ["/usr/bin/ld", "/usr/bin/ld.bfd", "/usr/bin/ld.gold", "/usr/bin/ld.lld", "/usr/bin/gold"]
 g_strip_progs = ["/usr/bin/strip", "/usr/bin/eu-strip"]
 # list of binary converting programs of the same file
@@ -170,6 +170,7 @@ def find_specific_file(builddir, filename, maxdepth=0):
         findcmd = "find " + cmd_quote(builddir) + " -maxdepth " + str(maxdepth) + " -type f -name '" + filename + "' -print 2>/dev/null || true "
     else:
         findcmd = "find " + cmd_quote(builddir) + " -type f -name '" + filename + "' -print 2>/dev/null || true "
+    verbose(findcmd)
     output = subprocess.check_output(findcmd, shell=True, universal_newlines=True)
     files = output.splitlines()
     return files
@@ -836,6 +837,10 @@ def read_rpm_info_from_spec_file(afile):
             version = tokens[1].strip()
         elif line[:7] == "Release":
             release = tokens[1].strip()
+            # This line can be "Release:        %mkrel 1"
+            # This line can be "Release:        %mkrel -c rc1 1"
+            release = release.split()[-1]  # pick the last field only
+    verbose("Get (name, version, release) = " + str((name, version, release)) + " from file " + afile)
     return name, version, release
 
 
@@ -866,10 +871,12 @@ def get_rpmbuild_topdir():
     """
     if g_shell_cmd_rootdir != "/":
         cmd = 'chroot ' + g_shell_cmd_rootdir + ' sh -c "find / -maxdepth 2 -type f -name \.rpmmacros | xargs grep \'%_topdir \' 2>/dev/null | head -1"'
+        verbose(cmd)
         output = get_shell_cmd_output(cmd)
         tokens = output.split()
         if len(tokens) > 1:
             return tokens[1]
+        return '/builddir/build'
     else:
         cmd = "rpmbuild --eval %{_topdir}"
         output = get_shell_cmd_output(cmd)
@@ -921,9 +928,9 @@ def get_all_subfiles_in_rpmbuild_cmdline(rpmline, pwd):
         rpmbuild_topdir = get_rpmbuild_topdir()
     rpmbuild_topdir = get_real_path(rpmbuild_topdir, pwd)
     if " -bs " in rpmline:
-        name_pattern = name + "-*" + version + "-" + release + "*.src.rpm"
+        name_pattern = name + "-*" + version + "-*" + release + "*.src.rpm"
     else:
-        name_pattern = name + "-*" + version + "-" + release + "*.rpm"
+        name_pattern = name + "-*" + version + "-*" + release + "*.rpm"
     rpmfiles = find_specific_file(rpmbuild_topdir, name_pattern)
     if " -ba " not in rpmline and " -bs " not in rpmline:  # filter out src rpm files
         rpmfiles = [rpmfile for rpmfile in rpmfiles if rpmfile[-8:] != ".src.rpm"]
