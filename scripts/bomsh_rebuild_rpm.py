@@ -15,14 +15,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Bomsh script to reproducibly rebuild a Debian package from its buildinfo.
-It also generates OmniBOR documents for the rebuilt Debian packages.
+Bomsh script to rebuild RPM packages from its src RPM.
+It also generates OmniBOR documents for the rebuilt RPM packages.
 It utilizes Docker container, so make sure Docker or podman is installed.
 
-Even if the Debian src is not in official Debian repo, user can provide
-a local src directory, which contains the src tarball and .dsc file.
-
-April 2023, Yongkui Han
+May 2023, Yongkui Han
 """
 
 import argparse
@@ -119,7 +116,7 @@ def fix_broken_symlinks(bomsher_outdir):
     find and fix all broken symlinks for the rebuild .deb files.
     :param bomsher_outdir: the bomsher container output directory for rebuilt Debian packages
     """
-    all_symlinks = find_all_symlink_files(os.path.join(bomsher_outdir, "debs"), ".deb.omnibor_adg.")
+    all_symlinks = find_all_symlink_files(os.path.join(bomsher_outdir, "rpms"), ".rpm.omnibor_adg.")
     verbose("All broken symlinks: " + str(all_symlinks), LEVEL_2)
     for symlink in all_symlinks:
         fix_broken_symlink(symlink, os.path.join(bomsher_outdir, "omnibor"))
@@ -127,34 +124,36 @@ def fix_broken_symlinks(bomsher_outdir):
 
 g_bomsh_dockerfile_str = '''
 
-# Set up debrebuild/mmdebstrap environment
-RUN apt-get update ; apt-get install -y git wget mmdebstrap devscripts python3-pycurl python3-yaml apt-utils ; \\
-    rm -rf /var/lib/apt/lists/* ;
+# Set up mock build environment
+RUN dnf install -y epel-release ; dnf install -y git wget mock rpm-build python3-pyyaml ; \\
+    dnf group install -y "Development Tools" ; \\
+    dnf clean all ;
 
 # Set up bomtrace2/bomsh environment
 RUN cd /root ; git clone https://github.com/omnibor/bomsh.git ; \\
-    mv /usr/bin/debrebuild /usr/bin/debrebuild.bak ; cp bomsh/scripts/debrebuild /usr/bin/debrebuild ; \\
     cp bomsh/scripts/*.py bomsh/bin/bomtrace* /tmp ; \\
-    perl -i -p0e 's|dpkg-buildpackage\\n/usr/bin/rpmbuild|dpkg-buildpackage|' /tmp/bomtrace_watched_programs ; \\
+    sed -i -e '/\/usr\/bin\/dpkg-buildpackage/d' /tmp/bomtrace_watched_programs ; \\
+    sed -i -e '/\/usr\/bin\/dh_auto_test/d' /tmp/bomtrace_watched_programs ; \\
     git clone https://github.com/strace/strace.git ; \\
     cd strace ; patch -p1 < /root/bomsh/.devcontainer/patches/bomtrace2.patch ; \\
     ./bootstrap && ./configure --enable-mpers=check && make ; \\
     cp src/strace /tmp/bomtrace2 ;
 
-# Bomtrace/Bomsh debrebuild run to generate OmniBOR documents
-# if BASELINE_REBUILD is not empty, then it will not use bomtrace2 to run debrebuild, that is, the baseline run.
-# if SRC_TAR_DIR is not empty, then the python script must have copied tarball and .dsc file into the bomsher_in directory.
-CMD if [ "${SRC_TAR_DIR}" ]; then srctardir_param="--srctardir=/out/bomsher_in" ; fi ; \\
-    if [ -z "${BASELINE_REBUILD}" ]; then bomtrace_cmd="/tmp/bomtrace2 -w /tmp/bomtrace_watched_programs -c /tmp/bomtrace.conf " ; fi ; \\
+# Bomtrace/Bomsh mock build run to generate OmniBOR documents
+# if BASELINE_REBUILD is not empty, then it will not use bomtrace2 to run mock, that is, the baseline run.
+# if CHROOT_CFG is not empty, then the provided mock chroot_cfg will be used, otherwise, default.cfg is used.
+CMD if [ -z "${BASELINE_REBUILD}" ]; then bomtrace_cmd="/tmp/bomtrace2 -w /tmp/bomtrace_watched_programs -c /tmp/bomtrace.conf " ; fi ; \\
+    if [ -z "${CHROOT_CFG}" ]; then CHROOT_CFG=default ; fi ; \\
     mkdir -p /out/bomsher_out ; cd /out/bomsher_out ; \\
-    $bomtrace_cmd debrebuild $srctardir_param --buildresult=./debs --builder=mmdebstrap /out/bomsher_in/$BUILDINFO_FILE ; \\
+    $bomtrace_cmd mock -r /etc/mock/${CHROOT_CFG}.cfg --rebuild /out/bomsher_in/$SRC_RPM_FILE --resultdir=./tmprpms ; \\
+    mkdir rpms ; cp tmprpms/*.rpm rpms ; rm -rf tmprpms ; \\
     if [ "${BASELINE_REBUILD}" ]; then exit 0 ; fi ; \\
     rm -rf omnibor omnibor_dir ; mv .omnibor omnibor ; mkdir -p bomsh_logfiles ; cp -f /tmp/bomsh_hook_*logfile* bomsh_logfiles/ ; \\
     /tmp/bomsh_create_bom.py -b omnibor_dir -r /tmp/bomsh_hook_raw_logfile.sha1 ; cp /tmp/bomsh_createbom_* bomsh_logfiles ; \\
-    debfiles=`for i in debs/*.deb ; do  echo -n $i, ; done | sed 's/.$//'` ; \\
+    rpmfiles=`for i in rpms/*.rpm ; do  echo -n $i, ; done | sed 's/.$//'` ; \\
     cp /tmp/bomsh*.py bomsh_logfiles ; cp /tmp/bomtrace* bomsh_logfiles ; \\
     if [ "${CVEDB_FILE}" ]; then cvedb_file_param="-d /out/bomsher_in/${CVEDB_FILE}" ; fi ; \\
-    /tmp/bomsh_search_cve.py -b omnibor_dir $cvedb_file_param -f $debfiles -vvv ; cp /tmp/bomsh_search_jsonfile* bomsh_logfiles/ ;
+    /tmp/bomsh_search_cve.py -b omnibor_dir $cvedb_file_param -f $rpmfiles -vvv ; cp /tmp/bomsh_search_jsonfile* bomsh_logfiles/ ;
 '''
 
 def create_dockerfile(work_dir):
@@ -165,17 +164,17 @@ def create_dockerfile(work_dir):
     if args.docker_image_base:
         from_str = 'FROM ' + args.docker_image_base
     else:
-        from_str = 'FROM debian:bookworm'
+        from_str = 'FROM almalinux:9'
     dockerfile_str = from_str + g_bomsh_dockerfile_str
     dockerfile = os.path.join(work_dir, "Dockerfile")
     write_text_file(dockerfile, dockerfile_str)
 
 
-def run_docker(buildinfo_file, output_dir):
+def run_docker(src_rpm_file, output_dir):
     """
     Run docker to rebuild .deb packages from its .buildinfo file.
-    :param buildinfo_file: the .buildinfo file for Debian packages
-    :param output_dir: the output directory to store rebuilt Debian packages and OmniBOR documents.
+    :param src_rpm_file: the SRC RPM file for RPM packages
+    :param output_dir: the output directory to store rebuilt RPM packages and OmniBOR documents.
     """
     # Create bomsher_in dir to pass input files to the container
     # Create bomsher_out dir to save output files generated by the container
@@ -183,21 +182,18 @@ def run_docker(buildinfo_file, output_dir):
     bomsher_outdir = get_or_create_dir(os.path.join(output_dir, "bomsher_out"))
     # The bomsher_in dir is also the docker build work directory
     create_dockerfile(bomsher_indir)
-    os.system("cp -f " + buildinfo_file + " " + bomsher_indir)
+    os.system("cp -f " + src_rpm_file + " " + bomsher_indir)
     docker_cmd = 'docker run --cap-add MKNOD --cap-add SYS_ADMIN --cap-add=SYS_PTRACE -it --rm'
-    docker_cmd += ' -e BUILDINFO_FILE=' + os.path.basename(buildinfo_file)
+    docker_cmd += ' -e SRC_RPM_FILE=' + os.path.basename(src_rpm_file)
     # Set appropriate parameters to run docker
-    if args.src_tar_dir:
-        tardir_base = os.path.basename(args.src_tar_dir)
-        new_tar_dir = os.path.join(output_dir, tardir_base)
-        os.system("cp -f " + args.src_tar_dir + "/*.tar.* " + args.src_tar_dir + "/*.dsc " + bomsher_indir)
-        docker_cmd += ' -e SRC_TAR_DIR=/out/bomsher_in'
-    if args.baseline_rebuild:
-        docker_cmd += ' -e BASELINE_REBUILD=baseline_only'
+    if args.chroot_cfg:
+        docker_cmd += ' -e CHROOT_CFG=' + args.chroot_cfg
     if args.cve_db_file:
         os.system("cp -f " + args.cve_db_file + " " + bomsher_indir)
         docker_cmd += ' -e CVEDB_FILE=' + os.path.basename(args.cve_db_file)
-    docker_cmd += ' -v ' + output_dir + ':/out $(docker build -t bomsher-deb -q ' + bomsher_indir + ')'
+    if args.baseline_rebuild:
+        docker_cmd += ' -e BASELINE_REBUILD=baseline_only'
+    docker_cmd += ' -v ' + output_dir + ':/out $(docker build -t bomsher-rpm -q ' + bomsher_indir + ')'
     verbose("==== Here is the docker run command: " + docker_cmd, LEVEL_1)
     os.system(docker_cmd)
     fix_broken_symlinks(bomsher_outdir)
@@ -219,19 +215,20 @@ def rtd_parse_options():
     parser.add_argument("--version",
                     action = "version",
                     version=VERSION)
-    parser.add_argument('-s', '--src_tar_dir',
-                    help = "the Debian src directory which contains tarball and .dsc file")
-    parser.add_argument('-f', '--buildinfo_file',
-                    help = "Debian package's .buildinfo file generated from a previous reproducible build")
-    parser.add_argument('--docker_image_base',
-                    help = "the base docker image to start with")
+    parser.add_argument('-s', '--src_rpm_file',
+                    help = "the src RPM file to rebuild")
     parser.add_argument('-o', '--output_dir',
                     help = "the output directory to store rebuilt .deb files and Bomsh/OmniBOR documents, the default is current dir")
+    parser.add_argument('--docker_image_base',
+                    help = "the base docker image to start with")
+    parser.add_argument('-c', '--chroot_cfg',
+                    help = "the mock chroot_cfg to use, like alma+epel-9-x86_64 or rhel-9-x86_64, or eol/fedora-31-x86_64, "
+                           "the available cfgs can be found at https://github.com/rpm-software-management/mock/tree/main/mock-core-configs/etc/mock")
     parser.add_argument('-d', '--cve_db_file',
                     help = "the CVE database file, with git blob ID to CVE mappings")
     parser.add_argument("-b", "--baseline_rebuild",
                     action = "store_true",
-                    help = "baseline debrebuild only, do not run bomtrace2 to generate OmniBOR documents")
+                    help = "baseline rebuild only, do not run bomtrace2 to generate OmniBOR documents")
     parser.add_argument("-r", "--remove_intermediate_files",
                     action = "store_true",
                     help = "after run completes, delete all intermediate files like Dockerfile, etc.")
@@ -244,8 +241,8 @@ def rtd_parse_options():
     # Parse the command line arguments
     args = parser.parse_args()
 
-    if not (args.buildinfo_file):
-        print ("Please specify the buildinfo file with -f option!")
+    if not (args.src_rpm_file):
+        print ("Please specify the SRC RPM file with -s option!")
         print ("")
         parser.print_help()
         sys.exit()
@@ -266,7 +263,7 @@ def main():
         output_dir = get_or_create_dir(os.path.abspath(args.output_dir))
     else:
         output_dir = os.getcwd()
-    run_docker(args.buildinfo_file, output_dir)
+    run_docker(args.src_rpm_file, output_dir)
 
 
 if __name__ == '__main__':
