@@ -51,6 +51,10 @@ For a quick start of using the Bomsh tool, run the below command:
     $ wget http://vault.centos.org/8-stream/AppStream/Source/SPackages/sysstat-11.7.3-9.el8.src.rpm
     $ bomsh/scripts/bomsh_rebuild_rpm.py -c alma+epel-8-x86_64 --docker_image_base almalinux:8 -s sysstat-11.7.3-9.el8.src.rpm -d bomsh/scripts/sample_sysstat_cvedb.json -o outdir
     $ grep -B1 -A3 CVElist outdir/bomsher_out/bomsh_logfiles/bomsh_search_jsonfile-details.json
+    $ # the above should take only a few minutes, and the below may take tens of minutes
+    $ wget https://buildinfos.debian.net/buildinfo-pool/s/sysstat/sysstat_11.7.3-1_all-amd64-source.buildinfo
+    $ bomsh/scripts/bomsh_rebuild_deb.py -f sysstat_11.7.3-1_all-amd64-source.buildinfo -d bomsh/scripts/sample_sysstat_cvedb.json -o outdir2
+    $ grep -B1 -A3 CVElist outdir2/bomsher_out/bomsh_logfiles/bomsh_search_jsonfile-details.json
 
 Then explore and inspect all the output files in the outdir/bomsher_out directory, especially the outdir/bomsher_out/bomsh_logfiles/bomsh_hook_raw_logfile.sha1 file, which
 contains the list of build commands with details of output/input files that are recorded by the Bomsh tool.
@@ -817,7 +821,7 @@ To rebuild an officially released Debian package like hostname 3.23 version, fin
     $ wget https://buildinfos.debian.net/buildinfo-pool/h/hostname/hostname_3.23_amd64.buildinfo
     $ scripts/bomsh_rebuild_deb.py -f hostname_3.23_amd64.buildinfo
     $ ls -tl bomsher_out/*
-    $ wget wget https://buildinfos.debian.net/buildinfo-pool/s/sysstat/sysstat_12.2.0-2_amd64.buildinfo
+    $ wget https://buildinfos.debian.net/buildinfo-pool/s/sysstat/sysstat_12.2.0-2_amd64.buildinfo
     $ scripts/bomsh_rebuild_deb.py -f sysstat_12.2.0-2_amd64.buildinfo
     $ ls -tl bomsher_out/*
     $ wget https://buildinfos.debian.net/buildinfo-pool/l/linux/linux_5.10.84-1_amd64.buildinfo

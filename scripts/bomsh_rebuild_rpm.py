@@ -132,6 +132,7 @@ RUN dnf install -y epel-release ; dnf install -y git wget mock rpm-build python3
 # Set up bomtrace2/bomsh environment
 RUN cd /root ; git clone https://github.com/omnibor/bomsh.git ; \\
     cp bomsh/scripts/*.py bomsh/bin/bomtrace* /tmp ; \\
+    sed -i -e '/\/usr\/bin\/dpkg-source/d' /tmp/bomtrace_watched_programs ; \\
     sed -i -e '/\/usr\/bin\/dpkg-buildpackage/d' /tmp/bomtrace_watched_programs ; \\
     sed -i -e '/\/usr\/bin\/dh_auto_test/d' /tmp/bomtrace_watched_programs ; \\
     git clone https://github.com/strace/strace.git ; \\
