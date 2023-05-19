@@ -6,9 +6,11 @@
 /usr/bin/objcopy
 /usr/bin/strip
 /usr/bin/eu-strip
+/usr/bin/cat
 /usr/bin/clang
 /usr/bin/cc
 /usr/bin/g++
+/usr/bin/x86_64-mageia-linux-gnu-gcc
 /usr/bin/gold
 /usr/bin/ranlib
 /usr/bin/dwz
@@ -48,5 +50,6 @@ scripts/sign-file
 ./configure
 /usr/bin/dh_auto_test
 +++
+/usr/bin/dpkg-source
 /usr/bin/dpkg-buildpackage
 /usr/bin/rpmbuild

@@ -1,8 +1,8 @@
 diff --git a/src/execve.c b/src/execve.c
-index a9224543b..49ec5d841 100644
+index a9224543b..dae7ef351 100644
 --- a/src/execve.c
 +++ b/src/execve.c
-@@ -14,6 +14,484 @@
+@@ -14,6 +14,719 @@
  
  #include "defs.h"
  
@@ -15,6 +15,7 @@ index a9224543b..49ec5d841 100644
 +        int skip_checking_prog_access;
 +} g_bomsh_config;
 +
++extern int bomsh_verbose;
 +extern int bomsh_detach_on_pid;
 +extern int bomsh_is_pre_exec_program(char *prog);
 +extern int bomsh_is_watched_program(char *prog);
@@ -23,6 +24,15 @@ index a9224543b..49ec5d841 100644
 +extern int bomsh_umbrella_pid_top;
 +extern int bomsh_is_umbrella_program(char *prog);
 +extern void bomsh_hook_program(int pid, int pre_exec_mode, const char *suffix);
++
++// we only support the basic form of "cat a.patch | patch -p1" command with pipes.
++// only one single cat-file without any option is supported for the cat command.
++static char *bomsh_cat_argv = NULL;  // the argv_str of the cat command with output pipe
++static char *bomsh_cat_pipe = NULL;  // the output pipe file of the cat command
++static pid_t bomsh_patch_pid = 0;    // the pid of the patch process with input pipe
++static char *bomsh_patch_pipe = NULL;  // the input pipe file of the patch command
++static char *bomsh_save_patch_cmd = NULL;  // the cmd_data of the patch process with input pipe
++static int bomsh_pipe_disabled = 0;  // flag to disable the bomsh pipe support
 +
 +// calculate the string length of the space-character separated argv array.
 +// the calculated length includes the ending NULL character.
@@ -229,14 +239,14 @@ index a9224543b..49ec5d841 100644
 +char * bomsh_get_rootdir(struct tcb *tcp)
 +{
 +	char cwd_file[32] = "";
-+	static char rootdir[PATH_MAX] = "";
++	static char bomsh_rootdir[PATH_MAX] = "";
 +	sprintf(cwd_file, "/proc/%d/root", tcp->pid);
-+	int bytes = readlink(cwd_file, rootdir, PATH_MAX);
++	int bytes = readlink(cwd_file, bomsh_rootdir, PATH_MAX);
 +	if (bytes == -1) {
 +		return NULL;
 +	}
-+	rootdir[bytes] = 0;
-+	return strdup(rootdir);
++	bomsh_rootdir[bytes] = 0;
++	return strdup(bomsh_rootdir);
 +}
 +
 +char * bomsh_get_pwd(struct tcb *tcp);
@@ -245,37 +255,81 @@ index a9224543b..49ec5d841 100644
 +char * bomsh_get_pwd(struct tcb *tcp)
 +{
 +	char cwd_file[32] = "";
-+	static char pwddir[PATH_MAX] = "";
++	static char bomsh_pwddir[PATH_MAX] = "";
 +	sprintf(cwd_file, "/proc/%d/cwd", tcp->pid);
-+	int bytes = readlink(cwd_file, pwddir, PATH_MAX);
++	int bytes = readlink(cwd_file, bomsh_pwddir, PATH_MAX);
 +	if (bytes == -1) {
 +		return NULL;
 +	}
-+	pwddir[bytes] = 0;
-+	return strdup(pwddir);
++	bomsh_pwddir[bytes] = 0;
++	return strdup(bomsh_pwddir);
 +}
 +
-+char * bomsh_get_stdin_file(struct tcb *tcp);
-+
-+// get fd0/stdin file for a traced process.
-+char * bomsh_get_stdin_file(struct tcb *tcp)
++// get fd0/stdin file for a traced process (usually patch).
++static char * bomsh_get_stdin_file(struct tcb *tcp)
 +{
 +	char cwd_file[32] = "";
-+	static char stdin_file[PATH_MAX] = "";
++	static char bomsh_stdin_file[PATH_MAX] = "";
 +	sprintf(cwd_file, "/proc/%d/fd/0", tcp->pid);
-+	int bytes = readlink(cwd_file, stdin_file, PATH_MAX);
++	int bytes = readlink(cwd_file, bomsh_stdin_file, PATH_MAX);
 +	if (bytes == -1) {
 +	       return NULL;
 +	}
-+	stdin_file[bytes] = 0;
-+	if (strncmp(stdin_file, "/dev/", 5) == 0 || strncmp(stdin_file, "pipe:[", 6) == 0) {
-+		if (g_bomsh_config.logfile) {
-+			bomsh_write_file(g_bomsh_config.logfile, "\n\nNot-regular stdin_file: ", "a");
-+			bomsh_write_file(g_bomsh_config.logfile, stdin_file, "a");
-+		}
++	bomsh_stdin_file[bytes] = 0;
++	if (strncmp(bomsh_stdin_file, "/dev/", 5) == 0 ||
++		(bomsh_pipe_disabled && strncmp(bomsh_stdin_file, "pipe:[", 6) == 0)) {
 +		return NULL;
 +	}
-+	return strdup(stdin_file);
++	return strdup(bomsh_stdin_file);
++}
++
++// get fd1/stdout file for a traced process (usually cat).
++static char * bomsh_get_stdout_file(struct tcb *tcp)
++{
++	char cwd_file[32] = "";
++	static char bomsh_stdout_file[PATH_MAX] = "";
++	sprintf(cwd_file, "/proc/%d/fd/1", tcp->pid);
++	int bytes = readlink(cwd_file, bomsh_stdout_file, PATH_MAX);
++	if (bytes == -1) {
++	       return NULL;
++	}
++	bomsh_stdout_file[bytes] = 0;
++	if (strncmp(bomsh_stdout_file, "/dev/", 5) == 0) {
++		return NULL;
++	}
++	return strdup(bomsh_stdout_file);
++}
++
++// Get the cat-file from "cat abc.patch" command
++static char * bomsh_get_cat_file(char *cat_argv, char *pwd_line)
++{
++	char *p = strchr(cat_argv, ' ');
++	if (!p) {
++		return NULL;
++	}
++	if (strchr(p+1, ' ')) {
++		// there should be only one file and no space character in the file path.
++		// also there should be no any command line option.
++		return NULL;
++	}
++	if (*(p+1) == '/') {
++		// absolute path, return directly
++		return strdup(p+1);
++	}
++	// Do we really need to concatenat with pwd_line? With pipes, the patch cmd should always have the same pwd as the cat cmd, right?
++	// If so, then we can always return strdup(p+1) no matter it is absolute path or relative path.
++	// relative path, need to concatenate with pwd_line
++	int pwd_len = strlen(pwd_line);
++	int file_len = pwd_len + 2 + strlen(p);
++	char *cat_file = malloc(file_len);
++	if (!cat_file) {
++		return NULL;
++	}
++	strcpy(cat_file, pwd_line);
++	cat_file[pwd_len] = '/';
++	strcpy(cat_file + pwd_len + 1, p+1);
++	cat_file[file_len - 1] = 0;
++	return cat_file;
 +}
 +
 +int bomsh_check_file_permission(char *path, char *pwd, char *root, int amode);
@@ -326,11 +380,207 @@ index a9224543b..49ec5d841 100644
 +	return 1;
 +}
 +
++// Write bomsh_cmd.pidXXXX file with the PID and the command string
++// return 1 if successful, otherwise, return 0
++static int bomsh_write_cmd_file(int pid, char *cmd_data)
++{
++        char pid_str[32];
++        sprintf(pid_str, "pid: %d\n", pid);
++        //sprintf(pid_str, "pid: %d tracer-pid: %d\n", tcp->pid, getpid());
++        char cmd_file[100];
++	const char *shell_cmd_file = "/tmp/bomsh_cmd";
++	if (g_bomsh_config.shell_cmd_file) {
++		shell_cmd_file = g_bomsh_config.shell_cmd_file;
++	}
++	unsigned long n = snprintf(cmd_file, sizeof(cmd_file), "%s.pid%d", shell_cmd_file, pid);
++	if (n >= sizeof(cmd_file)) {
++		if (g_bomsh_config.logfile) {
++			bomsh_write_file(g_bomsh_config.logfile, "\nError: bomsh cmd file name too long\n", "a");
++		}
++		return 0;
++	}
++	cmd_file[sizeof(cmd_file)-1] = 0;
++        bomsh_write_file(cmd_file, pid_str, "w");
++        bomsh_write_file(cmd_file, cmd_data, "a");
++        if (g_bomsh_config.logfile) {
++		bomsh_write_file(g_bomsh_config.logfile, "\n\nInvoking bomsh_record_cmd\n", "a");
++	        bomsh_write_file(g_bomsh_config.logfile, pid_str, "a");
++		bomsh_write_file(g_bomsh_config.logfile, cmd_data, "a");
++	}
++        //tprintf("bomsh_record_command, cmd: %s pid: %d write cmd_data: %s\n", path, tcp->pid, cmd_data);
++	return 1;
++}
++
++// log some info for a command, this is for cat/patch command with pipes
++static void bomsh_log_cmd(int pid, char *pwd_line, char *argv_str, char *pipe_file, const char *cmd_summary)
++{
++        if (g_bomsh_config.logfile) {
++		char pid_str[128];  // 30 cmd_summary + 28 pipe + 25 pid = 83, so 128 should be good
++		sprintf(pid_str, "\n\n%s %s\npid: %d\n", cmd_summary, pipe_file, pid);
++	        bomsh_write_file(g_bomsh_config.logfile, pid_str, "a");
++	        bomsh_write_file(g_bomsh_config.logfile, pwd_line, "a");
++	        bomsh_write_file(g_bomsh_config.logfile, "\n", "a");
++		bomsh_write_file(g_bomsh_config.logfile, argv_str, "a");
++	}
++}
++
++// allocate memory for cmd_data, which contains pwd_line, prog_path, and argv_str
++static char *
++bomsh_allocate_cmd_data(char *pwd_line, char *path, char *argv_str, char *stdin_file)
++{
++        int len1 = strlen(pwd_line);
++        int len2 = strlen(path);
++        int len3 = strlen(argv_str);
++        int len = len1 + len2 + len3 + 3;
++	if (stdin_file) {
++		len += strlen(stdin_file) + 3;  // " < stdin_file"
++	}
++        char * cmd_data = malloc(len + 1);  // allocate the memory
++        if (!cmd_data) {
++                return 0;
++        }
++        // now concatenate the 3 strings: pwd_line (pwd + rootdir), prog_path, argv_str
++        strcpy(cmd_data, pwd_line);
++        cmd_data[len1] = '\n';  // use newline character as separator
++        strcpy(cmd_data + len1 + 1, path);
++        cmd_data[len1 + 1 + len2] = '\n';  // use newline character as separator
++        strcpy(cmd_data + len1 + len2 + 2, argv_str);
++	// if stdin_file, then append " < stdin_file" to argv_str
++	if (stdin_file) {
++		cmd_data[len1 + len2 + len3 + 2] = ' ';
++		cmd_data[len1 + len2 + len3 + 3] = '<';
++		cmd_data[len1 + len2 + len3 + 4] = ' ';
++		strcpy(cmd_data + len1 + len2 + len3 + 5, stdin_file);
++	}
++        cmd_data[len - 1] = 0;  // must be null-terminated
++	return cmd_data;
++}
++
++// replace the pipe input file of cmd_data with new real stdin_file.
++// the cmd_data is usually the patch command, and stdin_file is from the cat command.
++static char *
++bomsh_replace_stdin_file(char *cmd_data, char *stdin_file)
++{
++	char *p = strrchr(cmd_data, '<');
++	if (!p) return 0;
++	int len1 = p - cmd_data + 2;
++	int len = len1 + strlen(stdin_file) + 1;
++	char *new_patch_cmd = malloc(len);
++	if (!new_patch_cmd) return 0;
++	strncpy(new_patch_cmd, cmd_data, len1);
++	strcpy(new_patch_cmd + len1, stdin_file);
++	return new_patch_cmd;
++}
++
++// process the cat command
++// if return code is 0, then free all variables and no need to record command
++// if return code is 1, then free all variables and need to record command for both pre-exec and exec mode
++// if return code is 2, then free all variables except argv_str, and no need to record command
++static int
++bomsh_process_cat_command(struct tcb *tcp, char *pwd_line, char *argv_str, int *hook_pid)
++{
++	char *stdout_file = bomsh_get_stdout_file(tcp);
++	if (!stdout_file || strncmp(stdout_file, "pipe:[", 6) != 0) {
++		return 0;
++	}
++	if (bomsh_verbose > 3) {
++		fprintf(stderr, "\n===/usr/bin/cat stdout: %s patch-pipe: %s argv: %s\n",
++				stdout_file ? stdout_file : "(null)", bomsh_patch_pipe ? bomsh_patch_pipe : "(null)", argv_str);
++	}
++	bomsh_log_cmd(tcp->pid, pwd_line, argv_str, stdout_file, "Record cat cmd to");
++	if (bomsh_patch_pipe && strcmp(stdout_file, bomsh_patch_pipe) == 0) {  // find a matching pipe of the patch command
++		free(stdout_file);
++		// Get the cat-file from the cat command
++		char *stdin_file = bomsh_get_cat_file(argv_str, pwd_line);
++		if (bomsh_verbose > 3) {
++			fprintf(stderr, "cat-cmd found a matching pipe: %s patch-pid: %d cat-pid: %d cat-file: %s\n",
++					bomsh_patch_pipe, bomsh_patch_pid, tcp->pid, stdin_file);
++		}
++		if (!stdin_file) {  // must be unsupported cat command
++			return 0;
++		}
++		char *new_patch_cmd = bomsh_replace_stdin_file(bomsh_save_patch_cmd, stdin_file);
++		free(stdin_file);
++		if (new_patch_cmd) {
++			// write the cmd file for patch, with patch process pid too.
++			if (!bomsh_write_cmd_file(bomsh_patch_pid, new_patch_cmd)) {
++				free(new_patch_cmd);
++				return 0;
++			}
++			free(new_patch_cmd);
++			*hook_pid = bomsh_patch_pid;  // tell hook_program to use bomsh_patch_pid instead
++			return 1;  // will run hook program in the pre-exec mode
++		}
++	} else {
++		// update to argv/pipe of the new cat command, for later use by patch
++		if (bomsh_cat_argv) free(bomsh_cat_argv);
++		if (bomsh_cat_pipe) free(bomsh_cat_pipe);
++		bomsh_cat_argv = argv_str;
++		bomsh_cat_pipe = stdout_file;
++		if (bomsh_verbose > 3) {
++			fprintf(stderr, "cat-cmd not found a matching pipe: %s cat-pid: %d argv: %s Saving pipe/argv for later use\n", bomsh_cat_pipe, tcp->pid, bomsh_cat_argv);
++		}
++		// argv_str is saved as bomsh_cat_argv, so should not be freed
++		return 2;
++	}
++	return 0;
++}
++
++// process the patch command with pipe as input
++// if return code is 0, then free all variables and no need to record command
++// if return code is 1, then free all variables and need to record command for both pre-exec and exec mode
++// if return code is 2, then free all variables except cmd_data, and no need to record command
++static int
++bomsh_process_piped_patch_command(struct tcb *tcp, char *pwd_line, char *argv_str, char *stdin_file, char *cmd_data)
++{
++	bomsh_log_cmd(tcp->pid, pwd_line, argv_str, stdin_file, "Record patch cmd from");
++	if (bomsh_cat_pipe && strcmp(stdin_file, bomsh_cat_pipe) == 0) {  // find a matching pipe
++		free(stdin_file);
++		// Get the cat-file from the cat command, which is the new stdin_file for patch command
++		stdin_file = bomsh_get_cat_file(bomsh_cat_argv, pwd_line);
++		if (bomsh_verbose > 3) {
++			fprintf(stderr, "patch-cmd found a matching pipe: %s stdin: %s cat-cmd: %s\n",
++					bomsh_cat_pipe, stdin_file ? stdin_file : "(null)", bomsh_cat_argv);
++		}
++		if (!stdin_file) {  // unsupported cat command
++			return 0;
++		}
++		char *new_cmd_data = bomsh_replace_stdin_file(cmd_data, stdin_file);
++		free(stdin_file);
++		if (new_cmd_data) {
++			// write the cmd file for patch, with patch process pid too.
++			if (!bomsh_write_cmd_file(tcp->pid, new_cmd_data)) {
++				free(new_cmd_data);
++				return 0;
++			}
++			free(new_cmd_data);
++			return 1;  // will run hook program in the pre-exec mode
++		}
++		// bomsh_cat_pipe and bomsh_cat_argv will be freed by next cat command with pipes
++		// Similarly, bomsh_patch_pipe and bomsh_save_patch_cmd will be freed by next patch command with pipes
++		//free(bomsh_cat_pipe);
++		//free(bomsh_cat_argv);
++	} else {  // Cannot find matching pipe, save info for later cat command. we can directly return 0 for this case.
++		// save the pid, patch stdin_file pipe, and cmd_data for later use by cat command.
++		bomsh_patch_pid = tcp->pid;
++		if (bomsh_patch_pipe) free(bomsh_patch_pipe);
++		bomsh_patch_pipe = stdin_file;
++		if (bomsh_save_patch_cmd) free(bomsh_save_patch_cmd);
++		bomsh_save_patch_cmd = cmd_data;
++		if (bomsh_verbose > 3) {
++			fprintf(stderr, "patch-cmd not found a matching pipe: %s pid: %d Saving patch cmd for later cat-cmd recording\n", bomsh_patch_pipe, bomsh_patch_pid);
++		}
++		// cmd_data is saved as bomsh_save_patch_cmd, so should not be freed
++		return 2;
++	}
++	return 0;
++}
++
 +// record the command data for the command to execute next: write it to bomsh_cmd_file for later use by bomsh_run_hook.
 +// returns 1 when record the command successfully and need to run pre-exec hookup
 +// returns 2 when record the command successfully and no need to run pre-exec hookup
 +// otherwise, recording fails, returns 0
-+static int bomsh_record_command(struct tcb *tcp, const unsigned int index)
++static int bomsh_record_command(struct tcb *tcp, const unsigned int index, int *hook_pid)
 +{
 +	char *path = copy_path(tcp, tcp->u_arg[index + 0]);
 +        if (!path) {
@@ -409,76 +659,61 @@ index a9224543b..49ec5d841 100644
 +		free(path);
 +                return 0;
 +        }
++	int rc = 0;
++	// special handling of the cat command, which pipes to patch command
++	if (!bomsh_pipe_disabled && strcmp(path, "/usr/bin/cat") == 0) {
++		rc = bomsh_process_cat_command(tcp, pwd_line, argv_str, hook_pid);
++		free(pwd_line);
++		free(path);
++		// if rc=2, then argv_str is saved as bomsh_cat_argv for later use by patch command, so cannot free it
++		if (rc != 2) free(argv_str);
++		// rc=1 records the matching patch command and run hook program for both pre-exec and exec mode
++                return (rc == 1) ? rc : 0 ;
++	}
 +	// special handling of the patch command
 +	char *stdin_file = NULL;
 +	if (strcmp(path, "/usr/bin/patch") == 0) {
 +		stdin_file = bomsh_get_stdin_file(tcp);
-+	}
-+        len1 = strlen(pwd_line);
-+        len2 = strlen(path);
-+        int len3 = strlen(argv_str);
-+        int len = len1 + len2 + len3 + 3;
-+	if (stdin_file) {
-+		len += strlen(stdin_file) + 3;  // " < stdin_file"
-+	}
-+        char * cmd_data = malloc(len + 1);  // allocate the memory
-+        if (!cmd_data) {
-+                free(pwd);
-+                free(path);
-+                free(argv_str);
-+		if (stdin_file) free(stdin_file);
-+                return 0;
-+        }
-+        // now concatenate the 3 strings: pwd_line (pwd + rootdir), prog_path, argv_str
-+        strcpy(cmd_data, pwd_line);
-+        cmd_data[len1] = '\n';  // use newline character as separator
-+        strcpy(cmd_data + len1 + 1, path);
-+        cmd_data[len1 + 1 + len2] = '\n';  // use newline character as separator
-+        strcpy(cmd_data + len1 + len2 + 2, argv_str);
-+	// pwd_line and argv_str can be freed now, but not path
-+	free(pwd_line);
-+	free(argv_str);
-+	// if stdin_file, then append " < stdin_file" to argv_str
-+	if (stdin_file) {
-+		cmd_data[len1 + len2 + len3 + 2] = ' ';
-+		cmd_data[len1 + len2 + len3 + 3] = '<';
-+		cmd_data[len1 + len2 + len3 + 4] = ' ';
-+		strcpy(cmd_data + len1 + len2 + len3 + 5, stdin_file);
-+		free(stdin_file);
-+	}
-+        cmd_data[len - 1] = 0;  // must be null-terminated
-+        char pid_str[32];
-+        sprintf(pid_str, "pid: %d\n", tcp->pid);
-+        //sprintf(pid_str, "pid: %d tracer-pid: %d\n", tcp->pid, getpid());
-+        char cmd_file[100];
-+	const char *shell_cmd_file = "/tmp/bomsh_cmd";
-+	if (g_bomsh_config.shell_cmd_file) {
-+		shell_cmd_file = g_bomsh_config.shell_cmd_file;
-+	}
-+	unsigned long n = snprintf(cmd_file, sizeof(cmd_file), "%s.pid%d", shell_cmd_file, tcp->pid);
-+	if (n >= sizeof(cmd_file)) {
-+		if (g_bomsh_config.logfile) {
-+			bomsh_write_file(g_bomsh_config.logfile, "\nError: bomsh cmd file name too long\n", "a");
++		if (bomsh_verbose > 3) {
++			fprintf(stderr, "\n===/usr/bin/patch stdin: %s cat-pipe: %s argv: %s\n",
++					stdin_file ? stdin_file : "(null)", bomsh_cat_pipe ? bomsh_cat_pipe : "(null)", argv_str);
 +		}
-+                free(path);
-+                free(cmd_data);
++	}
++	char *cmd_data = bomsh_allocate_cmd_data(pwd_line, path, argv_str, stdin_file);
++	if (!cmd_data) {
++		free(pwd_line);
++		free(argv_str);
++		free(path);
++		if (stdin_file) free(stdin_file);
 +		return 0;
 +	}
-+	cmd_file[sizeof(cmd_file)-1] = 0;
-+        bomsh_write_file(cmd_file, pid_str, "w");
-+        bomsh_write_file(cmd_file, cmd_data, "a");
-+        if (g_bomsh_config.logfile) {
-+		bomsh_write_file(g_bomsh_config.logfile, "\n\nInvoking bomsh_record_cmd\n", "a");
-+	        bomsh_write_file(g_bomsh_config.logfile, pid_str, "a");
-+		bomsh_write_file(g_bomsh_config.logfile, cmd_data, "a");
++	if (!bomsh_pipe_disabled && stdin_file && strncmp(stdin_file, "pipe:[", 6) == 0) {  // special handling for patch command with pipes
++		rc = bomsh_process_piped_patch_command(tcp, pwd_line, argv_str, stdin_file, cmd_data);
++		// stdin_file either has been freed or saved as bomsh_patch_pipe for later use
++		free(pwd_line);
++		free(argv_str);
++		free(path);
++		// if rc=2, then cmd_data is saved as bomsh_save_patch_cmd for later use by cat command, so cannot free it
++		if (rc != 2) free(cmd_data);
++		// rc=1 records this patch command and run hook program for both pre-exec and exec mode
++                return (rc == 1) ? rc : 0 ;
 +	}
-+        //tprintf("bomsh_record_command, cmd: %s pid: %d write cmd_data: %s\n", path, tcp->pid, cmd_data);
-+	int rc = 1;
++	// Write the bomsh_cmd.pidXXXX file for use by hook program
++	if (!bomsh_write_cmd_file(tcp->pid, cmd_data)) {
++		free(pwd_line);
++		free(argv_str);
++		free(path);
++		free(cmd_data);
++		return 0;
++	}
++	rc = 1;
 +	if( !bomsh_is_pre_exec_program(path) ) {
 +		// no need to run pre-exec hookup.
 +		rc = 2;
 +	}
 +        // need to free the malloc'ed memory
++	free(pwd_line);
++	free(argv_str);
 +	free(path);
 +	free(cmd_data);
 +	return rc;
@@ -487,14 +722,15 @@ index a9224543b..49ec5d841 100644
  static void
  printargv(struct tcb *const tcp, kernel_ulong_t addr)
  {
-@@ -96,6 +574,12 @@ printargc(struct tcb *const tcp, kernel_ulong_t addr)
+@@ -96,6 +809,13 @@ printargc(struct tcb *const tcp, kernel_ulong_t addr)
  static void
  decode_execve(struct tcb *tcp, const unsigned int index)
  {
 +	/* Record this command */
-+	if (bomsh_record_command(tcp, index) == 1) {
++	int hook_pid = 0;
++	if (bomsh_record_command(tcp, index, &hook_pid) == 1) {
 +		// run hook program in pre-exec mode
-+		bomsh_hook_program(tcp->pid, 1, "");
++		bomsh_hook_program(hook_pid ? hook_pid : (tcp->pid), 1, "");
 +	}
 +
  	/* pathname */
@@ -653,10 +889,10 @@ index 6356c5831..4320bcb4d 100644
  	printpath(tcp, tcp->u_arg[offset]);
  	tprint_arg_next();
 diff --git a/src/strace.c b/src/strace.c
-index 265c0c6dc..2a81ff825 100644
+index 85d69485f..379c73db4 100644
 --- a/src/strace.c
 +++ b/src/strace.c
-@@ -2979,6 +2979,531 @@ init(int argc, char *argv[])
+@@ -2992,6 +2992,539 @@ init(int argc, char *argv[])
  		((followfork && !output_separately) || nprocs > 1);
  }
  
@@ -683,6 +919,9 @@ index 265c0c6dc..2a81ff825 100644
 +        }
 +        return buffer;
 +}
++
++// the debugging verbose level for bomtrace
++int bomsh_verbose = 0;
 +
 +// 100 programs should be sufficient for most software builds
 +#define BOMSH_MAX_WATCHED_PROGRAMS 100
@@ -1085,7 +1324,7 @@ index 265c0c6dc..2a81ff825 100644
 +static void
 +bomsh_usage(void)
 +{
-+	printf("Usage: bomtrace -h [-o FILE] [-c FILE] [-w FILE] PROG [ARGS]\n");
++	printf("Usage: bomtrace -h [-o FILE] [-c FILE] [-v level] [-w FILE] PROG [ARGS]\n");
 +	exit(0);
 +}
 +
@@ -1093,12 +1332,13 @@ index 265c0c6dc..2a81ff825 100644
 +bomsh_init(int argc, char *argv[])
 +{
 +	int i, c;
-+	static const char bomsh_optstring[] = "+hc:o:w:";
++	static const char bomsh_optstring[] = "+hc:o:v:w:";
 +
 +	static const struct option bomsh_longopts[] = {
 +		{ "help",		no_argument,	   0, 'h' },
 +		{ "config",		required_argument, 0, 'c' },
 +		{ "output",		required_argument, 0, 'o' },
++		{ "verbose",		required_argument, 0, 'v' },
 +		{ "watch",		required_argument, 0, 'w' },
 +		{ 0, 0, 0, 0 }
 +	};
@@ -1125,6 +1365,10 @@ index 265c0c6dc..2a81ff825 100644
 +#ifdef BOMSH_PRINT_CONFIGS
 +			bomsh_print_configs();
 +#endif
++			break;
++		case 'v':
++			// set the verbose debugging level
++			bomsh_verbose = atoi(optarg);
 +			break;
 +		case 'w':
 +			// read the list of programs from the file
@@ -1188,7 +1432,7 @@ index 265c0c6dc..2a81ff825 100644
  static struct tcb *
  pid2tcb(const int pid)
  {
-@@ -3734,6 +4259,10 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3747,6 +4280,10 @@ dispatch_event(const struct tcb_wait_data *wd)
  		ATTRIBUTE_FALLTHROUGH;
  
  	case TE_SYSCALL_STOP:
@@ -1199,7 +1443,7 @@ index 265c0c6dc..2a81ff825 100644
  		if (trace_syscall(current_tcp, &restart_sig) < 0) {
  			/*
  			 * ptrace() failed in trace_syscall().
-@@ -3812,6 +4341,20 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3825,6 +4362,20 @@ dispatch_event(const struct tcb_wait_data *wd)
  		break;
  
  	case TE_EXITED:
@@ -1220,7 +1464,7 @@ index 265c0c6dc..2a81ff825 100644
  		print_exited(current_tcp, current_tcp->pid, status);
  		droptcb(current_tcp);
  		return true;
-@@ -3844,6 +4387,13 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3857,6 +4408,13 @@ dispatch_event(const struct tcb_wait_data *wd)
  			}
  		}
  
@@ -1234,7 +1478,7 @@ index 265c0c6dc..2a81ff825 100644
  		if (detach_on_execve) {
  			if (current_tcp->flags & TCB_SKIP_DETACH_ON_FIRST_EXEC) {
  				current_tcp->flags &= ~TCB_SKIP_DETACH_ON_FIRST_EXEC;
-@@ -4013,7 +4563,8 @@ int
+@@ -4026,7 +4584,8 @@ int
  main(int argc, char *argv[])
  {
  	setlocale(LC_ALL, "");
