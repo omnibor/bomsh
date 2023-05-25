@@ -54,8 +54,10 @@ g_bomdir = os.path.join(os.getcwd(), ".omnibor")
 g_raw_logfile = "/tmp/bomsh_hook_raw_logfile"
 g_trace_logfile = "/tmp/bomsh_hook_trace_logfile"
 g_logfile = "/tmp/bomsh_hook_logfile"
-g_cc_compilers = ["/usr/bin/gcc", "/usr/bin/clang", "/usr/bin/g++", "/usr/bin/cc", "/usr/bin/x86_64-mageia-linux-gnu-gcc"]
+g_cc_compilers = ["/usr/bin/gcc", "/usr/bin/clang", "/usr/bin/g++", "/usr/bin/cc", "/usr/bin/clang++"]
+g_cc_compiler_names = ["gcc", "clang", "g++", "cc", "clang++"]
 g_cc_linkers = ["/usr/bin/ld", "/usr/bin/ld.bfd", "/usr/bin/ld.gold", "/usr/bin/ld.lld", "/usr/bin/gold"]
+g_cc_linker_names = ["ld", "ld.bfd", "ld.gold", "ld.lld", "gold"]
 g_strip_progs = ["/usr/bin/strip", "/usr/bin/eu-strip"]
 # list of binary converting programs of the same file
 g_samefile_converters = ["/usr/bin/ranlib", "./tools/objtool/objtool", "/usr/lib/rpm/debugedit", "/usr/bin/debugedit",
@@ -67,7 +69,7 @@ g_hashtypes = []
 g_shell_cmd_rootdir = "/"
 g_cve_check_rules = None
 # Whether to do strict/exact program path comparision.
-g_strict_prog_path = True
+g_strict_prog_path = False
 
 #
 # Helper routines
@@ -320,9 +322,11 @@ def read_shell_command(shell_cmd_file):
 def is_special_cc_compiler(prog):
     '''
     Check if it is gcc/cc installed at non-standard location.
-    like /usr/lib64/gcc/x86_64-suse-linux/7/../../../../x86_64-suse-linux/bin/ld on OpenSUSE
+    like /usr/bin/x86_64-mageia-linux-gnu-gcc on Mageia
+    /sw/packages/gcc/c4.7.0-p5/x86_64-linux/bin/gcc
+    /auto/binos-tools/llvm11/llvm-11.0-p22/bin/clang-11
     '''
-    return prog[-3:] in ('/cc', '-cc') or prog[-4:] in ('/gcc', '-gcc')
+    return prog[-3:] in ('/cc', '-cc') or prog[-4:] in ('/gcc', '-gcc') or os.path.basename(prog).startswith("clang")
 
 
 def is_special_watched_program(prog):
@@ -330,21 +334,23 @@ def is_special_watched_program(prog):
     Check if it is gcc/cc or ld installed at non-standard location.
     like /usr/lib64/gcc/x86_64-suse-linux/7/../../../../x86_64-suse-linux/bin/ld on OpenSUSE
     '''
-    return prog[-3:] in ('/ld', '/cc', '-cc') or prog[-4:] in ('/gcc', '-gcc')
+    return prog[-3:] in ('/ld', '/cc', '-cc') or prog[-4:] in ('/gcc', '-gcc') or os.path.basename(prog).startswith("clang")
 
 
 def is_cc_compiler(prog):
     """
     Whether a program (absolute path) is C compiler.
     """
-    return prog in g_cc_compilers or is_special_cc_compiler(prog)
+    return os.path.basename(prog) in g_cc_compiler_names or is_special_cc_compiler(prog)
+    #return prog in g_cc_compilers or is_special_cc_compiler(prog)
 
 
 def is_cc_linker(prog):
     """
     Whether a program (absolute path) is C linker.
     """
-    return prog[-3:] == '/ld' or prog in g_cc_linkers
+    return os.path.basename(prog) in g_cc_linker_names
+    #return prog[-3:] == '/ld' or prog in g_cc_linkers
 
 
 def is_golang_prog(prog):

@@ -906,10 +906,10 @@ index 6356c5831..fd85f798b 100644
  	printpath(tcp, tcp->u_arg[offset]);
  	tprint_arg_next();
 diff --git a/src/strace.c b/src/strace.c
-index 85d69485f..20fe65f0d 100644
+index 85d69485f..084cabd02 100644
 --- a/src/strace.c
 +++ b/src/strace.c
-@@ -2992,6 +2992,624 @@ init(int argc, char *argv[])
+@@ -2992,6 +2992,626 @@ init(int argc, char *argv[])
  		((followfork && !output_separately) || nprocs > 1);
  }
  
@@ -1067,6 +1067,7 @@ index 85d69485f..20fe65f0d 100644
 +// on some platforms, gcc compiler or ld tool is installed to non-standard location,
 +// like /usr/lib64/gcc/x86_64-suse-linux/7/../../../../x86_64-suse-linux/bin/ld on OpenSUSE,
 +// or /usr/bin/x86_64-mageia-linux-gnu-gcc on Mageia.
++// or different versions of clang compilers.
 +// Try to cover them as special watched program.
 +static int
 +bomsh_is_special_watched_program(const char *path)
@@ -1076,6 +1077,7 @@ index 85d69485f..20fe65f0d 100644
 +	if (path[len - 3] == '/' && path[len - 2] == 'l' && path[len - 1] == 'd') return 1;
 +	if (strcmp(path + len - 3, "-cc") == 0 || strcmp(path + len - 3, "/cc") == 0) return 1;
 +	if (strcmp(path + len - 4, "-gcc") == 0 || strcmp(path + len - 4, "/gcc") == 0) return 1;
++	if (strncmp(bomsh_basename((char *)path), "clang", 5) == 0) return 1;
 +	return 0;
 +}
 +
@@ -1534,7 +1536,7 @@ index 85d69485f..20fe65f0d 100644
  static struct tcb *
  pid2tcb(const int pid)
  {
-@@ -3747,6 +4365,10 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3747,6 +4367,10 @@ dispatch_event(const struct tcb_wait_data *wd)
  		ATTRIBUTE_FALLTHROUGH;
  
  	case TE_SYSCALL_STOP:
@@ -1545,7 +1547,7 @@ index 85d69485f..20fe65f0d 100644
  		if (trace_syscall(current_tcp, &restart_sig) < 0) {
  			/*
  			 * ptrace() failed in trace_syscall().
-@@ -3825,6 +4447,25 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3825,6 +4449,25 @@ dispatch_event(const struct tcb_wait_data *wd)
  		break;
  
  	case TE_EXITED:
@@ -1571,7 +1573,7 @@ index 85d69485f..20fe65f0d 100644
  		print_exited(current_tcp, current_tcp->pid, status);
  		droptcb(current_tcp);
  		return true;
-@@ -3857,6 +4498,13 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3857,6 +4500,13 @@ dispatch_event(const struct tcb_wait_data *wd)
  			}
  		}
  
@@ -1585,7 +1587,7 @@ index 85d69485f..20fe65f0d 100644
  		if (detach_on_execve) {
  			if (current_tcp->flags & TCB_SKIP_DETACH_ON_FIRST_EXEC) {
  				current_tcp->flags &= ~TCB_SKIP_DETACH_ON_FIRST_EXEC;
-@@ -4026,7 +4674,8 @@ int
+@@ -4026,7 +4676,8 @@ int
  main(int argc, char *argv[])
  {
  	setlocale(LC_ALL, "");
