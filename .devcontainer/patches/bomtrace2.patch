@@ -1,12 +1,12 @@
 diff --git a/src/execve.c b/src/execve.c
-index a9224543b..3f0d72c2e 100644
+index a9224543b..cef02cedd 100644
 --- a/src/execve.c
 +++ b/src/execve.c
 @@ -14,6 +14,735 @@
  
  #include "defs.h"
  
-+struct bomsh_configs {
++extern struct bomsh_configs {
 +	char *hook_script_file;
 +	char *hook_script_cmdopt;
 +	char *shell_cmd_file;
