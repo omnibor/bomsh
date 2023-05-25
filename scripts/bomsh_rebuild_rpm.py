@@ -143,7 +143,7 @@ RUN cd /root ; git clone https://github.com/omnibor/bomsh.git ; \\
 # Bomtrace/Bomsh mock build run to generate OmniBOR documents
 # if BASELINE_REBUILD is not empty, then it will not use bomtrace2 to run mock, that is, the baseline run.
 # if CHROOT_CFG is not empty, then the provided mock chroot_cfg will be used, otherwise, default.cfg is used.
-CMD if [ -z "${BASELINE_REBUILD}" ]; then bomtrace_cmd="/tmp/bomtrace2 -w /tmp/bomtrace_watched_programs -c /tmp/bomtrace.conf " ; fi ; \\
+CMD if [ -z "${BASELINE_REBUILD}" ]; then bomtrace_cmd="/tmp/bomtrace2 -w /tmp/bomtrace_watched_programs -c /tmp/bomtrace.conf -o /tmp/bomsh_hook_strace_logfile " ; fi ; \\
     if [ -z "${CHROOT_CFG}" ]; then CHROOT_CFG=default ; fi ; \\
     mkdir -p /out/bomsher_out ; cd /out/bomsher_out ; \\
     $bomtrace_cmd mock -r /etc/mock/${CHROOT_CFG}.cfg --rebuild /out/bomsher_in/$SRC_RPM_FILE --resultdir=./tmprpms ; \\
@@ -166,7 +166,12 @@ def create_dockerfile(work_dir):
         from_str = 'FROM ' + args.docker_image_base
     else:
         from_str = 'FROM almalinux:9'
-    dockerfile_str = from_str + g_bomsh_dockerfile_str
+    bomsh_dockerfile_str = g_bomsh_dockerfile_str
+    if "mageia" in args.chroot_cfg:  # special handling for mageia platform due to file permission check with multiple levels of symlinks
+        tokens = g_bomsh_dockerfile_str.splitlines()
+        # insert one line to do sed replacement of bomtrace.conf file to change bomtrace config
+        bomsh_dockerfile_str = '\n'.join(tokens[:11] + ["    sed -i -e 's/#skip_checking_prog_access=1/skip_checking_prog_access=1/' /tmp/bomtrace.conf ; \\",] + tokens[11:]) + '\n'
+    dockerfile_str = from_str + bomsh_dockerfile_str
     dockerfile = os.path.join(work_dir, "Dockerfile")
     write_text_file(dockerfile, dockerfile_str)
 

@@ -145,7 +145,7 @@ RUN cd /root ; git clone https://github.com/omnibor/bomsh.git ; \\
 # if BASELINE_REBUILD is not empty, then it will not use bomtrace2 to run debrebuild, that is, the baseline run.
 # if SRC_TAR_DIR is not empty, then the python script must have copied tarball and .dsc file into the bomsher_in directory.
 CMD if [ "${SRC_TAR_DIR}" ]; then srctardir_param="--srctardir=/out/bomsher_in" ; fi ; \\
-    if [ -z "${BASELINE_REBUILD}" ]; then bomtrace_cmd="/tmp/bomtrace2 -w /tmp/bomtrace_watched_programs -c /tmp/bomtrace.conf " ; fi ; \\
+    if [ -z "${BASELINE_REBUILD}" ]; then bomtrace_cmd="/tmp/bomtrace2 -w /tmp/bomtrace_watched_programs -c /tmp/bomtrace.conf -o /tmp/bomsh_hook_strace_logfile " ; fi ; \\
     mkdir -p /out/bomsher_out ; cd /out/bomsher_out ; \\
     $bomtrace_cmd debrebuild $srctardir_param --buildresult=./debs --builder=mmdebstrap /out/bomsher_in/$BUILDINFO_FILE ; \\
     if [ "${BASELINE_REBUILD}" ]; then exit 0 ; fi ; \\

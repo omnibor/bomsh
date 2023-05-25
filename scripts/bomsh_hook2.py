@@ -60,11 +60,14 @@ g_strip_progs = ["/usr/bin/strip", "/usr/bin/eu-strip"]
 # list of binary converting programs of the same file
 g_samefile_converters = ["/usr/bin/ranlib", "./tools/objtool/objtool", "/usr/lib/rpm/debugedit", "/usr/bin/debugedit",
                          "./scripts/sortextable", "./scripts/sorttable", "./tools/bpf/resolve_btfids/resolve_btfids"]
+g_samefile_converter_names = ["ranlib", "objtool", "debugedit", "sortextable", "sorttable", "resolve_btfids"]
 g_embed_bom_after_commands = g_cc_compilers + g_cc_linkers + ["/usr/bin/eu-strip",]
 #g_embed_bom_after_commands = g_cc_compilers + g_cc_linkers + ["/usr/bin/eu-strip", "/usr/bin/ar"]
 g_hashtypes = []
 g_shell_cmd_rootdir = "/"
 g_cve_check_rules = None
+# Whether to do strict/exact program path comparision.
+g_strict_prog_path = True
 
 #
 # Helper routines
@@ -314,18 +317,34 @@ def read_shell_command(shell_cmd_file):
 #### End of shell command read/parse routines ####
 ############################################################
 
+def is_special_cc_compiler(prog):
+    '''
+    Check if it is gcc/cc installed at non-standard location.
+    like /usr/lib64/gcc/x86_64-suse-linux/7/../../../../x86_64-suse-linux/bin/ld on OpenSUSE
+    '''
+    return prog[-3:] in ('/cc', '-cc') or prog[-4:] in ('/gcc', '-gcc')
+
+
+def is_special_watched_program(prog):
+    '''
+    Check if it is gcc/cc or ld installed at non-standard location.
+    like /usr/lib64/gcc/x86_64-suse-linux/7/../../../../x86_64-suse-linux/bin/ld on OpenSUSE
+    '''
+    return prog[-3:] in ('/ld', '/cc', '-cc') or prog[-4:] in ('/gcc', '-gcc')
+
+
 def is_cc_compiler(prog):
     """
     Whether a program (absolute path) is C compiler.
     """
-    return prog in g_cc_compilers
+    return prog in g_cc_compilers or is_special_cc_compiler(prog)
 
 
 def is_cc_linker(prog):
     """
     Whether a program (absolute path) is C linker.
     """
-    return prog in g_cc_linkers
+    return prog[-3:] == '/ld' or prog in g_cc_linkers
 
 
 def is_golang_prog(prog):
@@ -779,7 +798,7 @@ def unbundle_package(pkgfile, destdir=''):
         cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; cd " + destdir + " ; rpm2cpio " + pkgfile + " | cpio -idm 2>/dev/null || true"
     elif pkgfile[-4:] == ".deb" or pkgfile[-5:] == ".udeb":
         cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; dpkg-deb -xv " + pkgfile + " " + destdir + " || true"
-    elif pkgfile[-7:] == ".tar.gz" or pkgfile[-7:] == ".tar.xz" or pkgfile[-8:] == ".tar.bz2":
+    elif pkgfile[-4:] == ".tgz" or pkgfile[-7:] in (".tar.gz", ".tar.xz") or pkgfile[-8:] == ".tar.bz2":
         cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; tar -xf " + pkgfile + " -C " + destdir + " || true"
     else:
         verbose("Warning: Unsupported package format in " + pkgfile + " file, skipping it.")
@@ -912,6 +931,7 @@ def get_all_subfiles_in_rpmbuild_cmdline(rpmline, pwd):
             next_token_is_topdir = True
         elif token[0] != '-' and (token[-8:] == ".src.rpm" or token[-5:] == ".spec"):
             new_tokens.append(token)
+    # Only one spec or srcrpm is supported
     if not found_build_opt or len(new_tokens) != 1:
         return ret
     spec_or_srcrpm = get_real_path(new_tokens[0], pwd)
@@ -2066,8 +2086,10 @@ def process_patch_command(prog, pwddir, argv_str, pid):
     '''
     verbose("patch cmd: " + argv_str, LEVEL_1)
     strip_num = 0
+    input_patch_file = ''
     found_stdin = False
     next_token_is_strip_num = False
+    next_token_is_input_file = False
     tokens = argv_str.split()
     new_tokens = []
     for token in tokens[1:]:
@@ -2080,14 +2102,23 @@ def process_patch_command(prog, pwddir, argv_str, pid):
             strip_num = int(token[2:])
         elif token.startswith("--strip="):
             strip_num = int(token[8:])
+        elif token in ("-i", "--input"):
+            next_token_is_input_file = True
+        elif next_token_is_input_file:
+            input_patch_file = token
+            next_token_is_input_file = False
+        elif token.startswith("--input="):
+            input_patch_file = token[8:]
         elif token == "<":
             found_stdin = True
         elif token[0] != '-':
             new_tokens.append(token)
-    if not (found_stdin or not found_stdin and len(new_tokens) == 2):
+    # Either found_stdin or found input_patch_file. If not, must be 'patch originalfile patchfile' form.
+    found_input_file = found_stdin or input_patch_file
+    if not (found_input_file or (not found_input_file and len(new_tokens) == 2)):
         verbose("Warning: not interested in this form of patch command", LEVEL_1)
         return ''
-    if not found_stdin:
+    if not (found_stdin or input_patch_file):
         # It must be the form of "patch originalfile patch-file".
         infile = get_real_path(new_tokens[0], pwddir)
         patch_file = get_real_path(new_tokens[1], pwddir)
@@ -2104,10 +2135,13 @@ def process_patch_command(prog, pwddir, argv_str, pid):
                 return ''
             record_raw_info(infile, [infile, patch_file], pwddir, argv_str, pid, prog=prog, infile_checksums=hashes)
         return ''
-    # It must be the form of "patch -pNUM < patch-file".
-    if not new_tokens:
-        return ''
-    patch_file = get_real_path(new_tokens[-1], pwddir)
+    if input_patch_file:
+        patch_file = get_real_path(input_patch_file, pwddir)
+    else:
+        # It must be the form of "patch -pNUM < patch-file".
+        if not new_tokens:
+            return ''
+        patch_file = get_real_path(new_tokens[-1], pwddir)
     verbose("strip_num is " + str(strip_num) + " patch file is: " + patch_file, LEVEL_1)
     afiles = []
     with open(patch_file, 'r') as f:
@@ -2392,42 +2426,45 @@ def process_shell_command(prog, pwd_str, argv_str, pid_str):
         g_shell_cmd_rootdir = tokens[1]
     if args.pre_exec:
         verbose("pre_exec run")
+    name = os.path.basename(prog)
 
     # Process the shell command, to record the raw info
     if is_cc_compiler(prog):
         outfile = process_gcc_command(prog, pwddir, argv_str, pid)
     elif is_cc_linker(prog):
         outfile = process_ld_command(prog, pwddir, argv_str, pid)
-    elif prog == "/usr/bin/ar":
-        outfile = process_ar_command(prog, pwddir, argv_str, pid)
-    elif prog == "/usr/bin/objcopy":
+    elif name == "objcopy": # prog == "/usr/bin/objcopy"
         outfile = process_objcopy_command(prog, pwddir, argv_str, pid)
     elif prog == "arch/x86/boot/tools/build":
         outfile = process_bzImage_build_command(prog, pwddir, argv_str)
-    elif prog == "/usr/bin/sepdebugcrcfix" or prog == "/usr/lib/rpm/sepdebugcrcfix":
+    elif name == "sepdebugcrcfix": # prog == "/usr/bin/sepdebugcrcfix" or prog == "/usr/lib/rpm/sepdebugcrcfix":
         outfile = process_sepdebugcrcfix_command(prog, pwddir, argv_str, pid)
-    elif prog in g_strip_progs or prog == "/usr/bin/dwz":
+    elif name in ("strip", "dwz", "eu-strip"):
+    #elif prog in g_strip_progs or prog == "/usr/bin/dwz":
         outfile = process_generic_shell_command(prog, pwddir, argv_str, pid)
-    elif prog in g_samefile_converters:
+    elif name in g_samefile_converter_names:
+    #elif prog in g_samefile_converters:
         outfile = process_samefile_converter_command(prog, pwddir, argv_str, pid)
-    elif prog == "/usr/bin/dpkg-deb":
+    elif name == "dpkg-deb": # prog == "/usr/bin/dpkg-deb":
         outfile = process_dpkg_deb_command(prog, pwddir, argv_str)
-    elif prog == "/usr/bin/rpmbuild":
+    elif name == "rpmbuild": # prog == "/usr/bin/rpmbuild":
         outfile = process_rpmbuild_command(prog, pwddir, argv_str, pid)
     # install cmd does not change file hash, thus no need to process
     #elif prog == "/usr/bin/install":
     #    outfile = process_install_command(prog, pwddir, argv_str)
-    elif prog == "/usr/bin/rustc":
-        outfile = process_rustc_command(prog, pwddir, argv_str)
-    elif prog == "/usr/bin/patch":
+    elif name == "patch": # prog == "/usr/bin/patch":
         outfile = process_patch_command(prog, pwddir, argv_str, pid)
-    elif prog == "scripts/sign-file":
+    elif name == "ar": # prog == "/usr/bin/ar":
+        outfile = process_ar_command(prog, pwddir, argv_str, pid)
+    elif name == "sign-file": # prog == "scripts/sign-file":
         outfile = process_sign_file_command(prog, pwddir, argv_str, pid)
     elif prog == "bomsh_openat_file":
         outfile = process_samefile_converter_command(prog, pwddir, argv_str, pid)
-    elif prog == "/usr/bin/javac":
+    elif name == "rustc": # prog == "/usr/bin/rustc":
+        outfile = process_rustc_command(prog, pwddir, argv_str)
+    elif name == "javac": # prog == "/usr/bin/javac":
         outfile = process_javac_command(prog, pwddir, argv_str)
-    elif prog == "/usr/bin/jar":
+    elif name == "jar": # prog == "/usr/bin/jar":
         outfile = process_jar_command(prog, pwddir, argv_str)
     elif is_golang_prog(prog):
         outfile = process_golang_command(prog, pwddir, argv_str)
@@ -2751,7 +2788,11 @@ def main():
             progs_to_watch.extend( ("/usr/bin/dpkg-deb", "/usr/bin/rpmbuild") )
         if args.watched_programs:
             progs_to_watch.extend(args.watched_programs.split(","))
-    if prog in progs_to_watch:
+    prog_names_to_watch = []
+    if not g_strict_prog_path:
+        prog_names_to_watch = [os.path.basename(program) for program in progs_to_watch]
+    if ((g_strict_prog_path and prog in progs_to_watch) or
+        (not g_strict_prog_path and (os.path.basename(prog) in prog_names_to_watch or is_special_watched_program(prog)))):
         verbose(prog + " is on the list, processing the command...", LEVEL_1)
         process_shell_command(prog, pwddir, argv_str, pid)
     else:

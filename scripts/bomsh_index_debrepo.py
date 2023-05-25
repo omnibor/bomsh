@@ -402,7 +402,7 @@ def unbundle_package(pkgfile, destdir=''):
         cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; cd " + destdir + " ; rpm2cpio " + pkgfile + " | cpio -idm || true"
     elif pkgfile[-4:] == ".deb" or pkgfile[-5:] == ".udeb":
         cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; dpkg-deb -xv " + pkgfile + " " + destdir + " || true"
-    elif pkgfile[-7:] == ".tar.gz" or pkgfile[-7:] == ".tar.xz" or pkgfile[-8:] == ".tar.bz2":
+    elif pkgfile[-4:] == ".tgz" or pkgfile[-7:] in (".tar.gz", ".tar.xz") or pkgfile[-8:] == ".tar.bz2":
         cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; tar -xf " + pkgfile + " -C " + destdir + " || true"
     else:
         print("Unsupported package format in " + pkgfile + " file, skipping it.")
