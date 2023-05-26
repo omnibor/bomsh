@@ -2,12 +2,15 @@
 /usr/bin/ar
 /usr/bin/ld
 /usr/bin/ld.bfd
+/usr/bin/ld.gold
+/usr/bin/gold
 ./tools/objtool/objtool
 /usr/bin/objcopy
 /usr/bin/strip
 /usr/bin/eu-strip
 /usr/bin/cat
 /usr/bin/clang
+/usr/bin/clang++
 /usr/bin/cc
 /usr/bin/g++
 /usr/bin/x86_64-mageia-linux-gnu-gcc

@@ -1,18 +1,24 @@
 diff --git a/src/execve.c b/src/execve.c
-index a9224543b..dae7ef351 100644
+index a9224543b..cef02cedd 100644
 --- a/src/execve.c
 +++ b/src/execve.c
-@@ -14,6 +14,719 @@
+@@ -14,6 +14,735 @@
  
  #include "defs.h"
  
 +extern struct bomsh_configs {
-+        char *hook_script_file;
-+        char *hook_script_cmdopt;
-+        char *shell_cmd_file;
-+        char *logfile;
-+        char *syscalls;
-+        int skip_checking_prog_access;
++	char *hook_script_file;
++	char *hook_script_cmdopt;
++	char *shell_cmd_file;
++	char *logfile;
++	char *syscalls;
++	// by default, we check prog R_OK|X_OK permission before recording a command.
++	// the below flag will turn off/on this permission check
++	int skip_checking_prog_access;
++	// By default, we support non-standard install location of tools, for gcc/clang/ld/patch, etc.
++	// The below flag turn on strict (or exact) prog path check/comparison,
++	// which disables support of non-standard install location of tools.
++	int strict_prog_path;
 +} g_bomsh_config;
 +
 +extern int bomsh_verbose;
@@ -233,6 +239,20 @@ index a9224543b..dae7ef351 100644
 +        }
 +}
 +
++// log some info for a command, this is for cat/patch command with pipes
++static void
++bomsh_log_cmd(int pid, const char *pwd_line, const char *argv_str, const char *pipe_file, const char *cmd_summary)
++{
++        if (g_bomsh_config.logfile) {
++		char pid_str[128];  // 30 cmd_summary + 28 pipe + 25 pid = 83, so 128 should be good
++		sprintf(pid_str, "\n\n%s %s\npid: %d\n", cmd_summary, pipe_file, pid);
++	        bomsh_write_file(g_bomsh_config.logfile, pid_str, "a");
++	        bomsh_write_file(g_bomsh_config.logfile, pwd_line, "a");
++	        bomsh_write_file(g_bomsh_config.logfile, "\n", "a");
++		bomsh_write_file(g_bomsh_config.logfile, argv_str, "a");
++	}
++}
++
 +char * bomsh_get_rootdir(struct tcb *tcp);
 +
 +// get root directory for a traced process.
@@ -411,19 +431,6 @@ index a9224543b..dae7ef351 100644
 +	return 1;
 +}
 +
-+// log some info for a command, this is for cat/patch command with pipes
-+static void bomsh_log_cmd(int pid, char *pwd_line, char *argv_str, char *pipe_file, const char *cmd_summary)
-+{
-+        if (g_bomsh_config.logfile) {
-+		char pid_str[128];  // 30 cmd_summary + 28 pipe + 25 pid = 83, so 128 should be good
-+		sprintf(pid_str, "\n\n%s %s\npid: %d\n", cmd_summary, pipe_file, pid);
-+	        bomsh_write_file(g_bomsh_config.logfile, pid_str, "a");
-+	        bomsh_write_file(g_bomsh_config.logfile, pwd_line, "a");
-+	        bomsh_write_file(g_bomsh_config.logfile, "\n", "a");
-+		bomsh_write_file(g_bomsh_config.logfile, argv_str, "a");
-+	}
-+}
-+
 +// allocate memory for cmd_data, which contains pwd_line, prog_path, and argv_str
 +static char *
 +bomsh_allocate_cmd_data(char *pwd_line, char *path, char *argv_str, char *stdin_file)
@@ -586,6 +593,7 @@ index a9224543b..dae7ef351 100644
 +        if (!path) {
 +                return 0;
 +        }
++	//bomsh_log_cmd(tcp->pid, "PWD_LINE", path, "DEBUG", "Record this cmd to");
 +	if (bomsh_is_detach_on_pid_program(path)) {
 +		// no need to record this command or follow its child processes
 +		bomsh_detach_on_pid = tcp->pid;
@@ -611,11 +619,14 @@ index a9224543b..dae7ef351 100644
 +		free(path);
 +		return 0;
 +	}
++	//bomsh_log_cmd(tcp->pid, "PWD_LINE", path, "before is_watched_program call", "Record this cmd,");
++	// Either strict_prog_path or not, it has been taken care in the bomsh_is_watched_program() function.
 +	if( !bomsh_is_watched_program(path) ) {
 +		// file is not watched
 +		free(path);
 +		return 0;
 +	}
++	//bomsh_log_cmd(tcp->pid, "PWD_LINE", path, "after is_watched_program call", "Record this cmd,");
 +	char *rootdir = bomsh_get_rootdir(tcp);
 +	if (!rootdir) {
 +		free(path);
@@ -627,6 +638,11 @@ index a9224543b..dae7ef351 100644
 +		free(path);
 +		return 0;
 +	}
++	// When there are multiple levels of symlinks, below permission check fails on some platforms like Mageia for /usr/bin/cc
++	// In such case, user can set skip_checking_prog_access=1 in bomtrace.conf file to make it work.
++	//
++	// Checking file permission can return early for non-existent programs, like /usr/local/bin/gcc, etc.
++	// This avoids unnecessary writing of bomsh_cmd.pidXXXX file, which can also incur extra invocation of hook-up progs in pre-exec mode.
 +	if (!g_bomsh_config.skip_checking_prog_access && !bomsh_check_file_permission(path, pwd, rootdir, R_OK|X_OK)) {
 +		// file cannot read or execute
 +                free(rootdir);
@@ -722,7 +738,7 @@ index a9224543b..dae7ef351 100644
  static void
  printargv(struct tcb *const tcp, kernel_ulong_t addr)
  {
-@@ -96,6 +809,13 @@ printargc(struct tcb *const tcp, kernel_ulong_t addr)
+@@ -96,6 +825,13 @@ printargc(struct tcb *const tcp, kernel_ulong_t addr)
  static void
  decode_execve(struct tcb *tcp, const unsigned int index)
  {
@@ -737,10 +753,10 @@ index a9224543b..dae7ef351 100644
  	printpath(tcp, tcp->u_arg[index + 0]);
  	tprint_arg_next();
 diff --git a/src/open.c b/src/open.c
-index 6356c5831..4320bcb4d 100644
+index 6356c5831..fd85f798b 100644
 --- a/src/open.c
 +++ b/src/open.c
-@@ -110,9 +110,147 @@ tprint_open_modes(unsigned int flags)
+@@ -110,9 +110,148 @@ tprint_open_modes(unsigned int flags)
  	tprint_open_modes64(flags);
  }
  
@@ -751,6 +767,7 @@ index 6356c5831..4320bcb4d 100644
 +        char *logfile;
 +        char *syscalls;
 +        int skip_checking_prog_access;
++        int strict_prog_path;
 +} g_bomsh_config;
 +
 +extern int bomsh_openat_mode;
@@ -889,10 +906,10 @@ index 6356c5831..4320bcb4d 100644
  	printpath(tcp, tcp->u_arg[offset]);
  	tprint_arg_next();
 diff --git a/src/strace.c b/src/strace.c
-index 85d69485f..379c73db4 100644
+index 85d69485f..084cabd02 100644
 --- a/src/strace.c
 +++ b/src/strace.c
-@@ -2992,6 +2992,539 @@ init(int argc, char *argv[])
+@@ -2992,6 +2992,626 @@ init(int argc, char *argv[])
  		((followfork && !output_separately) || nprocs > 1);
  }
  
@@ -920,6 +937,31 @@ index 85d69485f..379c73db4 100644
 +        return buffer;
 +}
 +
++struct bomsh_configs {
++	char *hook_script_file;
++	char *hook_script_cmdopt;
++	char *shell_cmd_file;
++	char *logfile;
++	char *syscalls;
++	// by default, we check prog R_OK|X_OK permission before recording a command.
++	// the below flag will turn off/on this permission check
++	int skip_checking_prog_access;
++	// By default, we support non-standard install location of tools, for gcc/clang/ld/patch, etc.
++	// The below flag turn on strict (or exact) prog path check/comparison,
++	// which disables support of non-standard install location of tools.
++	int strict_prog_path;
++};
++struct bomsh_configs g_bomsh_config;
++
++// a special mode to trace openat/close syscalls and record checksums of interested files.
++int bomsh_openat_mode = 0;
++int bomsh_openat_fd = -1;
++static int bomsh_openat_fd_closed = 0;
++int bomsh_openat_fd_pid = -1;
++
++int bomsh_detach_on_pid = -5;
++void bomsh_hook_program(int pid, int pre_exec_mode, const char *suffix);
++
 +// the debugging verbose level for bomtrace
 +int bomsh_verbose = 0;
 +
@@ -938,6 +980,12 @@ index 85d69485f..379c73db4 100644
 +static int bomsh_num_umbrella_programs = 0;
 +pid_t *bomsh_umbrella_pid_stack = 0;
 +int bomsh_umbrella_pid_top = -1;
++
++// This list only contains the name (or basename) of the watched programs
++static char **bomsh_watched_program_names = 0;
++static int bomsh_num_watched_program_names = 0;
++static char **bomsh_pre_exec_program_names = 0;
++static int bomsh_num_pre_exec_program_names = 0;
 +
 +int bomsh_is_pre_exec_program(char *prog);
 +int bomsh_is_watched_program(char *prog);
@@ -982,6 +1030,14 @@ index 85d69485f..379c73db4 100644
 +}
 +#endif
 +
++// return the basename of a path, pointing to the rightmost part of the original string.
++static char *
++bomsh_basename(char *path)
++{
++	char *s = strrchr(path, '/');
++	return s ? (s + 1) : path;
++}
++
 +static int strcmp_comparator(const void *p, const void *q)
 +{
 +	return strcmp(* (char * const *) p, * (char * const *) q);
@@ -1000,7 +1056,29 @@ index 85d69485f..379c73db4 100644
 +	if (!bomsh_pre_exec_programs) {  // there is no any watched program, so matching any program
 +		return 1;
 +	}
-+	return bomsh_is_program_inlist(prog, bomsh_pre_exec_programs, bomsh_num_pre_exec_programs);
++	if (g_bomsh_config.strict_prog_path) {
++		return bomsh_is_program_inlist(prog, bomsh_pre_exec_programs, bomsh_num_pre_exec_programs);
++	} else {
++		char *name = bomsh_basename(prog);
++		return bomsh_is_program_inlist(name, bomsh_pre_exec_program_names, bomsh_num_pre_exec_program_names);
++	}
++}
++
++// on some platforms, gcc compiler or ld tool is installed to non-standard location,
++// like /usr/lib64/gcc/x86_64-suse-linux/7/../../../../x86_64-suse-linux/bin/ld on OpenSUSE,
++// or /usr/bin/x86_64-mageia-linux-gnu-gcc on Mageia.
++// or different versions of clang compilers.
++// Try to cover them as special watched program.
++static int
++bomsh_is_special_watched_program(const char *path)
++{
++	int len = strlen(path);
++	if (len < 4) return 0;
++	if (path[len - 3] == '/' && path[len - 2] == 'l' && path[len - 1] == 'd') return 1;
++	if (strcmp(path + len - 3, "-cc") == 0 || strcmp(path + len - 3, "/cc") == 0) return 1;
++	if (strcmp(path + len - 4, "-gcc") == 0 || strcmp(path + len - 4, "/gcc") == 0) return 1;
++	if (strncmp(bomsh_basename((char *)path), "clang", 5) == 0) return 1;
++	return 0;
 +}
 +
 +// check if a program is in the watched list.
@@ -1009,7 +1087,13 @@ index 85d69485f..379c73db4 100644
 +	if (!bomsh_watched_programs) {  // there is no any watched program, so matching any program
 +		return 1;
 +	}
-+	return bomsh_is_program_inlist(prog, bomsh_watched_programs, bomsh_num_watched_programs);
++	if (g_bomsh_config.strict_prog_path) {
++		return bomsh_is_program_inlist(prog, bomsh_watched_programs, bomsh_num_watched_programs);
++	} else {
++		char *name = bomsh_basename(prog);
++		return bomsh_is_program_inlist(name, bomsh_watched_program_names, bomsh_num_watched_program_names)
++			|| bomsh_is_special_watched_program(prog);
++	}
 +}
 +
 +// check if a program is in the detach_on_pid list.
@@ -1137,25 +1221,6 @@ index 85d69485f..379c73db4 100644
 +	return watched_progs;
 +}
 +
-+struct bomsh_configs {
-+	char *hook_script_file;
-+	char *hook_script_cmdopt;
-+	char *shell_cmd_file;
-+	char *logfile;
-+	char *syscalls;
-+	int skip_checking_prog_access;
-+};
-+struct bomsh_configs g_bomsh_config;
-+
-+// a special mode to trace openat/close syscalls and record checksums of interested files.
-+int bomsh_openat_mode = 0;
-+int bomsh_openat_fd = -1;
-+static int bomsh_openat_fd_closed = 0;
-+int bomsh_openat_fd_pid = -1;
-+
-+int bomsh_detach_on_pid = -5;
-+void bomsh_hook_program(int pid, int pre_exec_mode, const char *suffix);
-+
 +// run a hooked external program
 +// Set pre_exec_mode to 1 to indicate it is in pre-exec mode
 +// suffix will be "fd" for our internal bomsh_openat_file command
@@ -1242,23 +1307,43 @@ index 85d69485f..379c73db4 100644
 +	fprintf(stderr, "logfile: %s\n", g_bomsh_config.logfile);
 +	fprintf(stderr, "syscalls: %s\n", g_bomsh_config.syscalls);
 +	fprintf(stderr, "skip_checking_prog_access: %d\n", g_bomsh_config.skip_checking_prog_access);
++	fprintf(stderr, "strict_prog_path: %d\n", g_bomsh_config.strict_prog_path);
 +}
 +#endif
++
++// Create a sorted array of pointers to the basename of watched programs.
++static char **
++create_watched_program_names(char **watched_programs, int num_watched_programs)
++{
++	int i;
++	if (num_watched_programs == 0) {
++		return NULL;
++	}
++	char ** ret_watched_progs = (char **)malloc( num_watched_programs * sizeof(char *) );
++	for (i=0; i<num_watched_programs; i++) {
++		ret_watched_progs[i] = bomsh_basename(watched_programs[i]);
++	}
++	// sort the array for binary search
++	qsort(ret_watched_progs, num_watched_programs, sizeof(char *), strcmp_comparator);
++	return ret_watched_progs;
++}
 +
 +// read the configuration key/value from the current key=value line
 +static void
 +bomsh_read_value_for_keys(char *line_start, char *value_equal, char *value_newline)
 +{
 +	char *skip_checking_prog_access_str = NULL;
++	char *strict_prog_path_str = NULL;
 +	static const char *bomsh_config_keys[] = {"hook_script_file", "hook_script_cmdopt", "shell_cmd_file",
-+						"logfile", "syscalls", "skip_checking_prog_access"};
++						"logfile", "syscalls", "skip_checking_prog_access", "strict_prog_path"};
 +	char ** bomsh_config_fields[] = {
 +		&g_bomsh_config.hook_script_file,
 +		&g_bomsh_config.hook_script_cmdopt,
 +		&g_bomsh_config.shell_cmd_file,
 +		&g_bomsh_config.logfile,
 +		&g_bomsh_config.syscalls,
-+		&skip_checking_prog_access_str
++		&skip_checking_prog_access_str,
++		&strict_prog_path_str
 +	};
 +	int num_keys = sizeof(bomsh_config_keys)/sizeof(char *);
 +        const char *key; unsigned long len;
@@ -1291,6 +1376,14 @@ index 85d69485f..379c73db4 100644
 +			g_bomsh_config.skip_checking_prog_access = 0;
 +		}
 +		free(skip_checking_prog_access_str);
++	}
++	if (strict_prog_path_str) {
++		if (strcmp(strict_prog_path_str, "1") == 0) {
++			g_bomsh_config.strict_prog_path = 1;
++		} else {
++			g_bomsh_config.strict_prog_path = 0;
++		}
++		free(strict_prog_path_str);
 +	}
 +}
 +
@@ -1385,6 +1478,17 @@ index 85d69485f..379c73db4 100644
 +	if (argc <= 0) {
 +		error_msg_and_help("must have PROG [ARGS]");
 +	}
++	if (!g_bomsh_config.strict_prog_path) {
++		bomsh_watched_program_names = create_watched_program_names(bomsh_watched_programs, bomsh_num_watched_programs);
++		bomsh_num_watched_program_names = bomsh_num_watched_programs;
++		bomsh_pre_exec_program_names = create_watched_program_names(bomsh_pre_exec_programs, bomsh_num_pre_exec_programs);
++		bomsh_num_pre_exec_program_names = bomsh_num_pre_exec_programs;
++#ifdef BOMSH_PRINT_CONFIGS
++		bomsh_print_programs(bomsh_watched_program_names, bomsh_num_watched_program_names, "watched_prog_names");
++		bomsh_print_programs(bomsh_pre_exec_program_names, bomsh_num_pre_exec_program_names, "pre_exec_prog_names");
++		bomsh_print_configs();
++#endif
++	}
 +	if (bomsh_detach_on_pid_programs) {
 +		// cannot use both detach and --seccomp-bpf due to limitation
 +		bomsh_argv = bomsh_argv1;
@@ -1432,7 +1536,7 @@ index 85d69485f..379c73db4 100644
  static struct tcb *
  pid2tcb(const int pid)
  {
-@@ -3747,6 +4280,10 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3747,6 +4367,10 @@ dispatch_event(const struct tcb_wait_data *wd)
  		ATTRIBUTE_FALLTHROUGH;
  
  	case TE_SYSCALL_STOP:
@@ -1443,11 +1547,16 @@ index 85d69485f..379c73db4 100644
  		if (trace_syscall(current_tcp, &restart_sig) < 0) {
  			/*
  			 * ptrace() failed in trace_syscall().
-@@ -3825,6 +4362,20 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3825,6 +4449,25 @@ dispatch_event(const struct tcb_wait_data *wd)
  		break;
  
  	case TE_EXITED:
 +		//tprintf("yongkui exited pid: %d status: %d\n", current_tcp->pid, status);
++		// When many programs are tried for the same PID, like /usr/share/Modules/bin/gcc, /usr/local/bin/gcc, /usr/bin/gcc,
++		// multiple times of writing the same bomsh_cmd.pidXXXX file can occur, but only the last successful run
++		// of this PID reaches here (the successful exit), therefore, only one time of hook-prog is invoked.
++		// Will this be true for pre-exec mode hookup too? NO, this is not true, but the only disadvantage seems to
++		// be multiple times of writing the pre-exec-hashes files, which impacts performance but not correctness.
 +		if (!bomsh_umbrella_pid_stack || (bomsh_umbrella_pid_stack && bomsh_umbrella_pid_top >= 0)) {
 +			// Run the hook program to do analysis
 +			bomsh_hook_program(current_tcp->pid, 0, "");
@@ -1464,7 +1573,7 @@ index 85d69485f..379c73db4 100644
  		print_exited(current_tcp, current_tcp->pid, status);
  		droptcb(current_tcp);
  		return true;
-@@ -3857,6 +4408,13 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3857,6 +4500,13 @@ dispatch_event(const struct tcb_wait_data *wd)
  			}
  		}
  
@@ -1478,7 +1587,7 @@ index 85d69485f..379c73db4 100644
  		if (detach_on_execve) {
  			if (current_tcp->flags & TCB_SKIP_DETACH_ON_FIRST_EXEC) {
  				current_tcp->flags &= ~TCB_SKIP_DETACH_ON_FIRST_EXEC;
-@@ -4026,7 +4584,8 @@ int
+@@ -4026,7 +4676,8 @@ int
  main(int argc, char *argv[])
  {
  	setlocale(LC_ALL, "");
