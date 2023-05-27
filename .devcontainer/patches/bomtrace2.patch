@@ -1,8 +1,8 @@
 diff --git a/src/execve.c b/src/execve.c
-index a9224543b..cef02cedd 100644
+index a9224543b..c8ac4fa72 100644
 --- a/src/execve.c
 +++ b/src/execve.c
-@@ -14,6 +14,735 @@
+@@ -14,6 +14,736 @@
  
  #include "defs.h"
  
@@ -30,6 +30,7 @@ index a9224543b..cef02cedd 100644
 +extern int bomsh_umbrella_pid_top;
 +extern int bomsh_is_umbrella_program(char *prog);
 +extern void bomsh_hook_program(int pid, int pre_exec_mode, const char *suffix);
++extern char *bomsh_basename(char *path);
 +
 +// we only support the basic form of "cat a.patch | patch -p1" command with pipes.
 +// only one single cat-file without any option is supported for the cat command.
@@ -491,7 +492,7 @@ index a9224543b..cef02cedd 100644
 +		return 0;
 +	}
 +	if (bomsh_verbose > 3) {
-+		fprintf(stderr, "\n===/usr/bin/cat stdout: %s patch-pipe: %s argv: %s\n",
++		fprintf(stderr, "\n===cat stdout: %s patch-pipe: %s argv: %s\n",
 +				stdout_file ? stdout_file : "(null)", bomsh_patch_pipe ? bomsh_patch_pipe : "(null)", argv_str);
 +	}
 +	bomsh_log_cmd(tcp->pid, pwd_line, argv_str, stdout_file, "Record cat cmd to");
@@ -677,7 +678,7 @@ index a9224543b..cef02cedd 100644
 +        }
 +	int rc = 0;
 +	// special handling of the cat command, which pipes to patch command
-+	if (!bomsh_pipe_disabled && strcmp(path, "/usr/bin/cat") == 0) {
++	if (!bomsh_pipe_disabled && strcmp(bomsh_basename(path), "cat") == 0) {
 +		rc = bomsh_process_cat_command(tcp, pwd_line, argv_str, hook_pid);
 +		free(pwd_line);
 +		free(path);
@@ -688,10 +689,10 @@ index a9224543b..cef02cedd 100644
 +	}
 +	// special handling of the patch command
 +	char *stdin_file = NULL;
-+	if (strcmp(path, "/usr/bin/patch") == 0) {
++	if (strcmp(bomsh_basename(path), "patch") == 0) {
 +		stdin_file = bomsh_get_stdin_file(tcp);
 +		if (bomsh_verbose > 3) {
-+			fprintf(stderr, "\n===/usr/bin/patch stdin: %s cat-pipe: %s argv: %s\n",
++			fprintf(stderr, "\n===patch stdin: %s cat-pipe: %s argv: %s\n",
 +					stdin_file ? stdin_file : "(null)", bomsh_cat_pipe ? bomsh_cat_pipe : "(null)", argv_str);
 +		}
 +	}
@@ -738,7 +739,7 @@ index a9224543b..cef02cedd 100644
  static void
  printargv(struct tcb *const tcp, kernel_ulong_t addr)
  {
-@@ -96,6 +825,13 @@ printargc(struct tcb *const tcp, kernel_ulong_t addr)
+@@ -96,6 +826,13 @@ printargc(struct tcb *const tcp, kernel_ulong_t addr)
  static void
  decode_execve(struct tcb *tcp, const unsigned int index)
  {
@@ -906,10 +907,10 @@ index 6356c5831..fd85f798b 100644
  	printpath(tcp, tcp->u_arg[offset]);
  	tprint_arg_next();
 diff --git a/src/strace.c b/src/strace.c
-index 85d69485f..084cabd02 100644
+index 85d69485f..1ae763f11 100644
 --- a/src/strace.c
 +++ b/src/strace.c
-@@ -2992,6 +2992,626 @@ init(int argc, char *argv[])
+@@ -2992,6 +2992,628 @@ init(int argc, char *argv[])
  		((followfork && !output_separately) || nprocs > 1);
  }
  
@@ -1030,8 +1031,10 @@ index 85d69485f..084cabd02 100644
 +}
 +#endif
 +
++char *bomsh_basename(char *path);
++
 +// return the basename of a path, pointing to the rightmost part of the original string.
-+static char *
++char *
 +bomsh_basename(char *path)
 +{
 +	char *s = strrchr(path, '/');
@@ -1536,7 +1539,7 @@ index 85d69485f..084cabd02 100644
  static struct tcb *
  pid2tcb(const int pid)
  {
-@@ -3747,6 +4367,10 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3747,6 +4369,10 @@ dispatch_event(const struct tcb_wait_data *wd)
  		ATTRIBUTE_FALLTHROUGH;
  
  	case TE_SYSCALL_STOP:
@@ -1547,7 +1550,7 @@ index 85d69485f..084cabd02 100644
  		if (trace_syscall(current_tcp, &restart_sig) < 0) {
  			/*
  			 * ptrace() failed in trace_syscall().
-@@ -3825,6 +4449,25 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3825,6 +4451,25 @@ dispatch_event(const struct tcb_wait_data *wd)
  		break;
  
  	case TE_EXITED:
@@ -1573,7 +1576,7 @@ index 85d69485f..084cabd02 100644
  		print_exited(current_tcp, current_tcp->pid, status);
  		droptcb(current_tcp);
  		return true;
-@@ -3857,6 +4500,13 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3857,6 +4502,13 @@ dispatch_event(const struct tcb_wait_data *wd)
  			}
  		}
  
@@ -1587,7 +1590,7 @@ index 85d69485f..084cabd02 100644
  		if (detach_on_execve) {
  			if (current_tcp->flags & TCB_SKIP_DETACH_ON_FIRST_EXEC) {
  				current_tcp->flags &= ~TCB_SKIP_DETACH_ON_FIRST_EXEC;
-@@ -4026,7 +4676,8 @@ int
+@@ -4026,7 +4678,8 @@ int
  main(int argc, char *argv[])
  {
  	setlocale(LC_ALL, "");

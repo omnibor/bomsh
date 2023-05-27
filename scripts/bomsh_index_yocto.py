@@ -228,7 +228,7 @@ def unbundle_package(pkgfile, destdir=''):
     :param destdir: the destination directory to save unbundled files
     '''
     if not destdir:
-        destdir = os.path.join(g_unbundle_dir, "bomsh-extract-" + os.path.basename(pkgfile))
+        destdir = os.path.join(g_unbundle_dir, "bomsh-extract-" + os.path.basename(pkgfile) + "-dir")
     if args.skip_download_if_exist and os.path.exists(destdir) and os.listdir(destdir):
         # if user wants to skip, and destdir is not empty, then return directly
         verbose("The extract dir " + destdir + " is not empty, skip unbundling package " + pkgfile, LEVEL_2)
@@ -471,21 +471,26 @@ def read_recipe_json_file(recipe_file):
     return (name, version, downloadLocations)
 
 
-def get_all_blobs_of_recipe_files(recipe_files, first_n, start_i=0):
+def get_all_blobs_of_recipe_files(pkg_db, recipe_files, first_n, start_i=0):
     """
     Read a list of recipe files and get its name, version, downloadLocation info.
     It also downloads source packages and gets all the source blobs.
     """
-    pkg_db = {}
+    verbose("\n==== There are " + str(len(pkg_db)) + " packages/recipes initially.")
     if first_n >= 0:
         recipe_files = recipe_files[start_i : (start_i + first_n)]
     else:
         recipe_files = recipe_files[start_i : ]
     total_num = len(recipe_files)
+    verbose("We will process " + str(total_num) + " recipe files.")
     file_num = 0
     for recipe_file in recipe_files:
         file_num += 1
-        verbose("\nReading " + str(file_num) + " of " + str(total_num) + " recipes : " + recipe_file)
+        if args.skip_recipe_if_processed and recipe_file in pkg_db:
+            verbose("\n--- Skip reading " + str(file_num) + " of " + str(total_num) + " recipes : " + recipe_file)
+            continue
+        else:
+            verbose("\n--- Reading " + str(file_num) + " of " + str(total_num) + " recipes : " + recipe_file)
         name, version, downloads = read_recipe_json_file(recipe_file)
         verbose("(name, version, downloadLocations) = " + str((name, version, downloads)))
         download_stats = []
@@ -496,35 +501,52 @@ def get_all_blobs_of_recipe_files(recipe_files, first_n, start_i=0):
                 download_stats.append( (downloadLocation, g_download_stats[downloadLocation]) )
         total_blob_size = sum([blob[1] for blob in blobs])
         pkg_db[recipe_file] = { "name" : name, "version" : version, "downloadLocations" : downloads,
-                "download_stats" : download_stats, "total_blob_size" : total_blob_size, "blobs" : blobs }
+                "download_stats" : download_stats, "total_blob_size" : total_blob_size, "num_blobs": len(blobs), "blobs" : sorted(blobs) }
+    verbose("\n==== There are " + str(len(pkg_db)) + " packages/recipes after processing " + str(total_num) + " recipes.\n")
+
+
+def save_package_db(pkg_db):
+    '''
+    Save pkg_db to JSON file.
+    '''
     jsonfile = "bomsh-index"
     if args.jsonfile:
         jsonfile = args.jsonfile
     save_json_db(os.path.join(g_tmpdir, jsonfile + "-pkg-db.json"), pkg_db)
-    for pkg in pkg_db:
-        info = pkg_db[pkg]
-        info["blobs"] = [blob[0] for blob in info["blobs"]]
-    save_json_db(os.path.join(g_tmpdir, jsonfile + "-pkg-db-concise.json"), pkg_db)
-    # Create the blob_db from pkg_db
+    # Create the blob_db from pkg_db, with metadata of (name, version, file_size, file_path)
     blob_db = {}
     for pkg in pkg_db:
         info = pkg_db[pkg]
         name, version = info["name"], info["version"]
         blobs = info["blobs"]
-        for blob in blobs:
+        for blob, size, file_path in blobs:
             if blob in blob_db:
-                blob_db[blob].append( (name, version) )
+                blob_db[blob].append( (name, version, size, file_path) )
             else:
-                blob_db[blob] = [ (name, version), ]
+                blob_db[blob] = [ (name, version, size, file_path), ]
+    # remove duplicates if there is any
+    blob_db = {blob : list(set(value)) for blob, value in blob_db.items() }
     save_json_db(os.path.join(g_tmpdir, jsonfile + "-blob-db.json"), blob_db)
+    # Create a blob_db with concise info, with (name, version) only
+    for blob, info in blob_db.items():
+        blob_db[blob] = [ (name, version) for name, version, size, file_path in info ]
+    # remove duplicates if there is any
+    blob_db = {blob : list(set(value)) for blob, value in blob_db.items() }
+    save_json_db(os.path.join(g_tmpdir, jsonfile + "-blob-db-concise.json"), blob_db)
+    # Create a pkg_db with concise info, with blob_id only
+    for pkg, info in pkg_db.items():
+        info["blobs"] = sorted(set([blob[0] for blob in info["blobs"]]))
+        info["num_blobs"] = len(info["blobs"])
+    save_json_db(os.path.join(g_tmpdir, jsonfile + "-pkg-db-concise.json"), pkg_db)
     # Create a summary database
     summary_db = {}
     total_download_size, total_blob_size, total_num_blobs = 0, 0, 0
     for pkg in pkg_db:
         info = pkg_db[pkg]
         name, version, downloads = info["name"], info["version"], info["downloadLocations"]
+        # info["download_stats"] = list of (downloadLocation, g_download_stats[downloadLocation]) = (downloadLocation, [destdir, download_size])
         download_size = sum( [ stat[1][1] for stat in info["download_stats"] ] )
-        blob_size, num_blobs = info["total_blob_size"], len(info["blobs"])
+        blob_size, num_blobs = info["total_blob_size"], info["num_blobs"]
         summary_db[pkg] = { "name" : name, "version" : version, "downloadLocations" : downloads,
                 "num_blobs" : num_blobs, "download_size" : download_size, "total_blob_size" : blob_size}
         total_download_size += download_size
@@ -551,9 +573,9 @@ def rtd_parse_options():
                     version=VERSION)
     parser.add_argument('--tmpdir',
                     help = "tmp directory, which is /tmp by default")
-    parser.add_argument('--input_jsonfile',
+    parser.add_argument('-i', '--input_jsonfile',
                     help = "the input JSON file with blob indexing result")
-    parser.add_argument('-i', '--input_spdx_tgz',
+    parser.add_argument('--input_spdx_tgz',
                     help = "the input spdx.tgz file with recipe files to index blobs")
     parser.add_argument('-j', '--jsonfile',
                     help = "the output JSON file for blob indexing result")
@@ -585,6 +607,9 @@ def rtd_parse_options():
     parser.add_argument("--skip_download_if_exist",
                     action = "store_true",
                     help = "skip downloanding if local file already exists")
+    parser.add_argument("--skip_recipe_if_processed",
+                    action = "store_true",
+                    help = "skip processing a recipe if it is found to have been processed in pkg_db")
     parser.add_argument("-v", "--verbose",
                     action = "count",
                     default = 0,
@@ -635,9 +660,9 @@ def main():
         first_n = int(args.first_n_packages)
     if args.start_with_ith_package:
         start_i = int(args.start_with_ith_package)
-    blob_db = {}
+    pkg_db = {}
     if args.input_jsonfile:
-        blob_db = load_json_db(args.input_jsonfile)
+        pkg_db = load_json_db(args.input_jsonfile)
     destdir = ''
     recipe_files = []
     if args.recipe_files:
@@ -647,7 +672,8 @@ def main():
     elif args.input_spdx_tgz:
         destdir = unbundle_package(args.input_spdx_tgz)
         recipe_files = find_all_recipe_files(destdir)
-    get_all_blobs_of_recipe_files(recipe_files, first_n, start_i)
+    get_all_blobs_of_recipe_files(pkg_db, recipe_files, first_n, start_i)
+    save_package_db(pkg_db)
     if destdir and not args.keep_intermediate_files:
         shutil.rmtree(destdir)
 
