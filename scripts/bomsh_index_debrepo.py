@@ -529,7 +529,7 @@ def save_blob_db(blob_db):
         save_json_db(os.path.join(g_tmpdir, jsonfile + "-summary.json"), g_summary_db)
 
 
-def index_deb_release(blob_db, deb_release, download_dir, mirror_url='', sources_file='', first_n=-1):
+def index_deb_release(blob_db, deb_release, download_dir, mirror_url='', sources_file='', first_n=-1, start_i=0):
     '''
     Index one specific deb_release.
     :param blob_db: the dict of { blob_id => (pkg_name, version) } mappings
@@ -556,11 +556,12 @@ def index_deb_release(blob_db, deb_release, download_dir, mirror_url='', sources
     pkgs, total_size = process_repo_sources_file(sources_file)
     g_summary_db[deb_release] = { "num_pkgs" : len(pkgs), "total_size" : total_size }
     if first_n >= 0:
-        pkgs = pkgs[:first_n]
-        print("\nWe will only process the first " + str(first_n) + " packages for deb_release " + deb_release)
+        pkgs = pkgs[start_i : (start_i + first_n)]
+        print("\nWe will only process the first " + str(len(pkgs)) + " packages start_i= " + str(start_i) + " for deb_release " + deb_release)
         verbose("the first " + str(first_n) + " packages: " + str(pkgs), LEVEL_2)
     else:
-        print("\nWe will process all the " + str(len(pkgs)) + " packages for deb_release " + deb_release)
+        pkgs = pkgs[start_i : ]
+        print("\nWe will process all the " + str(len(pkgs)) + " packages start_i= " + str(start_i) + " for deb_release " + deb_release)
     if download_dir and mirror_url:
         download_all_packages_from_repo(pkgs, download_dir)
     index_all_packages(blob_db, pkgs, download_dir)
@@ -594,6 +595,8 @@ def rtd_parse_options():
                     help = "the hash type, like sha1/sha256, the default is sha1")
     parser.add_argument('-d', '--download_dir',
                     help = "the directory to download source package files")
+    parser.add_argument('--start_with_ith_package',
+                    help = "start with the i-th package or recipe")
     parser.add_argument('--first_n_packages',
                     help = "only download and index first N packages")
     parser.add_argument('--sources_file',
@@ -632,20 +635,23 @@ def main():
     # parse command line options first
     args = rtd_parse_options()
 
+    start_i = 0
     first_n = -1
     if args.first_n_packages:
         first_n = int(args.first_n_packages)
+    if args.start_with_ith_package:
+        start_i = int(args.start_with_ith_package)
     blob_db = {}
     if args.input_jsonfile:
         blob_db = load_json_db(args.input_jsonfile)
     sources_file = args.sources_file
     if sources_file:
-        index_deb_release(blob_db, args.deb_release, args.download_dir, args.mirror_url, sources_file, first_n)
+        index_deb_release(blob_db, args.deb_release, args.download_dir, args.mirror_url, sources_file, first_n, start_i)
         save_blob_db(blob_db)
         return
     deb_releases = args.deb_release.split(",")
     for deb_release in deb_releases:
-        index_deb_release(blob_db, deb_release, args.download_dir, args.mirror_url, sources_file, first_n)
+        index_deb_release(blob_db, deb_release, args.download_dir, args.mirror_url, sources_file, first_n, start_i)
     save_blob_db(blob_db)
 
 

@@ -1,6 +1,7 @@
 /usr/bin/gcc
 /usr/bin/ar
 /usr/bin/ld
+/usr/bin/ld.lld
 /usr/bin/ld.bfd
 /usr/bin/ld.gold
 /usr/bin/gold
