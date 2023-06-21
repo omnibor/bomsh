@@ -288,7 +288,7 @@ gcc -DHAVE_CONFIG_H -I. -I.. -Wsign-compare -U_FORTIFY_SOURCE -fno-stack-protect
 
 def read_shell_command(shell_cmd_file):
     """
-    Read the shell command from file and return (pwd, prog, argv_str)
+    Read the shell command from file and return (pid, pwd, prog, argv_str)
 
     :param shell_cmd_file: the file that contains the shell command
     """
@@ -313,6 +313,23 @@ def read_shell_command(shell_cmd_file):
     ret = (pid, pwd, prog, '\n'.join(lines[2:]))
     verbose("cmd_file: " + shell_cmd_file + " return tuple: " + str(ret), LEVEL_2)
     return ret
+
+
+def is_elf_file(afile):
+    """
+    Check if a file is an ELF file.
+
+    :param afile: String, name of file to be checked
+    :returns True if the file is ELF format file. Otherwise, return False.
+    """
+    cmd = "readelf -Sl " + cmd_quote(afile) + " 2>/dev/null || true"
+    if sys.version_info[0] < 3 or (sys.version_info[0] == 3 and sys.version_info[1] < 6):
+        output = subprocess.check_output(cmd, shell=True, universal_newlines=True)
+    else:
+        output = subprocess.check_output(cmd, shell=True, errors="backslashreplace", universal_newlines=True)
+    if output:
+        return True
+    return False
 
 
 ############################################################
@@ -409,9 +426,9 @@ def handle_linux_kernel_piggy_object(outfile, infiles, pwd):
     :param infiles: the list of input files
     :param pwd: the present working directory for this gcc command
     """
-    #verbose("handle_linux_kernel_piggy_object pwd: " + pwd + " outfile: " + outfile + " infiles: " + str(infiles))
     if not infiles or outfile[-7:] != "piggy.o":
         return infiles
+    verbose("handle_linux_kernel_piggy_object pwd: " + pwd + " outfile: " + outfile + " infiles: " + str(infiles))
     piggy_S_file = ''
     for afile in infiles:
         if afile[-7:] == "piggy.S":
@@ -429,6 +446,7 @@ def handle_linux_kernel_piggy_object(outfile, infiles, pwd):
                 vmlinux_bin = ".".join(tokens[:-1])
             vmlinux_bin = get_real_path(vmlinux_bin, pwd)
             break
+    verbose("piggy_S_file: " + piggy_S_file + " vmlinux_bin: " + vmlinux_bin)
     if vmlinux_bin and os.path.isfile(vmlinux_bin):
         return infiles + [vmlinux_bin,]  # add vmlinux.bin file to the list of input files
     return infiles
@@ -480,11 +498,13 @@ Leyd8dwY/ay67G1S8EmRKLeyd8dwY -goversion go1.13.8 -D _/home/gohello -importcfg /
 
 # a list of skip tokens for some shell commands
 g_cmd_skip_token_list = {
-    "/usr/bin/strip": ("-F", "--target", "-I", "--input-target", "-O", "--output-target",
+    "strip": ("-F", "--target", "-I", "--input-target", "-O", "--output-target",
                        "-K", "--keep-symbol", "-N", "--strip-symbol", "-R", "--remove-section",
                        "--keep-section", "--remove-relocations"),
-    "/usr/bin/eu-strip": ("-F", "-f", "-R", "--remove-section"),
-    "/usr/bin/dwz": ("-m", "--multifile", "-M", "--multifile-name", "-l", "--low-mem-die-limit", "-L", "--max-die-limit"),
+    "eu-strip": ("-F", "-f", "-R", "--remove-section"),
+    "dwz": ("-m", "--multifile", "-M", "--multifile-name", "-l", "--low-mem-die-limit", "-L", "--max-die-limit"),
+    "rpm": ("--macros", "--fskpath", "--certpath", "--verityalgo",),
+    "rpmsign": ("--macros", "--fskpath", "--certpath", "--verityalgo",),
 }
 
 def get_all_subfiles_in_shell_cmdline(cmdline, pwd, prog):
@@ -500,8 +520,9 @@ def get_all_subfiles_in_shell_cmdline(cmdline, pwd, prog):
     subfiles = []
     skip_token = False
     skip_token_list = []
-    if prog in g_cmd_skip_token_list:
-        skip_token_list = g_cmd_skip_token_list[prog]
+    prog_name = os.path.basename(prog)
+    if prog_name in g_cmd_skip_token_list:
+        skip_token_list = g_cmd_skip_token_list[prog_name]
     for token in tokens[1:]:
         if token in skip_token_list:
             # the next token must be skipped
@@ -549,7 +570,8 @@ def get_all_subfiles_in_gcc_cmdline(gccline, pwd, prog):
     if output_file == "/dev/null":
         return ('', [])
     output_file = get_real_path(output_file, pwd)
-    skip_token_list = set(("-MT", "-MF", "-x", "-I", "-B", "-L", "-isystem", "-iquote", "-idirafter", "-iprefix", "-isysroot", "-iwithprefix", "-iwithprefixbefore", "-imultilib", "-include"))
+    skip_token_list = set(("-MT", "-MF", "-x", "-I", "-B", "-D", "-L", "-isystem", "-iquote", "-idirafter", "-iprefix",
+        "-isysroot", "-iwithprefix", "-iwithprefixbefore", "-imultilib", "-include"))
     linker_skip_tokens = set(("-m", "-z", "-a", "-A", "-b", "-c", "-e", "-f", "-F", "-G", "-u", "-y", "-Y", "-soname", "--wrap",
                           "--architecture", "--format", "--mri-script", "--entry", "--auxiliary", "--filter", "--gpsize", "--oformat",
                           "--defsym", "--split-by-reloc", "-rpath", "-rpath-link", "--dynamic-linker", "-dynamic-linker"))
@@ -909,6 +931,23 @@ def get_rpmbuild_topdir():
     return ''
 
 
+def replace_percent_var(version_str, var_value=''):
+    """
+    Replace the %{var} part of version or release string.
+    7.11.1.16Iv1.0.0%{_xr_subversion} => 7.11.1.16Iv1.0.0var_value
+    :param version_str: version or release string in RPM spec
+    :param var_value: the variable valure to replace
+    Assume there is only one such percent variable in the string.
+    """
+    percent_loc = version_str.find("%{")
+    if percent_loc < 0:
+        return version_str
+    right_bracket_loc = version_str.find("}")
+    if right_bracket_loc < 0:
+        return version_str
+    return version_str[ : percent_loc] + var_value + version_str[(right_bracket_loc + 1) : ]
+
+
 def get_all_subfiles_in_rpmbuild_cmdline(rpmline, pwd):
     """
     Returns the input/output files of the rpmbuilld shell command line.
@@ -949,10 +988,16 @@ def get_all_subfiles_in_rpmbuild_cmdline(rpmline, pwd):
         name, version, release = read_rpm_info_from_src_rpm(spec_or_srcrpm)
     if "%{?dist}" in release:
         release = release.replace("%{?dist}", get_rpmbuild_dist())
+    # Remove percent-var from version and release string
+    version = replace_percent_var(version)
+    release = replace_percent_var(release)
     rpmbuild_topdir = found_topdir
     if not rpmbuild_topdir:
         rpmbuild_topdir = get_rpmbuild_topdir()
     rpmbuild_topdir = get_real_path(rpmbuild_topdir, pwd)
+    # One level higher than topdir to be safe?
+    #if os.path.basename(rpmbuild_topdir) == 'build':
+    #    rpmbuild_topdir = get_real_path(os.path.dirname(rpmbuild_topdir), pwd)
     if " -bs " in rpmline:
         name_pattern = name + "-*" + version + "-*" + release + "*.src.rpm"
     else:
@@ -1404,7 +1449,8 @@ def record_raw_info(outfile, infiles, pwd, argv_str, pid='', prog='', outfile_ch
                 sha256_infile_hashes = get_infile_hashes(infiles, "sha256")
             sha256_adg_doc = gitbom_create_temp_adg_doc(infiles, sha256_infile_hashes, destdir, "sha256")
             sha256_adg_hash = get_file_hash(sha256_adg_doc, "sha256", use_cache=False)
-        gitbom_embed_bomid_elf(outfile, sha1_adg_hash, sha256_adg_hash)
+        if is_elf_file(outfile):  # only support embedding ELF file
+            gitbom_embed_bomid_elf(outfile, sha1_adg_hash, sha256_adg_hash)
     if "sha1" in g_hashtypes:
         gitbom_create_adg_and_record_hash(outfile, infiles, sha1_infile_hashes, sha1_adg_doc, sha1_adg_hash, pwd, argv_str, pid, prog=prog, ignore_this_record=ignore_this_record, hash_alg="sha1")
     if "sha256" in g_hashtypes:
@@ -1652,6 +1698,12 @@ def handle_gcc_ctoexe_command(prog, pwddir, argv_str, pid, outfile, infiles):
     :param infiles: the list of input files
     returns the outfile
     '''
+    """
+    if args.no_dependent_headers:
+        # this should have been handled by earlier ld command, record for information only
+        record_raw_info(outfile, infiles, pwddir, argv_str, pid, prog=prog, ignore_this_record=True)
+        return outfile
+    """
     ldout_files = { hash_alg: get_bomsh_ldout_file(get_file_hash(outfile, hash_alg)) for hash_alg in g_hashtypes }
     for hash_alg in ldout_files:
         ldout_file = ldout_files[hash_alg]
@@ -1695,7 +1747,7 @@ def handle_gcc_ctoexe_command(prog, pwddir, argv_str, pid, outfile, infiles):
     return outfile
 
 
-def gcc_is_compile_only(argv_str):
+def gcc_is_compile_only(argv_str, outfile):
     '''
     Whether the gcc command compiles from C/C++ source files to intermediate .o/.s/.E only
     :param argv_str: the full command with all its command line options/parameters
@@ -1703,6 +1755,8 @@ def gcc_is_compile_only(argv_str):
     for option in (" -c ", " -S ", " -E "):
         if option in argv_str:
             return True
+    if " -cc1 " in argv_str and outfile[-2:] == ".o":  # clang -cc1 command
+        return True
     return False
 
 
@@ -1726,7 +1780,7 @@ def process_gcc_command(prog, pwddir, argv_str, pid):
     if not os.path.exists(outfile):
         verbose("Warning: gcc outfile does not exist: " + outfile)
         return ''
-    if gcc_is_compile_only(argv_str):  # this gcc will not invoke LD
+    if gcc_is_compile_only(argv_str, outfile):  # this gcc will not invoke LD
         infiles2 = []
         if not args.no_dependent_headers and does_source_file_exist_in_files(infiles):
             # Get the dependency list of source file, there should be one single source file for this gcc cmd
@@ -1835,6 +1889,12 @@ def process_ld_command(prog, pwddir, argv_str, pid):
         return ''
     # explicitly remove shared libraries from the list of infiles
     infiles = [afile for afile in infiles if not is_shared_library(afile)]
+    """
+    if args.no_dependent_headers:
+        # the outfile should be generated by previous gcc compile command
+        record_raw_info(outfile, infiles, pwddir, argv_str, pid, prog=prog)
+        return outfile
+    """
     first_tmp_o = get_first_tmp_o_file(infiles)
     if first_tmp_o and is_gcc_invoked_ld_cmd(argv_str):
         if not args.no_auto_embed_bom_for_compiler_linker:
@@ -1905,7 +1965,10 @@ def collect_pre_exec_file_hashes(pid, hash_alg="sha1"):
     hashes = {}
     for line in lines:
         tokens = line.split()
-        hashes[tokens[1]] = tokens[0]
+        if len(tokens) > 1:
+            hashes[tokens[1]] = tokens[0]
+        else:
+            hashes[tokens[0]] = ''
     verbose("collected pre_exec hashes: " + str(hashes), LEVEL_3)
     # remove the file after use
     os.remove(afile)
@@ -1942,6 +2005,8 @@ def process_generic_shell_command(prog, pwddir, argv_str, pid):
     Process a generic shell command like strip/eu-strip/dwz
     strip --strip-debug -o drivers/firmware/efi/libstub/x86-stub.stub.o drivers/firmware/efi/libstub/x86-stub.o
     dwz -mdebian/libssl1.1/usr/lib/debug/.dwz/x86_64-linux-gnu/libssl1.1.debug -- debian/libcrypto1.1-udeb/usr/lib/libcrypto.so.1.1 debian/libssl1.1/usr/lib/x86_64-linux-gnu/libssl.so.1.1
+    rpm --addsign|--resign [rpmsign-options] PACKAGE_FILE ..
+    rpmsign --addsign|--delsign [rpmsign-options] PACKAGE_FILE ..
     :param prog: the program binary
     :param pwddir: the present working directory for the command
     :param argv_str: the full command with all its command line options/parameters
@@ -2068,6 +2133,10 @@ def select_the_patch_file(afile, bfile):
     '''
     if afile == bfile:
         return afile
+    if afile == "/dev/null":
+        return bfile
+    if bfile == "/dev/null":
+        return afile
     if len(afile) <= len(bfile):
         if os.path.exists(afile):
             return afile
@@ -2139,7 +2208,10 @@ def process_patch_command(prog, pwddir, argv_str, pid):
             if get_file_hash(infile, hash_alg0, False) == old_hash:
                 verbose("Warning: patch gets same checksum " + old_hash + " skip recording file " + infile)
                 return ''
-            record_raw_info(infile, [infile, patch_file], pwddir, argv_str, pid, prog=prog, infile_checksums=hashes)
+            if old_hash:
+                record_raw_info(infile, [infile, patch_file], pwddir, argv_str, pid, prog=prog, infile_checksums=hashes)
+            else:  # the infile does not exist during pre-exec, which means /dev/null
+                record_raw_info(infile, [patch_file, ], pwddir, argv_str, pid, prog=prog, infile_checksums=hashes)
         return ''
     if input_patch_file:
         patch_file = get_real_path(input_patch_file, pwddir)
@@ -2178,7 +2250,10 @@ def process_patch_command(prog, pwddir, argv_str, pid):
             if get_file_hash(infile, hash_alg0, False) == old_hash:
                 verbose("Warning: patch gets same checksum " + old_hash + " skip recording file " + infile)
                 continue
-            record_raw_info(infile, [infile, patch_file], pwddir, argv_str, pid, prog=prog, infile_checksums=hashes)
+            if old_hash:
+                record_raw_info(infile, [infile, patch_file], pwddir, argv_str, pid, prog=prog, infile_checksums=hashes)
+            else:  # the infile does not exist during pre-exec, which means /dev/null
+                record_raw_info(infile, [patch_file, ], pwddir, argv_str, pid, prog=prog, infile_checksums=hashes)
     return ''
 
 
@@ -2356,10 +2431,13 @@ def create_pkg_symlink(outfile, hash_alg):
     symlink = os.path.join(g_bomdir, "symlinks", get_file_hash(outfile, hash_alg))
     if os.path.exists(symlink):
         # create additional symlink for convenience
-        adg_link = outfile + ".omnibor_adg." + hash_alg
+        cmd = ''
+        if not args.create_no_symlink_for_pkg_outfile:
+            adg_link = outfile + ".omnibor_adg." + hash_alg
+            cmd = "ln -sfr " + symlink + " " + adg_link + " ; "
         pkgs_dir = os.path.join(g_bomdir, "pkgs")
         adg_link2 = os.path.join(pkgs_dir, os.path.basename(outfile) + ".omnibor_adg." + hash_alg)
-        cmd = "ln -sfr " + symlink + " " + adg_link + " ; mkdir -p " + pkgs_dir + " ; ln -sfr " + symlink + " " + adg_link2
+        cmd += "mkdir -p " + pkgs_dir + " ; ln -sfr " + symlink + " " + adg_link2
         os.system(cmd)
 
 
@@ -2445,7 +2523,8 @@ def process_shell_command(prog, pwd_str, argv_str, pid_str):
         outfile = process_bzImage_build_command(prog, pwddir, argv_str)
     elif name == "sepdebugcrcfix": # prog == "/usr/bin/sepdebugcrcfix" or prog == "/usr/lib/rpm/sepdebugcrcfix":
         outfile = process_sepdebugcrcfix_command(prog, pwddir, argv_str, pid)
-    elif name in ("strip", "dwz", "eu-strip"):
+    elif name in ("strip", "dwz", "eu-strip", "rpmsign"):
+    #    or (name == "rpm" and (" --addsign " in argv_str or " --delsign " in argv_str)):
     #elif prog in g_strip_progs or prog == "/usr/bin/dwz":
         outfile = process_generic_shell_command(prog, pwddir, argv_str, pid)
     elif name in g_samefile_converter_names:
@@ -2474,6 +2553,8 @@ def process_shell_command(prog, pwd_str, argv_str, pid_str):
         outfile = process_jar_command(prog, pwddir, argv_str)
     elif is_golang_prog(prog):
         outfile = process_golang_command(prog, pwddir, argv_str)
+    else:
+        verbose("Unsupported shell command: " + argv_str)
     # try to save the githash_cache file
     if not args.no_githash_cache_file and g_githash_cache:
         if len(g_githash_cache) > 1 and len(g_githash_cache) > g_githash_cache_initial_size:
@@ -2714,6 +2795,9 @@ def rtd_parse_options():
     parser.add_argument("--create_no_adg_for_pkgs",
                     action = "store_true",
                     help = "not create ADG docs for .deb/.rpm package")
+    parser.add_argument("--create_no_symlink_for_pkg_outfile",
+                    action = "store_true",
+                    help = "not create symlink to ADG doc for .deb/.rpm package outfile")
     parser.add_argument("-v", "--verbose",
                     action = "count",
                     default = 0,
@@ -2784,12 +2868,13 @@ def main():
     if args.pre_exec:
         # Fewer number of programs to watch in pre_exec mode
         progs_to_watch = g_samefile_converters + g_strip_progs + ["/usr/bin/ar", "/usr/bin/objcopy", "/usr/bin/dwz", "/usr/bin/patch",
-                "/usr/bin/sepdebugcrcfix", "/usr/lib/rpm/sepdebugcrcfix", "scripts/sign-file", "bomsh_openat_file"]
+                "/usr/bin/sepdebugcrcfix", "/usr/lib/rpm/sepdebugcrcfix", "/usr/bin/rpmsign", "scripts/sign-file", "bomsh_openat_file"]
         if args.watched_pre_exec_programs:
             progs_to_watch.extend(args.watched_pre_exec_programs.split(","))
     else:
         progs_to_watch = g_cc_compilers + g_cc_linkers + g_samefile_converters + g_strip_progs + ["/usr/bin/ar", "/usr/bin/objcopy", "arch/x86/boot/tools/build", "/usr/bin/patch",
-                     "/usr/bin/rustc", "/usr/bin/dwz", "/usr/bin/sepdebugcrcfix", "/usr/lib/rpm/sepdebugcrcfix", "scripts/sign-file", "bomsh_openat_file", "/usr/bin/javac", "/usr/bin/jar"]
+                     "/usr/bin/rustc", "/usr/bin/dwz", "/usr/bin/sepdebugcrcfix", "/usr/lib/rpm/sepdebugcrcfix",
+                     "/usr/bin/rpmsign", "scripts/sign-file", "bomsh_openat_file", "/usr/bin/javac", "/usr/bin/jar"]
         if not args.create_no_adg_for_pkgs:
             progs_to_watch.extend( ("/usr/bin/dpkg-deb", "/usr/bin/rpmbuild") )
         if args.watched_programs:

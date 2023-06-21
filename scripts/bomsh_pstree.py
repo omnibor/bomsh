@@ -43,6 +43,8 @@ g_indent_per_level = 4
 g_pid_progs = {}
 g_pid_argvs = {}
 g_clone_fork_syscall_seen = False
+# the {pid => list of PID@LINENO} mappings
+g_pid_lineno = {}
 
 
 #
@@ -143,7 +145,7 @@ def process_strace_logfile_line(line):
     returns (pid, child_pid, prog, argv)
     """
     global g_clone_fork_syscall_seen
-    child_pid = 0
+    child_pid = ''
     tokens = line.split()
     pid = tokens[0]
     token1 = tokens[1]
@@ -152,7 +154,7 @@ def process_strace_logfile_line(line):
         prog = token1[8:-2]
         if args.use_command_as_key:
             argv = get_argv_from_execve_line(line)
-        return (pid, 0, prog, argv)
+        return (pid, '', prog, argv)
     elif token1.startswith('clone') or (token1 == "<..." and tokens[2] == "clone"):  # clone call
         if tokens[-2] == "=":
             child_pid = tokens[-1]
@@ -170,6 +172,78 @@ def process_strace_logfile_line(line):
     return (pid, child_pid, '', argv)
 
 
+def get_latest_pid(d_pid, pid):
+    """
+    Get the latest PID@LINENO from d_pid dict.
+
+    :param d_pid: the dict to search
+    :param pid: the PID, which is the key of the dict
+    returns the latest PID@LINENO from d_pid dict. If not in d_pid, returns empty string.
+    """
+    if pid not in d_pid:
+        return ''
+    return d_pid[pid][-1]
+
+
+def get_closest_pid(d_pid, pid, lineno):
+    """
+    Get the closest PID@LINENO from d_pid dict.
+
+    :param d_pid: the dict to search
+    :param pid: the PID, which is the key of the dict
+    :param lineno: the line number in the strace log file
+    returns the matched PID@LINE, otherwise, return emptry string
+    """
+    closest_pid = ''
+    if pid not in d_pid:
+        return closest_pid
+    pid_values = d_pid[pid]
+    for value in pid_values:
+        orig_pid, line = value.split("@")
+        diff = int(lineno) - int(line)
+        if diff < 0:  # this pid_line must be the next wrap-around PID already.
+            # the previous pid_line must be the closest
+            return closest_pid
+        closest_pid = value
+    return closest_pid
+
+
+def try_add_pid_to_pid_lineno_list(d_pid, pid, lineno):
+    """
+    Try to add a new pid seen on a new line to the PID list.
+    The first line to see this PID is appended as PID@LINENO, and added to the list.
+
+    :param d_pid: the dict to update
+    :param pid: the PID, which is the key of the dict
+    :param lineno: the line number in the strace log file
+    returns the latest PID@LINENO, otherwise, return the new added PID@LINENO value.
+    """
+    if not pid or pid[0] == '?':
+        return pid
+    pid_value = pid + "@" + str(lineno)
+    if pid not in d_pid:  # must be the first time to see this PID
+        d_pid[pid] = [pid_value, ]
+        return pid_value
+    # this PID has been seen, must be the last pid_line added.
+    return get_latest_pid(d_pid, pid)
+
+
+def add_pid_to_pid_lineno_list(d_pid, pid, lineno):
+    """
+    Add a new pid_value to the PID list.
+
+    :param d_pid: the dict to update
+    :param pid: the original PID, which is the key of the dict
+    :param pid_value: the PID value to add to the list, which is usually PID@LINENO format
+    """
+    pid_value = pid + "@" + str(lineno)
+    if pid in d_pid:
+        d_pid[pid].append(pid_value)
+    else:
+        d_pid[pid] = [pid_value, ]
+    return pid_value
+
+
 def read_strace_logfile(strace_logfile):
     """
     Read and process the recorded strace info from strace logfile
@@ -180,27 +254,40 @@ def read_strace_logfile(strace_logfile):
     """
     verbose("==== Reading and processing strace logfile: " + strace_logfile, LEVEL_1)
     pid_parents = {}
+    lineno = 0
     with open(strace_logfile, 'r') as f:
         for line in f:
+            lineno += 1
             if " = -1 ENO" in line or not (' execve("' in line or ' clone' in line or
                     ' vfork' in line or (args.sig_chld and " --- SIGCHLD " in line)):
                 continue
             pid, child_pid, prog, argv = process_strace_logfile_line(line)
-            if child_pid:
-                if child_pid in pid_parents and pid_parents[child_pid] and pid_parents[child_pid] != pid:
-                    print("Warning! this child PID " + child_pid + " already has a different old parent " + pid_parents[child_pid] + " and a new parent " + pid)
-                    if int(pid) < int(child_pid):
-                        print(" Info: this child PID " + child_pid + " will change from the old parent " + pid_parents[child_pid] + " to the new parent " + pid)
-                    else:
-                        print(" Info: this child PID " + child_pid + " will NOT change from the old parent " + pid_parents[child_pid] + " to the new parent " + pid)
-                if int(pid) < int(child_pid) or child_pid not in pid_parents:
-                    pid_parents[child_pid] = pid
-            if pid not in pid_parents:
-                pid_parents[pid] = 0
+            #print(line)
+            #print("line " + str(lineno) + " (pid, child_pid, prog, argv) = " + str((pid, child_pid, prog, argv)))
+            if args.not_use_pid_at_line:
+                parent_pid_line = pid
+                child_pid_line = child_pid
+            else:
+                # always try to add the parent and child PID to g_pid_lineno dict
+                # this makes sure that a PID is recorded at the first line it is seen
+                parent_pid_line = try_add_pid_to_pid_lineno_list(g_pid_lineno, pid, lineno)
+                child_pid_line = try_add_pid_to_pid_lineno_list(g_pid_lineno, child_pid, lineno)
+            if child_pid_line and child_pid_line[0] != '?':
+                if child_pid_line in pid_parents and pid_parents[child_pid_line] and pid_parents[child_pid_line] != parent_pid_line:
+                    verbose("Info at line " + str(lineno) + " this child PID " + child_pid +
+                            " already has a different old parent " + pid_parents[child_pid_line] +
+                            " and now a new parent " + parent_pid_line, LEVEL_3)
+                    # this must be a new PID@LINE, which is due to PID wrap-around or recycling.
+                    child_pid_line = add_pid_to_pid_lineno_list(g_pid_lineno, child_pid, lineno)
+                if child_pid_line not in pid_parents or not pid_parents[child_pid_line]:
+                    pid_parents[child_pid_line] = parent_pid_line
+            if parent_pid_line not in pid_parents:
+                # These are top-level PIDs, or later found to be child PIDs (then whose parent PID is updated later).
+                pid_parents[parent_pid_line] = 0
             if prog:
-                g_pid_progs[pid] = prog
+                g_pid_progs[parent_pid_line] = prog
             if argv:
-                g_pid_argvs[pid] = argv
+                g_pid_argvs[parent_pid_line] = argv
     if not g_clone_fork_syscall_seen:
         verbose("Warning: no clone/fork syscall in the strace logfile, your pstree may be inaccurate: some PIDs may not find its parent PID", LEVEL_0)
     verbose("There are " + str(len(pid_parents)) + " PIDs totally", LEVEL_1)
@@ -223,12 +310,21 @@ def indent_strace_logfile(strace_logfile, pid_depth, output_file=''):
         outf = open(output_file, 'w')
     else:
         verbose("Below is the indented strace lines:\n", LEVEL_0)
+    lineno = 0
     with open(strace_logfile, 'r') as f:
         for line in f:
+            lineno += 1
             if not args.indent_all_strace_lines and (" = -1 ENO" in line or " execve" not in line):
                 continue
             pid = get_pid_from_strace_logfile_line(line)
-            depth = pid_depth[pid]
+            if args.not_use_pid_at_line:
+                pid_line = pid
+            else:  # need to convert to closest pid_line
+                pid_line = get_closest_pid(g_pid_lineno, pid, lineno)
+            if pid_line in pid_depth:
+                depth = pid_depth[pid_line]
+            else:  # can only assume this is a topmost PID
+                depth = 0
             if outf:
                 outf.write(depth * g_indent_per_level * ' ' + line)
             else:
@@ -339,6 +435,9 @@ def rtd_parse_options():
     parser.add_argument("--sig_chld",
                     action = "store_true",
                     help = "handle SIGCHLD lines in strace logfile")
+    parser.add_argument("-n", "--not_use_pid_at_line",
+                    action = "store_true",
+                    help = "do not use pid@line as key, which will not support PID wrap_around/recycling")
     parser.add_argument("-u", "--use_command_as_key",
                     action = "store_true",
                     help = "use command instead of program-binary as key for pstree")
@@ -384,6 +483,7 @@ def main():
         save_json_db(os.path.join(output_dir, "bomsh_pid_programs.json"), g_pid_progs)
         save_json_db(os.path.join(output_dir, "bomsh_pid_commands.json"), g_pid_argvs)
         save_json_db(os.path.join(output_dir, "bomsh_pid_parents.json"), pid_parents)
+        save_json_db(os.path.join(output_dir, "bomsh_pid_lineno.json"), g_pid_lineno)
         save_json_db(os.path.join(output_dir, "bomsh_pid_children.json"), pid_children)
         save_json_db(os.path.join(output_dir, "bomsh_pid_depth.json"), pid_depth)
         save_json_db(os.path.join(output_dir, "bomsh_pid_pstree.json"), pid_pstree)
@@ -394,6 +494,7 @@ def main():
     verbose("pid_programs:\n" + json.dumps(g_pid_progs, indent=4, sort_keys=True), LEVEL_2)
     verbose("pid_commands:\n" + json.dumps(g_pid_argvs, indent=4, sort_keys=True), LEVEL_2)
     verbose("pid_parents:\n" + json.dumps(pid_parents, indent=4, sort_keys=True), LEVEL_2)
+    verbose("pid_lineno:\n" + json.dumps(g_pid_lineno, indent=4, sort_keys=True), LEVEL_2)
     verbose("pid_children:\n" + json.dumps(pid_children, indent=4, sort_keys=True), LEVEL_2)
     verbose("pid_depth:\n" + json.dumps(pid_depth, indent=4, sort_keys=True), LEVEL_2)
     verbose("pid_pstree:\n" + json.dumps(pid_pstree, indent=4, sort_keys=True), LEVEL_2)
