@@ -428,7 +428,7 @@ def create_gitbom_node_of_checksum_line(afile):
     '''
     content = read_text_file(afile)
     lines = content.strip().splitlines()
-    if lines and lines[0].startswith("gitoid:blob:sha"):
+    if lines and (lines[0].startswith("gitoid:blob:sha") or lines[0].startswith("gitoid blob sha")):
         return lines[1:]
     return lines
 
@@ -488,6 +488,8 @@ def get_all_gitbom_doc_files_in_dir(topdir, is_topdir=True):
         cmd = 'find ' + topdir_abspath + ' -name "' + hexchar * hexchar_num + '" -path "*.omnibor/objects/[0-9a-f][0-9a-f]/*" -type f || true'
     else:
         cmd = 'find ' + topdir_abspath + ' -name "' + hexchar * hexchar_num + '" -path "*/objects/[0-9a-f][0-9a-f]/*" -type f || true'
+    # filter out .git/ directory which contains files with similar names.
+    cmd = 'find ' + topdir_abspath + ' -name "' + hexchar * hexchar_num + '" -path "*/[0-9a-f][0-9a-f]/*" -type f | grep -v "\/\.git\/" || true'
     verbose(cmd, LEVEL_3)
     output = get_shell_cmd_output(cmd)
     ret = {}

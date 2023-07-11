@@ -200,6 +200,37 @@ def find_all_regular_files(builddir):
     return files
 
 
+def find_all_package_files_in_dir(builddir):
+    """
+    Find all package files in the build dir, excluding symbolic link files.
+    Only RPM and DEB files are supported.
+
+    :param builddir: String, build dir of the workspace
+    :returns a list that contains all the package file names.
+    """
+    #builddir = os.path.abspath(builddir)
+    findcmd = "find " + cmd_quote(builddir) + ' -type f -name "*.rpm" -print || true '
+    output = subprocess.check_output(findcmd, shell=True, universal_newlines=True)
+    files = output.splitlines()
+    findcmd = "find " + cmd_quote(builddir) + ' -type f -name "*.deb" -print || true '
+    output = subprocess.check_output(findcmd, shell=True, universal_newlines=True)
+    files.extend(output.splitlines())
+    return files
+
+
+def find_all_package_files(builddirs):
+    """
+    Find all package files in a list of build dir, excluding symbolic link files.
+
+    :param builddirs: a list of build dir to find package files.
+    :returns a list that contains all the package file names.
+    """
+    files = []
+    for builddir in builddirs:
+        files.extend(find_all_package_files_in_dir(builddir))
+    return files
+
+
 ############################################################
 #### Start of gitbom routines ####
 ############################################################
@@ -635,7 +666,7 @@ def read_raw_logfile(raw_logfile):
         verbose("Write new lseek_lines " + lseek_lines_str + " to file " + args.lseek_lines_file)
 
 
-def save_gitbom_dbs():
+def save_gitbom_dbs(bomsh_pkgs_raw_logfile):
     '''
     Save all OmniBOR databases to JSON file, and print summary.
     '''
@@ -648,7 +679,12 @@ def save_gitbom_dbs():
         treedb_jsonfile = os.path.join(g_bomsh_bomdir, "bomsh_omnibor_treedb")
         os.system("cp " + g_jsonfile + " " + treedb_jsonfile)
         raw_logfile = os.path.join(g_bomsh_bomdir, "bomsh_hook_raw_logfile")
-        os.system("cp " + g_raw_logfile + " " + raw_logfile)
+        if bomsh_pkgs_raw_logfile and os.path.getsize(bomsh_pkgs_raw_logfile) > 0:
+            os.system("cat " + g_raw_logfile + " " + bomsh_pkgs_raw_logfile + " > "  + raw_logfile)
+        else:
+            os.system("cp " + g_raw_logfile + " " + raw_logfile)
+    if bomsh_pkgs_raw_logfile:
+        os.remove(bomsh_pkgs_raw_logfile)
     verbose("pre_exec DB:" + json.dumps(g_pre_exec_db, indent=4, sort_keys=True), LEVEL_3)
     #print (json.dumps(db, indent=4, sort_keys=True))
     verbose("Number of checksums in GITBOM DOCDB: " + str(len(g_bomdb)), LEVEL_0)
@@ -676,35 +712,48 @@ def unbundle_package(pkgfile, destdir=''):
     return destdir
 
 
-def process_package_file(pkgfile):
+def process_package_file(pkgfile, f_raw_logfile):
     '''
     Process a single package file. Unbundle the package, create the outfile/infiles record, and update OmniBOR repo.
 
     :param pkgfile: the RPM/DEB package file to process
+    :param f_raw_logfile: the raw_logfile file object to write the raw record lines for package
     '''
     destdir = unbundle_package(pkgfile)
     if not destdir:
         return
     afiles = find_all_regular_files(destdir)
     record = {}
-    record['outfile'] = (get_git_file_hash(pkgfile), pkgfile)
+    lines = []
+    ahash = get_git_file_hash(pkgfile)
+    record['outfile'] = (ahash, pkgfile)
+    lines.append("outfile: " + ahash + " path: " + pkgfile)
     infiles = []
     for afile in afiles:
-        infiles.append( (get_git_file_hash(afile), afile, None) )
+        ahash = get_git_file_hash(afile)
+        infiles.append( (ahash, afile, None) )
+        lines.append("infile: " + ahash + " path: " + afile)
     record['infiles'] = infiles
     record['build_cmd'] = "unbundle package"
+    lines.append("build_cmd: unbundle package")
     update_hash_tree_db_and_gitbom(g_treedb, record)
     shutil.rmtree(destdir)
+    raw_lines = '\n' + '\n'.join(lines) + '\n\n'
+    f_raw_logfile.write(raw_lines)
 
 
 def process_package_files(pkgfiles):
     '''
     Process a list of package files.
     '''
+    raw_logfile = os.path.join(g_tmpdir, "bomsh_pkgs_raw_logfile")
+    f_raw_logfile = open(raw_logfile, 'w')
     for pkgfile in pkgfiles:
         if pkgfile[0] != "/":
             pkgfile = os.path.abspath(pkgfile)
-        process_package_file(pkgfile)
+        process_package_file(pkgfile, f_raw_logfile)
+    f_raw_logfile.close()
+    return raw_logfile
 
 ############################################################
 #### End of shell command read/parse routines ####
@@ -795,6 +844,10 @@ def rtd_parse_options():
                     help = "the generated OmniBOR artifact tree JSON file")
     parser.add_argument('-p', '--package_files',
                     help = "an extra comma-separated list of RPM/DEB package files to create OmniBOR docs")
+    parser.add_argument('--package_list_file',
+                    help = "a text file that contains a list of RPM/DEB package files to create OmniBOR docs")
+    parser.add_argument('--package_dir',
+                    help = "an extra comma-separated list of directories which contain RPM/DEB package files to create OmniBOR docs")
     parser.add_argument('--hashtype',
                     help = "the hash type, like sha1/sha256, the default is sha1")
     parser.add_argument('--dependency_criteria',
@@ -868,11 +921,19 @@ def main():
     args = rtd_parse_options()
 
     read_raw_logfile(g_raw_logfile)
+    package_files = []
+    if args.package_dir:
+        package_dirs = args.package_dir.split(",")
+        package_files = find_all_package_files(package_dirs)
+    if args.package_list_file:
+        package_files.extend(read_text_file(args.package_list_file).splitlines())
     if args.package_files:
-        package_files = args.package_files.split(",")
-        process_package_files(package_files)
+        package_files.extend(args.package_files.split(","))
+    bomsh_pkgs_raw_logfile = ''
+    if package_files:
+        bomsh_pkgs_raw_logfile = process_package_files(package_files)
     # Finally save the generated databases
-    save_gitbom_dbs()
+    save_gitbom_dbs(bomsh_pkgs_raw_logfile)
 
 
 if __name__ == '__main__':

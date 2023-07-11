@@ -1792,7 +1792,10 @@ def process_gcc_command(prog, pwddir, argv_str, pid):
     elif does_source_file_exist_in_files(infiles):  # compile source to exe/.so directly
         return handle_gcc_ctoexe_command(prog, pwddir, argv_str, pid, outfile, infiles)
     else:  # this gcc only invokes LD to link *.o files, and is redundant, so record it for information only
-        record_raw_info(outfile, infiles, pwddir, argv_str, pid, prog=prog, ignore_this_record=True)
+        ignore = True
+        if "clang" in os.path.basename(prog):  # clang seems to not invoke LD?
+            ignore = False
+        record_raw_info(outfile, infiles, pwddir, argv_str, pid, prog=prog, ignore_this_record=ignore)
     return outfile
 
 
