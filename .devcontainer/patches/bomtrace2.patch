@@ -907,10 +907,10 @@ index 6356c5831..fd85f798b 100644
  	printpath(tcp, tcp->u_arg[offset]);
  	tprint_arg_next();
 diff --git a/src/strace.c b/src/strace.c
-index 85d69485f..1ae763f11 100644
+index 620a24929..ab32e67b5 100644
 --- a/src/strace.c
 +++ b/src/strace.c
-@@ -2992,6 +2992,628 @@ init(int argc, char *argv[])
+@@ -3008,6 +3008,657 @@ init(int argc, char *argv[])
  		((followfork && !output_separately) || nprocs > 1);
  }
  
@@ -1053,6 +1053,31 @@ index 85d69485f..1ae763f11 100644
 +	//return binary_search_program(prog_list, prog, 0, num_progs - 1) != -1;
 +}
 +
++// special programs that are usually named with some prefix
++static const char *bomsh_special_progs[] = {"gcc", "cc", "g++", "clang", "clang++", "strip", "objcopy", "ld", "ld.gold", "ld.bfd", "ar", "ranlib"} ;
++static const char *bomsh_special_pre_exec_progs[] = {"strip", "objcopy", "ranlib", "ar"} ;
++
++// check if a path ends with a specific suffix, progs array must be sorted
++static int bomsh_path_endswith(const char *path, const char **progs, int num_progs)
++{
++	char *string = strrchr(path, '-');
++	if (!string) {
++		return 0;
++	}
++	return bomsh_is_program_inlist(string + 1, (char **)progs, num_progs);
++}
++
++// on some platforms, strip/objcopy/ranlib tool is named with some prefix,
++// like x86_64-xr-linux-clang on Yocto,
++// or /usr/bin/x86_64-mageia-linux-gnu-gcc on Mageia.
++// Try to cover them as special watched program.
++static int
++bomsh_is_special_watched_pre_exec_program(const char *path)
++{
++	return bomsh_path_endswith(path, bomsh_special_pre_exec_progs,
++			sizeof(bomsh_special_pre_exec_progs)/sizeof(*bomsh_special_pre_exec_progs));
++}
++
 +// check if a program is in the pre-exec mode program list.
 +int bomsh_is_pre_exec_program(char *prog)
 +{
@@ -1063,7 +1088,8 @@ index 85d69485f..1ae763f11 100644
 +		return bomsh_is_program_inlist(prog, bomsh_pre_exec_programs, bomsh_num_pre_exec_programs);
 +	} else {
 +		char *name = bomsh_basename(prog);
-+		return bomsh_is_program_inlist(name, bomsh_pre_exec_program_names, bomsh_num_pre_exec_program_names);
++		return bomsh_is_program_inlist(name, bomsh_pre_exec_program_names, bomsh_num_pre_exec_program_names)
++			|| bomsh_is_special_watched_pre_exec_program(prog);
 +	}
 +}
 +
@@ -1075,13 +1101,13 @@ index 85d69485f..1ae763f11 100644
 +static int
 +bomsh_is_special_watched_program(const char *path)
 +{
-+	int len = strlen(path);
++	/*int len = strlen(path);
 +	if (len < 4) return 0;
 +	if (path[len - 3] == '/' && path[len - 2] == 'l' && path[len - 1] == 'd') return 1;
 +	if (strcmp(path + len - 3, "-cc") == 0 || strcmp(path + len - 3, "/cc") == 0) return 1;
-+	if (strcmp(path + len - 4, "-gcc") == 0 || strcmp(path + len - 4, "/gcc") == 0) return 1;
++	if (strcmp(path + len - 4, "-gcc") == 0 || strcmp(path + len - 4, "/gcc") == 0) return 1;*/
 +	if (strncmp(bomsh_basename((char *)path), "clang", 5) == 0) return 1;
-+	return 0;
++	return bomsh_path_endswith(path, bomsh_special_progs, sizeof(bomsh_special_progs)/sizeof(*bomsh_special_progs));
 +}
 +
 +// check if a program is in the watched list.
@@ -1469,6 +1495,9 @@ index 85d69485f..1ae763f11 100644
 +		case 'w':
 +			// read the list of programs from the file
 +			bomsh_watched_programs = bomsh_read_watched_programs(optarg);
++			// sort the bomsh_special_progs array for binary search
++			qsort(bomsh_special_progs, sizeof(bomsh_special_progs)/sizeof(*bomsh_special_progs), sizeof(char *), strcmp_comparator);
++			qsort(bomsh_special_pre_exec_progs, sizeof(bomsh_special_pre_exec_progs)/sizeof(*bomsh_special_pre_exec_progs), sizeof(char *), strcmp_comparator);
 +			break;
 +		default:
 +			error_msg_and_help(NULL);
@@ -1539,7 +1568,7 @@ index 85d69485f..1ae763f11 100644
  static struct tcb *
  pid2tcb(const int pid)
  {
-@@ -3747,6 +4369,10 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3763,6 +4414,10 @@ dispatch_event(const struct tcb_wait_data *wd)
  		ATTRIBUTE_FALLTHROUGH;
  
  	case TE_SYSCALL_STOP:
@@ -1550,7 +1579,7 @@ index 85d69485f..1ae763f11 100644
  		if (trace_syscall(current_tcp, &restart_sig) < 0) {
  			/*
  			 * ptrace() failed in trace_syscall().
-@@ -3825,6 +4451,25 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3841,6 +4496,25 @@ dispatch_event(const struct tcb_wait_data *wd)
  		break;
  
  	case TE_EXITED:
@@ -1576,7 +1605,7 @@ index 85d69485f..1ae763f11 100644
  		print_exited(current_tcp, current_tcp->pid, status);
  		droptcb(current_tcp);
  		return true;
-@@ -3857,6 +4502,13 @@ dispatch_event(const struct tcb_wait_data *wd)
+@@ -3873,6 +4547,13 @@ dispatch_event(const struct tcb_wait_data *wd)
  			}
  		}
  
@@ -1590,7 +1619,7 @@ index 85d69485f..1ae763f11 100644
  		if (detach_on_execve) {
  			if (current_tcp->flags & TCB_SKIP_DETACH_ON_FIRST_EXEC) {
  				current_tcp->flags &= ~TCB_SKIP_DETACH_ON_FIRST_EXEC;
-@@ -4026,7 +4678,8 @@ int
+@@ -4042,7 +4723,8 @@ int
  main(int argc, char *argv[])
  {
  	setlocale(LC_ALL, "");
@@ -1601,7 +1630,7 @@ index 85d69485f..1ae763f11 100644
  	exit_code = !nprocs;
  
 diff --git a/src/syscall.c b/src/syscall.c
-index c636ba37c..1a9e77f50 100644
+index def95476f..61c4f3862 100644
 --- a/src/syscall.c
 +++ b/src/syscall.c
 @@ -788,6 +788,19 @@ print_erestart(const char *err_short, const char *err_long)
@@ -1624,7 +1653,7 @@ index c636ba37c..1a9e77f50 100644
  int
  syscall_exiting_trace(struct tcb *tcp, struct timespec *ts, int res)
  {
-@@ -978,6 +991,10 @@ syscall_exiting_trace(struct tcb *tcp, struct timespec *ts, int res)
+@@ -981,6 +994,10 @@ syscall_exiting_trace(struct tcb *tcp, struct timespec *ts, int res)
  				if ((current_klongsize < sizeof(tcp->u_rval)) ||
  				    ((kernel_ulong_t) tcp->u_rval <= INT_MAX)) {
  					printfd(tcp, tcp->u_rval);

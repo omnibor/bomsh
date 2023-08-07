@@ -343,15 +343,29 @@ def is_special_cc_compiler(prog):
     /sw/packages/gcc/c4.7.0-p5/x86_64-linux/bin/gcc
     /auto/binos-tools/llvm11/llvm-11.0-p22/bin/clang-11
     '''
-    return prog[-3:] in ('/cc', '-cc') or prog[-4:] in ('/gcc', '-gcc') or os.path.basename(prog).startswith("clang")
+    name = os.path.basename(prog)
+    return prog[-3:] in ('/cc', '-cc') or prog[-4:] in ('/gcc', '-gcc', '-g++') or name.startswith("clang") or endswith_alist(prog, ("clang", "clang++"))
 
 
-def is_special_watched_program(prog):
+def endswith_alist(name, alist):
+    for aname in alist:
+        if name.endswith('-' + aname):
+            return True
+    return False
+
+
+def is_special_watched_program(prog, prog_names_to_watch):
     '''
     Check if it is gcc/cc or ld installed at non-standard location.
     like /usr/lib64/gcc/x86_64-suse-linux/7/../../../../x86_64-suse-linux/bin/ld on OpenSUSE
+    like build/_tmp-lnt/work/x86_64-linux/binutils-cross-x86_64/2.34-r0/recipe-sysroot-native/usr/bin/x86_64-xr-linux/x86_64-xr-linux-ld.gold in Yocto build
     '''
-    return prog[-3:] in ('/ld', '/cc', '-cc') or prog[-4:] in ('/gcc', '-gcc') or os.path.basename(prog).startswith("clang")
+    name = os.path.basename(prog)
+    if args.pre_exec:
+        return endswith_alist(name, prog_names_to_watch)
+    else:
+        return name.startswith("clang") or endswith_alist(name, prog_names_to_watch)
+    #return prog[-3:] in ('/ld', '/cc', '-cc') or prog[-4:] in ('/gcc', '-gcc') or name.startswith("clang") or endswith_alist(name, ("clang", "clang++", "strip", "objcopy", "ld", "ld.gold", "ranlib"))
 
 
 def is_cc_compiler(prog):
@@ -366,7 +380,7 @@ def is_cc_linker(prog):
     """
     Whether a program (absolute path) is C linker.
     """
-    return os.path.basename(prog) in g_cc_linker_names
+    return os.path.basename(prog) in g_cc_linker_names or endswith_alist(prog, ("ld", "ld.gold"))
     #return prog[-3:] == '/ld' or prog in g_cc_linkers
 
 
@@ -405,6 +419,29 @@ def get_real_path(afile, pwd):
 
 
 '''
+This is for OpenWRT kernel build, and the below should be the piggy_gzip_cmd_file content:
+echo 'cmd_arch/arm/boot/compressed/piggy.gzip := (cat arch/arm/boot/compressed/../Image | gzip -n -f -9 > arch/arm/boot/compressed/piggy.gzip) || (rm -f arch/arm/boot/compressed/piggy.gzip ; false)' > arch/arm/boot/compressed/.piggy.gzip.cmd"
+'''
+def handle_piggy_gzip(piggy_gzip_file, pwd):
+    """
+    Get the real vmlinux_bin from piggy_gzip_cmd_file.
+    """
+    dirname = os.path.dirname(piggy_gzip_file)
+    piggy_gzip_cmd_file = os.path.join(dirname, ".piggy.gzip.cmd")
+    if not os.path.isfile(piggy_gzip_cmd_file):
+        verbose("piggy_gzip_cmd_file does not exist: " + piggy_gzip_cmd_file)
+        return piggy_gzip_file
+    content = read_text_file(piggy_gzip_cmd_file)
+    verbose("piggy_gzip_cmd_file contents: " + content)
+    tokens = content.split()
+    for i in range(len(tokens)):
+        if tokens[i] == "gzip":
+            break
+    vmlinux_bin = get_real_path(tokens[i - 2], pwd)
+    verbose("Get the real vmlinux_bin from piggy_gzip_cmd_file, vmlinux_bin: " + vmlinux_bin)
+    return vmlinux_bin
+
+'''
 root@c1931bdfd4e8:/home/linux-kernel-gitdir# more arch/x86/boot/compressed/piggy.S
 .section ".rodata..compressed","a",@progbits
 .globl z_input_len
@@ -426,12 +463,12 @@ def handle_linux_kernel_piggy_object(outfile, infiles, pwd):
     :param infiles: the list of input files
     :param pwd: the present working directory for this gcc command
     """
-    if not infiles or outfile[-7:] != "piggy.o":
+    if not infiles or os.path.basename(outfile) not in ("piggy.o", "piggy.gzip.o"):
         return infiles
     verbose("handle_linux_kernel_piggy_object pwd: " + pwd + " outfile: " + outfile + " infiles: " + str(infiles))
     piggy_S_file = ''
     for afile in infiles:
-        if afile[-7:] == "piggy.S":
+        if os.path.basename(afile) in ("piggy.S", "piggy.gzip.S"):
             piggy_S_file = afile
             break
     if not piggy_S_file or not os.path.isfile(piggy_S_file):
@@ -439,15 +476,21 @@ def handle_linux_kernel_piggy_object(outfile, infiles, pwd):
     lines = read_text_file(piggy_S_file).splitlines()
     vmlinux_bin = ''
     for line in lines:
-        if line[:9] == '.incbin "':
-            vmlinux_bin = line[9: len(line)-1]  # this is vmlinux.bin.gz or vmlinux.bin.xz or vmlinux.bin.lz4 or piggy_data
-            tokens = vmlinux_bin.split(".")
-            if len(tokens) > 1:
-                vmlinux_bin = ".".join(tokens[:-1])
+        if '.incbin' in line:
+            tokens = line.split()
+            for i in range(len(tokens)):
+                if tokens[i] == '.incbin':
+                    vmlinux_bin = tokens[i+1].strip('"')
+                    break
+            if vmlinux_bin[-3:] == ".gz":  # remove the .gz to get the real vmlinux_bin file
+                vmlinux_bin = vmlinux_bin[:-3]
             vmlinux_bin = get_real_path(vmlinux_bin, pwd)
             break
     verbose("piggy_S_file: " + piggy_S_file + " vmlinux_bin: " + vmlinux_bin)
+    if os.path.basename(vmlinux_bin) == "piggy.gzip":  # special handling for piggy.gzip in OpenWRT
+        vmlinux_bin = handle_piggy_gzip(vmlinux_bin, pwd)
     if vmlinux_bin and os.path.isfile(vmlinux_bin):
+        verbose("Add the new vmlinux_bin to infiles, vmlinux_bin: " + vmlinux_bin)
         return infiles + [vmlinux_bin,]  # add vmlinux.bin file to the list of input files
     return infiles
 
@@ -718,6 +761,8 @@ def get_all_subfiles_in_ar_cmdline(arline, pwd):
     tokens = arline.split()
     if len(tokens) < 3:
         return ('', [])
+    if tokens[1] == "--plugin":  # remove "--plugin name" part
+        tokens = tokens[:1] + tokens[3:]
     if len(tokens) > 3 and args.pre_exec:
         return ('', [])
     if not ((len(tokens) > 3 and "c" in tokens[1]) or (len(tokens) == 3 and "s" in tokens[1])):
@@ -1787,7 +1832,11 @@ def process_gcc_command(prog, pwddir, argv_str, pid):
             (outfile2, infiles2) = get_c_file_depend_files(argv_str, pwddir)
             verbose("get_c_depend_files, outfile2: " + outfile2 + " infiles2: " + str(infiles2), LEVEL_4)
             if infiles2:
-                infiles = infiles2
+                if os.path.basename(outfile) in ("piggy.o", "piggy.gzip.o"):
+                    verbose("Combine the two infiles lists for Linux kernel piggy object")
+                    infiles = list(set(infiles + infiles2))  # combine the two lists
+                else:
+                    infiles = infiles2
         record_raw_info(outfile, infiles, pwddir, argv_str, pid, prog=prog)
     elif does_source_file_exist_in_files(infiles):  # compile source to exe/.so directly
         return handle_gcc_ctoexe_command(prog, pwddir, argv_str, pid, outfile, infiles)
@@ -2074,6 +2123,7 @@ def process_samefile_converter_command(prog, pwddir, argv_str, pid):
     ./scripts/sorttable vmlinux
     ./tools/bpf/resolve_btfids/resolve_btfids vmlinux
     /usr/lib/rpm/debugedit -b /home/OpenOSC/rpmbuild/BUILD/openosc-1.0.5 -d /usr/src/debug/openosc-1.0.5-1.el8.x86_64 -i --build-id-seed=1.0.5-1.el8 -l /home/OpenOSC/rpmbuild/BUILD/openosc-1.0.5/debugsources.list /home/OpenOSC/rpmbuild/BUILDROOT/openosc-1.0.5-1.el8.x86_64/usr/lib64/libopenosc.so.0.0.0
+    chrpath -r $ORIGIN/.:$ORIGIN/../../lib work/x86_64-linux/curl-native/7.69.1-r0/recipe-sysroot-native/usr/lib/libcurl.so.4.6.0
 
     :param prog: the program binary
     :param pwddir: the present working directory for the command
@@ -2294,6 +2344,19 @@ def process_sign_file_command(prog, pwddir, argv_str, pid):
         # the input and output file are the same file
         shell_command_record_same_file(prog, pwddir, argv_str, pid, "sign-file")
         return get_real_path(module_name, pwddir)
+
+
+def process_chrpath_command(prog, pwddir, argv_str, pid):
+    '''
+    Process the chrpath command
+    :param prog: the program binary
+    :param pwddir: the present working directory for the command
+    :param argv_str: the full command with all its command line options/parameters
+    '''
+    if " -r " in argv_str or " --replace " in argv_str or " -d " in argv_str or " --delete " in argv_str or " -c " in argv_str or " --convert " in argv_str:
+        # the input and output file are the same file
+        return shell_command_record_same_file(prog, pwddir, argv_str, pid, "chrpath")
+    return ''
 
 
 def process_objcopy_command(prog, pwddir, argv_str, pid):
@@ -2520,17 +2583,17 @@ def process_shell_command(prog, pwd_str, argv_str, pid_str):
         outfile = process_gcc_command(prog, pwddir, argv_str, pid)
     elif is_cc_linker(prog):
         outfile = process_ld_command(prog, pwddir, argv_str, pid)
-    elif name == "objcopy": # prog == "/usr/bin/objcopy"
+    elif name == "objcopy" or name.endswith("-objcopy"): # prog == "/usr/bin/objcopy"
         outfile = process_objcopy_command(prog, pwddir, argv_str, pid)
     elif prog == "arch/x86/boot/tools/build":
         outfile = process_bzImage_build_command(prog, pwddir, argv_str)
     elif name == "sepdebugcrcfix": # prog == "/usr/bin/sepdebugcrcfix" or prog == "/usr/lib/rpm/sepdebugcrcfix":
         outfile = process_sepdebugcrcfix_command(prog, pwddir, argv_str, pid)
-    elif name in ("strip", "dwz", "eu-strip", "rpmsign"):
+    elif name in ("strip", "dwz", "eu-strip", "rpmsign") or name.endswith("-strip"):
     #    or (name == "rpm" and (" --addsign " in argv_str or " --delsign " in argv_str)):
     #elif prog in g_strip_progs or prog == "/usr/bin/dwz":
         outfile = process_generic_shell_command(prog, pwddir, argv_str, pid)
-    elif name in g_samefile_converter_names:
+    elif name in g_samefile_converter_names or name.endswith("-ranlib"):
     #elif prog in g_samefile_converters:
         outfile = process_samefile_converter_command(prog, pwddir, argv_str, pid)
     elif name == "dpkg-deb": # prog == "/usr/bin/dpkg-deb":
@@ -2542,7 +2605,9 @@ def process_shell_command(prog, pwd_str, argv_str, pid_str):
     #    outfile = process_install_command(prog, pwddir, argv_str)
     elif name == "patch": # prog == "/usr/bin/patch":
         outfile = process_patch_command(prog, pwddir, argv_str, pid)
-    elif name == "ar": # prog == "/usr/bin/ar":
+    elif name == "chrpath": # prog == "/usr/bin/chrpath":
+        outfile = process_chrpath_command(prog, pwddir, argv_str, pid)
+    elif name == "ar" or name.endswith("-ar"): # prog == "/usr/bin/ar":
         outfile = process_ar_command(prog, pwddir, argv_str, pid)
     elif name == "sign-file": # prog == "scripts/sign-file":
         outfile = process_sign_file_command(prog, pwddir, argv_str, pid)
@@ -2870,13 +2935,13 @@ def main():
 
     if args.pre_exec:
         # Fewer number of programs to watch in pre_exec mode
-        progs_to_watch = g_samefile_converters + g_strip_progs + ["/usr/bin/ar", "/usr/bin/objcopy", "/usr/bin/dwz", "/usr/bin/patch",
+        progs_to_watch = g_samefile_converters + g_strip_progs + ["/usr/bin/ar", "/usr/bin/objcopy", "/usr/bin/dwz", "/usr/bin/patch", "/usr/bin/chrpath",
                 "/usr/bin/sepdebugcrcfix", "/usr/lib/rpm/sepdebugcrcfix", "/usr/bin/rpmsign", "scripts/sign-file", "bomsh_openat_file"]
         if args.watched_pre_exec_programs:
             progs_to_watch.extend(args.watched_pre_exec_programs.split(","))
     else:
         progs_to_watch = g_cc_compilers + g_cc_linkers + g_samefile_converters + g_strip_progs + ["/usr/bin/ar", "/usr/bin/objcopy", "arch/x86/boot/tools/build", "/usr/bin/patch",
-                     "/usr/bin/rustc", "/usr/bin/dwz", "/usr/bin/sepdebugcrcfix", "/usr/lib/rpm/sepdebugcrcfix",
+                     "/usr/bin/chrpath", "/usr/bin/rustc", "/usr/bin/dwz", "/usr/bin/sepdebugcrcfix", "/usr/lib/rpm/sepdebugcrcfix",
                      "/usr/bin/rpmsign", "scripts/sign-file", "bomsh_openat_file", "/usr/bin/javac", "/usr/bin/jar"]
         if not args.create_no_adg_for_pkgs:
             progs_to_watch.extend( ("/usr/bin/dpkg-deb", "/usr/bin/rpmbuild") )
@@ -2886,7 +2951,7 @@ def main():
     if not g_strict_prog_path:
         prog_names_to_watch = [os.path.basename(program) for program in progs_to_watch]
     if ((g_strict_prog_path and prog in progs_to_watch) or
-        (not g_strict_prog_path and (os.path.basename(prog) in prog_names_to_watch or is_special_watched_program(prog)))):
+        (not g_strict_prog_path and (os.path.basename(prog) in prog_names_to_watch or is_special_watched_program(prog, prog_names_to_watch)))):
         verbose(prog + " is on the list, processing the command...", LEVEL_1)
         process_shell_command(prog, pwddir, argv_str, pid)
     else:
