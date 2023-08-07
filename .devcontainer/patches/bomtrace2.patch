@@ -907,7 +907,7 @@ index 6356c5831..fd85f798b 100644
  	printpath(tcp, tcp->u_arg[offset]);
  	tprint_arg_next();
 diff --git a/src/strace.c b/src/strace.c
-index 620a24929..93a1a084f 100644
+index 620a24929..ab32e67b5 100644
 --- a/src/strace.c
 +++ b/src/strace.c
 @@ -3008,6 +3008,657 @@ init(int argc, char *argv[])
@@ -1054,8 +1054,8 @@ index 620a24929..93a1a084f 100644
 +}
 +
 +// special programs that are usually named with some prefix
-+static const char *bomsh_special_progs[] = {"gcc", "cc", "clang", "clang++", "strip", "objcopy", "ld", "ld.gold", "ranlib"} ;
-+static const char *bomsh_special_pre_exec_progs[] = {"strip", "objcopy", "ranlib"} ;
++static const char *bomsh_special_progs[] = {"gcc", "cc", "g++", "clang", "clang++", "strip", "objcopy", "ld", "ld.gold", "ld.bfd", "ar", "ranlib"} ;
++static const char *bomsh_special_pre_exec_progs[] = {"strip", "objcopy", "ranlib", "ar"} ;
 +
 +// check if a path ends with a specific suffix, progs array must be sorted
 +static int bomsh_path_endswith(const char *path, const char **progs, int num_progs)

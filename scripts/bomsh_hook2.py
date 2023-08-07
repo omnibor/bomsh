@@ -344,7 +344,7 @@ def is_special_cc_compiler(prog):
     /auto/binos-tools/llvm11/llvm-11.0-p22/bin/clang-11
     '''
     name = os.path.basename(prog)
-    return prog[-3:] in ('/cc', '-cc') or prog[-4:] in ('/gcc', '-gcc') or name.startswith("clang") or endswith_alist(prog, ("clang", "clang++"))
+    return prog[-3:] in ('/cc', '-cc') or prog[-4:] in ('/gcc', '-gcc', '-g++') or name.startswith("clang") or endswith_alist(prog, ("clang", "clang++"))
 
 
 def endswith_alist(name, alist):
@@ -419,6 +419,29 @@ def get_real_path(afile, pwd):
 
 
 '''
+This is for OpenWRT kernel build, and the below should be the piggy_gzip_cmd_file content:
+echo 'cmd_arch/arm/boot/compressed/piggy.gzip := (cat arch/arm/boot/compressed/../Image | gzip -n -f -9 > arch/arm/boot/compressed/piggy.gzip) || (rm -f arch/arm/boot/compressed/piggy.gzip ; false)' > arch/arm/boot/compressed/.piggy.gzip.cmd"
+'''
+def handle_piggy_gzip(piggy_gzip_file, pwd):
+    """
+    Get the real vmlinux_bin from piggy_gzip_cmd_file.
+    """
+    dirname = os.path.dirname(piggy_gzip_file)
+    piggy_gzip_cmd_file = os.path.join(dirname, ".piggy.gzip.cmd")
+    if not os.path.isfile(piggy_gzip_cmd_file):
+        verbose("piggy_gzip_cmd_file does not exist: " + piggy_gzip_cmd_file)
+        return piggy_gzip_file
+    content = read_text_file(piggy_gzip_cmd_file)
+    verbose("piggy_gzip_cmd_file contents: " + content)
+    tokens = content.split()
+    for i in range(len(tokens)):
+        if tokens[i] == "gzip":
+            break
+    vmlinux_bin = get_real_path(tokens[i - 2], pwd)
+    verbose("Get the real vmlinux_bin from piggy_gzip_cmd_file, vmlinux_bin: " + vmlinux_bin)
+    return vmlinux_bin
+
+'''
 root@c1931bdfd4e8:/home/linux-kernel-gitdir# more arch/x86/boot/compressed/piggy.S
 .section ".rodata..compressed","a",@progbits
 .globl z_input_len
@@ -440,12 +463,12 @@ def handle_linux_kernel_piggy_object(outfile, infiles, pwd):
     :param infiles: the list of input files
     :param pwd: the present working directory for this gcc command
     """
-    if not infiles or outfile[-7:] != "piggy.o":
+    if not infiles or os.path.basename(outfile) not in ("piggy.o", "piggy.gzip.o"):
         return infiles
     verbose("handle_linux_kernel_piggy_object pwd: " + pwd + " outfile: " + outfile + " infiles: " + str(infiles))
     piggy_S_file = ''
     for afile in infiles:
-        if afile[-7:] == "piggy.S":
+        if os.path.basename(afile) in ("piggy.S", "piggy.gzip.S"):
             piggy_S_file = afile
             break
     if not piggy_S_file or not os.path.isfile(piggy_S_file):
@@ -453,15 +476,21 @@ def handle_linux_kernel_piggy_object(outfile, infiles, pwd):
     lines = read_text_file(piggy_S_file).splitlines()
     vmlinux_bin = ''
     for line in lines:
-        if line[:9] == '.incbin "':
-            vmlinux_bin = line[9: len(line)-1]  # this is vmlinux.bin.gz or vmlinux.bin.xz or vmlinux.bin.lz4 or piggy_data
-            tokens = vmlinux_bin.split(".")
-            if len(tokens) > 1:
-                vmlinux_bin = ".".join(tokens[:-1])
+        if '.incbin' in line:
+            tokens = line.split()
+            for i in range(len(tokens)):
+                if tokens[i] == '.incbin':
+                    vmlinux_bin = tokens[i+1].strip('"')
+                    break
+            if vmlinux_bin[-3:] == ".gz":  # remove the .gz to get the real vmlinux_bin file
+                vmlinux_bin = vmlinux_bin[:-3]
             vmlinux_bin = get_real_path(vmlinux_bin, pwd)
             break
     verbose("piggy_S_file: " + piggy_S_file + " vmlinux_bin: " + vmlinux_bin)
+    if os.path.basename(vmlinux_bin) == "piggy.gzip":  # special handling for piggy.gzip in OpenWRT
+        vmlinux_bin = handle_piggy_gzip(vmlinux_bin, pwd)
     if vmlinux_bin and os.path.isfile(vmlinux_bin):
+        verbose("Add the new vmlinux_bin to infiles, vmlinux_bin: " + vmlinux_bin)
         return infiles + [vmlinux_bin,]  # add vmlinux.bin file to the list of input files
     return infiles
 
@@ -732,6 +761,8 @@ def get_all_subfiles_in_ar_cmdline(arline, pwd):
     tokens = arline.split()
     if len(tokens) < 3:
         return ('', [])
+    if tokens[1] == "--plugin":  # remove "--plugin name" part
+        tokens = tokens[:1] + tokens[3:]
     if len(tokens) > 3 and args.pre_exec:
         return ('', [])
     if not ((len(tokens) > 3 and "c" in tokens[1]) or (len(tokens) == 3 and "s" in tokens[1])):
@@ -1801,7 +1832,11 @@ def process_gcc_command(prog, pwddir, argv_str, pid):
             (outfile2, infiles2) = get_c_file_depend_files(argv_str, pwddir)
             verbose("get_c_depend_files, outfile2: " + outfile2 + " infiles2: " + str(infiles2), LEVEL_4)
             if infiles2:
-                infiles = infiles2
+                if os.path.basename(outfile) in ("piggy.o", "piggy.gzip.o"):
+                    verbose("Combine the two infiles lists for Linux kernel piggy object")
+                    infiles = list(set(infiles + infiles2))  # combine the two lists
+                else:
+                    infiles = infiles2
         record_raw_info(outfile, infiles, pwddir, argv_str, pid, prog=prog)
     elif does_source_file_exist_in_files(infiles):  # compile source to exe/.so directly
         return handle_gcc_ctoexe_command(prog, pwddir, argv_str, pid, outfile, infiles)
