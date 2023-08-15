@@ -33,6 +33,4 @@ jobs:
         run: docker run -v ${PWD}:/out $(cd .devcontainer && docker build -q .)
       - name: Check
         run: |
-          ls bombash
-          ls bomtrace
           ls bomtrace2
