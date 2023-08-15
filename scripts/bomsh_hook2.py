@@ -869,7 +869,7 @@ def unbundle_package(pkgfile, destdir=''):
         destdir = os.path.join(g_tmpdir, "bomsh_hook_" + os.path.basename(pkgfile) + ".extractdir")
     if pkgfile[-4:] == ".rpm":
         cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; cd " + destdir + " ; rpm2cpio " + pkgfile + " | cpio -idm 2>/dev/null || true"
-    elif pkgfile[-4:] == ".deb" or pkgfile[-5:] == ".udeb":
+    elif pkgfile[-4:] == ".deb" or pkgfile[-5:] in (".udeb", ".ddeb"):
         cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; dpkg-deb -xv " + pkgfile + " " + destdir + " || true"
     elif pkgfile[-4:] == ".tgz" or pkgfile[-7:] in (".tar.gz", ".tar.xz") or pkgfile[-8:] == ".tar.bz2":
         cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; tar -xf " + pkgfile + " -C " + destdir + " || true"
@@ -1151,12 +1151,12 @@ def get_build_tool_version(prog, pwd):
             chroot_pwd = pwd[len(g_shell_cmd_rootdir):]
         if not chroot_pwd:
             chroot_pwd = "/"
-        cmd = 'chroot ' + g_shell_cmd_rootdir + ' sh -c "cd ' + chroot_pwd + " ; " + prog + ' --version" || true'
+        cmd = 'chroot ' + g_shell_cmd_rootdir + ' sh -c "cd ' + chroot_pwd + " ; " + prog + ' --version 2>&1" || true'
     else:
         mypwd = pwd
         if not mypwd:
             mypwd = "/"
-        cmd = "cd " + mypwd + " ; " + prog + " --version || true"
+        cmd = "cd " + mypwd + " ; " + prog + " --version 2>&1 || true"
     version_output = get_shell_cmd_output(cmd)
     if not version_output:
         cmd = cmd.replace(" --version", " version")
@@ -1300,7 +1300,7 @@ else
 fi
 '''
 
-def gitbom_record_hash(outfile_checksum, outfile, infiles, infile_checksums, pwd, argv_str, pid='', prog='', hash_alg="sha1", ignore_this_record=False):
+def gitbom_record_hash(outfile_checksum, outfile, infiles, infile_checksums, pwd, argv_str, pid='', prog='', hash_alg="sha1", ignore_this_record=False, extra_lines=[]):
     '''
     Record the raw info for a list of infiles and outfile
 
@@ -1347,6 +1347,9 @@ def gitbom_record_hash(outfile_checksum, outfile, infiles, infile_checksums, pwd
     if ignore_this_record:
         lines.append("ignore_this_record: information only")
     lines.append("build_cmd: " + argv_str)
+    # append additional lines here, like package name/version, etc.
+    if extra_lines:
+        lines.extend(extra_lines)
     if args.record_build_tool and prog:
         build_tool_info = get_build_tool_info(prog, pwd, hash_alg)
         lines.append(build_tool_info)
@@ -1421,7 +1424,8 @@ def gitbom_embed_bomid_elf(outfile, bomid_sha1, bomid_sha256):
     verbose("Embed bomid into outfile: " + outfile + " bomid_sha1: " + bomid_sha1 + " bomid_sha256: " + bomid_sha256, LEVEL_3)
 
 
-def gitbom_create_adg_and_record_hash(outfile, infiles, infile_hashes, adg_doc, adg_hash, pwd, argv_str, pid='', prog='', outhash='', hash_alg="sha1", ignore_this_record=False):
+def gitbom_create_adg_and_record_hash(outfile, infiles, infile_hashes, adg_doc, adg_hash, pwd, argv_str, pid='', prog='',
+                                      outhash='', hash_alg="sha1", ignore_this_record=False, extra_lines=[]):
     '''
     Create ADG docs and record the raw info for a list of infiles and outfile
 
@@ -1453,10 +1457,10 @@ def gitbom_create_adg_and_record_hash(outfile, infiles, infile_hashes, adg_doc, 
         else:  # must be real ADG doc
             new_adg_doc = adg_doc
         create_symlink_for_adg_doc(outhash, new_adg_doc, destdir)
-    gitbom_record_hash(outhash, outfile, infiles, infile_hashes, pwd, argv_str, pid=pid, prog=prog, hash_alg=hash_alg, ignore_this_record=ignore_this_record)
+    gitbom_record_hash(outhash, outfile, infiles, infile_hashes, pwd, argv_str, pid=pid, prog=prog, hash_alg=hash_alg, ignore_this_record=ignore_this_record, extra_lines=extra_lines)
 
 
-def record_raw_info(outfile, infiles, pwd, argv_str, pid='', prog='', outfile_checksum='', infile_checksums='', ignore_this_record=False):
+def record_raw_info(outfile, infiles, pwd, argv_str, pid='', prog='', outfile_checksum='', infile_checksums='', ignore_this_record=False, extra_lines=[]):
     '''
     Not just record the raw info for a list of infiles and outfile.
     The OmniBOR extra work to do for the build step
@@ -1497,9 +1501,11 @@ def record_raw_info(outfile, infiles, pwd, argv_str, pid='', prog='', outfile_ch
         if is_elf_file(outfile):  # only support embedding ELF file
             gitbom_embed_bomid_elf(outfile, sha1_adg_hash, sha256_adg_hash)
     if "sha1" in g_hashtypes:
-        gitbom_create_adg_and_record_hash(outfile, infiles, sha1_infile_hashes, sha1_adg_doc, sha1_adg_hash, pwd, argv_str, pid, prog=prog, ignore_this_record=ignore_this_record, hash_alg="sha1")
+        gitbom_create_adg_and_record_hash(outfile, infiles, sha1_infile_hashes, sha1_adg_doc, sha1_adg_hash, pwd, argv_str, pid,
+                                          prog=prog, ignore_this_record=ignore_this_record, hash_alg="sha1", extra_lines=extra_lines)
     if "sha256" in g_hashtypes:
-        gitbom_create_adg_and_record_hash(outfile, infiles, sha256_infile_hashes, sha256_adg_doc, sha256_adg_hash, pwd, argv_str, pid, prog=prog, ignore_this_record=ignore_this_record, hash_alg="sha256")
+        gitbom_create_adg_and_record_hash(outfile, infiles, sha256_infile_hashes, sha256_adg_doc, sha256_adg_hash, pwd, argv_str, pid,
+                                          prog=prog, ignore_this_record=ignore_this_record, hash_alg="sha256", extra_lines=extra_lines)
 
 ############################################################
 #### End of hash/checksum routines ####
@@ -2516,6 +2522,30 @@ def create_pkg_symlinks(outfile):
         create_pkg_symlink(outfile, hash_alg)
 
 
+def get_rpm_info_from_rpm_file(pkgfile):
+    '''
+    Get package name/version info from a rpm file.
+    returns (pkg_name, pkg_version, pkg_release)
+    '''
+    cmd = 'rpm -qp --queryformat "%{NAME} %{VERSION} %{RELEASE}" ' + cmd_quote(pkgfile) + ' || true'
+    output = get_shell_cmd_output(cmd)
+    if not output:
+        return ''
+    return output.split()
+
+
+def get_deb_info_from_deb_file(debfile):
+    '''
+    Get package name/version info from a deb file.
+    returns (pkg_name, pkg_version)
+    '''
+    cmd = 'dpkg-deb --show ' + cmd_quote(debfile) + ' || true'
+    output = get_shell_cmd_output(cmd)
+    if not output:
+        return ('', '')
+    return output.split()
+
+
 def process_dpkg_deb_command(prog, pwddir, argv_str):
     '''
     Process the dpkg-deb command
@@ -2527,7 +2557,9 @@ def process_dpkg_deb_command(prog, pwddir, argv_str):
     (outfile, infiles) = get_all_subfiles_in_dpkg_deb_cmdline(argv_str, pwddir)
     if not outfile or not infiles:
         return outfile
-    record_raw_info(outfile, infiles, pwddir, argv_str, prog=prog)
+    pkg_name, pkg_version = get_deb_info_from_deb_file(outfile)
+    lines = ["pkg_info: DEB Name: " + pkg_name + " Version: " + pkg_version,]
+    record_raw_info(outfile, infiles, pwddir, argv_str, prog=prog, extra_lines=lines)
     if "scratch-space" in outfile:  # example like building package 'openosc-dbgsym' in 'debian/.debhelper/scratch-space/build-openosc/openosc-dbgsym_1.0.5-1_amd64.deb'
         # build_and_rename_deb pattern: $build_dir = "debian/.debhelper/scratch-space/build-${package}"
         return outfile
@@ -2549,7 +2581,9 @@ def process_rpmbuild_command(prog, pwddir, argv_str, pid):
         verbose("Warning: No RPM files generated by rpmbuild")
         return ''
     for outfile, infiles, unbundle_dir in rpmlist:
-        record_raw_info(outfile, infiles, pwddir, argv_str, pid, prog=prog)
+        pkg_name, pkg_version, pkg_release = get_rpm_info_from_rpm_file(outfile)
+        lines = ["pkg_info: RPM Name: " + pkg_name + " Version: " + pkg_version + " Release: " + pkg_release,]
+        record_raw_info(outfile, infiles, pwddir, argv_str, pid, prog=prog, extra_lines=lines)
         os.system("rm -rf " + unbundle_dir)
         #shutil.rmtree(unbundle_dir)
         create_pkg_symlinks(outfile)

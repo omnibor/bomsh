@@ -70,7 +70,7 @@ g_jsonfile = "/tmp/bomsh_search_jsonfile"
 # All the CVE lists to store CVEs in the search result tree
 g_cvelist_keys = ("NoCVElist", "CVElist", "FixedCVElist", "cvehint_CVElist", "cvehint_FixedCVElist")
 # the below are metadata keys that should not be recursed by tree recursion
-g_metadata_keys = ["file_path", "file_paths", "build_cmd", "cvehints", "swh_path"] + list(g_cvelist_keys)
+g_metadata_keys = ["file_path", "file_paths", "build_cmd", "pkg_info", "cvehints", "swh_path"] + list(g_cvelist_keys)
 # The top level software heritage (SWH) directory
 g_swh_dir = ''
 # a list of source blob files directory for SWH tree
@@ -800,7 +800,7 @@ def create_hash_tree_for_checksum(checksum, ancestors, checksum_db, checksum_lin
             file_path = get_metadata_for_checksum_from_db(g_cvedb, checksum, "file_path")
             if file_path:
                 entry["file_path"] = file_path
-        for which_list in ("file_path", "build_cmd"):
+        for which_list in ("file_path", "build_cmd", "pkg_info"):
             if which_list in entry:
                 continue
             metadata = get_metadata_for_checksum_from_db(g_cvedb, checksum, which_list)
@@ -838,7 +838,7 @@ def create_hash_tree_for_checksum(checksum, ancestors, checksum_db, checksum_lin
             cvelist = get_metadata_for_checksum_from_db(g_metadata_db, blob_id, which_list)
             if cvelist:
                 ret[which_list] = cvelist
-    for key in ("file_path", "file_paths", "build_cmd"):  # try to save more metadata in the result
+    for key in ("file_path", "file_paths", "build_cmd", "pkg_info"):  # try to save more metadata in the result
         if key in entry:
             ret[key] = entry[key]
     if is_any_cvelist_in_entry(ret) and "file_path" not in ret:
@@ -846,7 +846,7 @@ def create_hash_tree_for_checksum(checksum, ancestors, checksum_db, checksum_lin
         if file_path:
             ret["file_path"] = file_path
     if g_metadata_db:
-        for which_list in ("file_path", "build_cmd"):
+        for which_list in ("file_path", "build_cmd", "pkg_info"):
             if which_list in ret:
                 continue
             metadata = get_metadata_for_checksum_from_db(g_metadata_db, blob_id, which_list)
