@@ -446,7 +446,7 @@ def update_hash_tree_node_build_info(afile_db, ahash, outfile, key_value, key_st
         afile_db[key_str] = key_value
 
 
-def update_hash_tree_node_hashtree(db, ahash, outfile, infiles, argv_str, pid='', build_tool=''):
+def update_hash_tree_node_hashtree(db, ahash, outfile, infiles, argv_str, pid='', build_tool='', pkg_info=''):
     '''
     Update the build_cmd and hashtree of a single node in the hash tree
 
@@ -464,6 +464,8 @@ def update_hash_tree_node_hashtree(db, ahash, outfile, infiles, argv_str, pid=''
     update_hash_tree_node_build_info(afile_db, ahash, outfile, argv_str, "build_cmd")
     if build_tool:
         update_hash_tree_node_build_info(afile_db, ahash, outfile, build_tool, "build_tool")
+    if pkg_info:
+        update_hash_tree_node_build_info(afile_db, ahash, outfile, pkg_info, "pkg_info")
     # Next update the hashtree as needed
     hash_tree = [f[0] for f in infiles]
     if pid and pid in g_pre_exec_db:
@@ -547,10 +549,12 @@ def update_hash_tree_db_and_gitbom(db, record):
         return
     verbose("Updating hash tree DB for outfile " + outfile)
     argv_str = record["build_cmd"]
+    build_tool, pkg_info = '', ''
     if "build_tool" in record:
-        hash_tree = update_hash_tree_node_hashtree(db, checksum, outfile, infiles, argv_str, pid, build_tool=record["build_tool"])
-    else:
-        hash_tree = update_hash_tree_node_hashtree(db, checksum, outfile, infiles, argv_str, pid)
+        build_tool = record["build_tool"]
+    if "pkg_info" in record:
+        pkg_info = record["pkg_info"]
+    hash_tree = update_hash_tree_node_hashtree(db, checksum, outfile, infiles, argv_str, pid, build_tool=build_tool, pkg_info=pkg_info)
     verbose("There are " + str(len(hash_tree)) + " checksums in hash_tree for outfile: " + outfile)
     if g_bomdir:
         update_gitbom_dir(g_bomdir, hash_tree, checksum, outfile)
@@ -647,6 +651,8 @@ def read_raw_logfile(raw_logfile):
                 record["build_cmd"] = line[11:]
             elif line.startswith("build_tool: "):
                 record["build_tool"] = line[12:]
+            elif line.startswith("pkg_info: "):
+                record["pkg_info"] = line[10:]
             elif line.startswith("==== End of raw info for "):
                 update_hash_tree_db_and_gitbom(g_treedb, record)
                 record = {}  # create the next record
@@ -701,7 +707,7 @@ def unbundle_package(pkgfile, destdir=''):
         destdir = os.path.join(g_tmpdir, "bomsh-" + os.path.basename(pkgfile))
     if pkgfile[-4:] == ".rpm":
         cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; cd " + destdir + " ; rpm2cpio " + pkgfile + " | cpio -idm || true"
-    elif pkgfile[-4:] == ".deb" or pkgfile[-5:] == ".udeb":
+    elif pkgfile[-4:] == ".deb" or pkgfile[-5:] in (".udeb", ".ddeb"):
         cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; dpkg-deb -xv " + pkgfile + " " + destdir + " || true"
     elif pkgfile[-4:] == ".tgz" or pkgfile[-7:] in (".tar.gz", ".tar.xz") or pkgfile[-8:] == ".tar.bz2":
         cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; tar -xf " + pkgfile + " -C " + destdir + " || true"
@@ -710,6 +716,41 @@ def unbundle_package(pkgfile, destdir=''):
         return ''
     get_shell_cmd_output(cmd)
     return destdir
+
+
+def get_pkg_info_from_rpm_file(pkgfile):
+    '''
+    Get package name/version info from a .rpm file.
+    '''
+    cmd = 'rpm -qp --queryformat "%{NAME} %{VERSION} %{RELEASE}" ' + cmd_quote(pkgfile) + ' || true'
+    output = get_shell_cmd_output(cmd)
+    if not output:
+        return ''
+    pkg_name, pkg_version, pkg_release = output.split()
+    return "RPM Name: " + pkg_name + " Version: " + pkg_version + " Release: " + pkg_release
+
+
+def get_pkg_info_from_deb_file(pkgfile):
+    '''
+    Get package name/version info from a .deb file.
+    '''
+    cmd = 'dpkg-deb --show ' + cmd_quote(pkgfile) + ' || true'
+    output = get_shell_cmd_output(cmd)
+    if not output:
+        return ''
+    pkg_name, pkg_version = output.split()
+    return "DEB Name: " + pkg_name + " Version: " + pkg_version
+
+
+def get_pkg_info(pkgfile):
+    '''
+    Get package name/version info from a .rpm/.deb file.
+    '''
+    if pkgfile[-4:] == '.rpm':
+        return get_pkg_info_from_rpm_file(pkgfile)
+    elif pkgfile[-4:] == ".deb" or pkgfile[-5:] in (".udeb", ".ddeb"):
+        return get_pkg_info_from_deb_file(pkgfile)
+    return ''
 
 
 def process_package_file(pkgfile, f_raw_logfile):
@@ -736,6 +777,7 @@ def process_package_file(pkgfile, f_raw_logfile):
     record['infiles'] = infiles
     record['build_cmd'] = "unbundle package"
     lines.append("build_cmd: unbundle package")
+    record['pkg_info'] = get_pkg_info(pkgfile)
     update_hash_tree_db_and_gitbom(g_treedb, record)
     shutil.rmtree(destdir)
     raw_lines = '\n' + '\n'.join(lines) + '\n\n'
