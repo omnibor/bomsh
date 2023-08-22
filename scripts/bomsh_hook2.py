@@ -610,7 +610,7 @@ def get_all_subfiles_in_gcc_cmdline(gccline, pwd, prog):
         tokens2 = compile_file.split(".")
         tokens2[-1] = "o"
         output_file = ".".join(tokens2)
-    if output_file == "/dev/null":
+    if output_file in ("/dev/null", "conftest.o", "conftest", "conftest2.o"):
         return ('', [])
     output_file = get_real_path(output_file, pwd)
     skip_token_list = set(("-MT", "-MF", "-x", "-I", "-B", "-D", "-L", "-isystem", "-iquote", "-idirafter", "-iprefix",
@@ -767,6 +767,8 @@ def get_all_subfiles_in_ar_cmdline(arline, pwd):
         return ('', [])
     if not ((len(tokens) > 3 and "c" in tokens[1]) or (len(tokens) == 3 and "s" in tokens[1])):
         # Only "ar -c archive file1...fileN", "ar -c archive @filelist", and "ar -s archive" are supported
+        return ('', [])
+    if tokens[2] == "libconftest.a":
         return ('', [])
     output_file = get_real_path(tokens[2], pwd)
     subfiles = []

@@ -60,7 +60,10 @@ g_checksum_db = None
 g_bomid_db = None
 
 # metadata DB with checksum (blob_id) as key, containing various metadata like file_path/build_cmd/CVElist, etc.
-g_metadata_db = None
+g_metadata_db = {}
+
+# index DB with checksum (blob_id) as key, containing package/component name/version, etc.
+g_index_db = {}
 
 # CVE checking rules DB with src_file as key, with value of {cve: {rule_type: afile_rule_value} }
 g_cve_check_rules = None
@@ -70,7 +73,7 @@ g_jsonfile = "/tmp/bomsh_search_jsonfile"
 # All the CVE lists to store CVEs in the search result tree
 g_cvelist_keys = ("NoCVElist", "CVElist", "FixedCVElist", "cvehint_CVElist", "cvehint_FixedCVElist")
 # the below are metadata keys that should not be recursed by tree recursion
-g_metadata_keys = ["file_path", "file_paths", "build_cmd", "pkg_info", "cvehints", "swh_path"] + list(g_cvelist_keys)
+g_metadata_keys = ["file_path", "file_paths", "build_cmd", "pkg_info", "pkgs", "cvehints", "swh_path"] + list(g_cvelist_keys)
 # The top level software heritage (SWH) directory
 g_swh_dir = ''
 # a list of source blob files directory for SWH tree
@@ -446,7 +449,9 @@ def get_blob_id_from_checksum_line(checksum_line):
             return checksum_line[5:69]
         else:
             return checksum_line[5:45]
-    return checksum_line.strip()
+    if len(checksum_line) in (40, 64) and is_hex_string(checksum_line):
+        return checksum_line
+    return ''
 
 
 def get_node_id_from_checksum_line(checksum_line):
@@ -468,6 +473,40 @@ def get_node_id_from_checksum_line(checksum_line):
         else:
             return checksum_line[5:45]
     return checksum_line.strip()
+
+
+def get_all_gitbom_doc_files_with_checksum(topdir, checksum):
+    '''
+    Get all the gitBOM doc files stored in a directory, which contains a specific gitoid/checksum.
+    :param topdir: the top directory to store all gitBOM docs
+    :param checksum: a specific gitoid or checksum
+    returns a list of gitBOM doc files
+    '''
+    hexchar = "[0-9a-f]"
+    hexchar_num = 38
+    if args.hashtype and args.hashtype.lower() == "sha256":
+        hexchar_num = 62
+    topdir_abspath = os.path.abspath(topdir)
+    # filter out .git/ directory which contains files with similar names.
+    cmd = 'find ' + topdir_abspath + ' -name "' + hexchar * hexchar_num + '" -path "*/[0-9a-f][0-9a-f]/*" -type f | grep -v "\/\.git\/" | xargs grep -l ' + checksum + ' || true'
+    verbose(cmd, LEVEL_3)
+    return get_shell_cmd_output(cmd).splitlines()
+
+
+def get_all_bomids_with_checksum(topdir, checksum):
+    '''
+    Get all the bom-ids which contains a specific gitoid/checksum.
+    :param topdir: the top directory to store all gitBOM docs
+    :param checksum: a specific gitoid or checksum
+    returns a list of OmniBOR bom-ids
+    '''
+    docs = get_all_gitbom_doc_files_with_checksum(topdir, checksum)
+    ret = []
+    for doc in docs:
+        tokens = doc.split("/")
+        bomid = tokens[-2] + tokens[-1]
+        ret.append(bomid)
+    return ret
 
 
 def get_all_gitbom_doc_files_in_dir(topdir, is_topdir=True):
@@ -583,7 +622,9 @@ def get_blob_bom_id_from_checksum_line(checksum_line):
             return (checksum_line[5:69], checksum_line[74:138])
         else:
             return (checksum_line[5:45], checksum_line[50:90])
-    return (checksum_line.strip(), '')
+    if len(checksum_line) in (40, 64) and is_hex_string(checksum_line):
+        return (checksum_line, '')
+    return ('', '')
 
 
 def update_gitbom_doc_treedb_for_checksum_line(object_bomdir, checksum, bom_id, treedb):
@@ -897,6 +938,20 @@ def collect_cve_list_from_hash_tree(tree_db, which_list):
     return list(set(ret))
 
 
+def bomsh_get_metadata_dir(args):
+    '''
+    Get the metadata directory from command line options.
+    '''
+    metadata_dir = ""
+    if args.bom_topdir:
+        metadata_dir = os.path.join(args.bom_topdir, "metadata", "bomsh")
+        if not os.path.exists(metadata_dir):
+            metadata_dir = os.path.join(args.bom_topdir, ".omnibor", "metadata", "bomsh")
+    if not os.path.exists(metadata_dir) and args.bom_dir:
+        metadata_dir = os.path.join(args.bom_dir, "metadata", "bomsh")
+    return metadata_dir
+
+
 def find_cve_lists_for_checksums(checksums, is_bom_id=False):
     '''
     find all the CVEs for a list of checksums.
@@ -908,16 +963,15 @@ def find_cve_lists_for_checksums(checksums, is_bom_id=False):
         tree = create_hash_tree_for_checksums(checksums, g_checksum_db)
     if g_jsonfile and args.verbose > 1:
         save_json_db(g_jsonfile + "-details.json", tree)
+    if tree and args.derive_sbom:  # user may want to derive SBOM for the search result
+        sbom_db, sbom_detail_db = derive_sbom(tree)
+        if g_jsonfile and args.verbose > 1:
+            save_json_db(g_jsonfile + "-sbom.json", sbom_db)
+            save_json_db(g_jsonfile + "-sbom-detail.json", sbom_detail_db)
     if args.copyout_bomdir:  # Copy out necessary gitBOM docs only and truncated metadata files
         copy_all_bomdoc_in_tree(tree, args.copyout_bomdir)
         # Truncate the .omnibor/metadata/bomsh/* files too
-        metadata_dir = ""
-        if args.bom_topdir:
-            metadata_dir = os.path.join(args.bom_topdir, "metadata", "bomsh")
-            if not os.path.exists(metadata_dir):
-                metadata_dir = os.path.join(args.bom_topdir, ".omnibor", "metadata", "bomsh")
-        if not os.path.exists(metadata_dir) and args.bom_dir:
-            metadata_dir = os.path.join(args.bom_dir, "metadata", "bomsh")
+        metadata_dir = bomsh_get_metadata_dir(args)
         if os.path.exists(metadata_dir):
             new_metadata_dir = os.path.join(args.copyout_bomdir, "metadata", "bomsh")
             copy_truncated_metadata_files(tree, new_metadata_dir, metadata_dir)
@@ -1733,13 +1787,13 @@ def get_all_extra_blobid_in_tree(tree, metadata_dir, get_new_mapping=False):
     """
     tree_blob_ids = set(get_all_blobid_in_tree(tree))
     # Also get those blob IDs that share the same bom_id in the tree
-    bomids = set(get_all_bomid_in_tree(tree))
     mapping_file = os.path.join(metadata_dir, "bomsh_omnibor_doc_mapping")
     new_mapping_db = {}
     if not os.path.exists(mapping_file):
         return (tree_blob_ids, new_mapping_db)
     mapping_db = load_json_db(mapping_file)
     verbose("there are " + str(len(mapping_db)) + " blob_id => bom_id mappings in the original mapping file " + mapping_file)
+    bomids = set(get_all_bomid_in_tree(tree))
     blob_ids = set()
     for blob_id in mapping_db:
         bom_id = mapping_db[blob_id]
@@ -1782,6 +1836,436 @@ def get_all_bomdoc_in_tree(tree):
 #### End of gitBOM doc copy routines ####
 ############################################################
 
+def enrich_metadata_db_with_pkgs(metadata_db):
+    """
+    Enrich metada_db with RPM/DEB pkg_info.
+    For all the blobs in RPM/DEB packages, add "pkgs" attribute whose value is a list of pkg_info.
+    """
+    for blob_id in metadata_db:
+        value = metadata_db[blob_id]
+        if "pkg_info" in value and "hash_tree" in value:
+            for blob in value["hash_tree"]:
+                if blob in metadata_db:
+                    dict_append_or_create_list(metadata_db[blob], "pkgs", value["pkg_info"])
+    if g_jsonfile and args.verbose > 3:
+        save_json_db(g_jsonfile + "-enriched-metadata.json", metadata_db)
+
+
+def check_leaf_blobs_in_metadata_db(trees, metadata_db):
+    """
+    Check number and percentage of leaf blobs in one DB that exist in another DB.
+    :param trees: the dict with blob-id or bom-id as key, each node value contains "hash_tree" list. This is supposed to be g_checksum_db or g_bomid_db
+    :param metadata_db: the dict with blob-id as key. This is supposed to be g_metadata_db or g_index_db.
+    """
+    found_blobs = {}
+    blobs = set()
+    for bomid in trees:
+        tree = trees[bomid]
+        if "hash_tree" not in tree:
+            continue
+        checksum_lines = tree["hash_tree"]
+        for checksum_line in checksum_lines:
+            blob, bom = get_blob_bom_id_from_checksum_line(checksum_line)
+            if bom or (blob in trees and "hash_tree" in trees[blob]):  # this is not leaf blob, skip it
+                continue
+            blobs.add(blob)
+            if blob in metadata_db:
+                #print("Found one matching leaf blob in metadata db: " + blob + " metadata: " + str(metadata_db[blob]))
+                found_blobs[blob] = metadata_db[blob]
+    if g_jsonfile and args.verbose > 2:
+        save_json_db(g_jsonfile + "-found-leaf-blobs.json", found_blobs)
+    print("There are totally " + str(len(blobs)) + " unique leaf blobs in the OmniBOR trees of " + str(len(trees)) + " bomid's")
+    print("There are totally " + str(len(metadata_db)) + " blobs in metadata DB")
+    print("There are totally " + str(len(found_blobs)) + " leaf blobs that are found in metadata DB")
+    if metadata_db:
+        print("Found percent: " + str(100 * len(found_blobs)/len(metadata_db)) + "% leaf blobs that are found in metadata DB")
+    if blobs:
+        print("Found percent: " + str(100 * len(found_blobs)/len(blobs)) + "% leaf blobs that are found out of all leaf nodes in the OmniBOR trees")
+
+
+def check_all_blobs_in_metadata_db(trees, metadata_db):
+    """
+    Check number and percentage of blobs in one DB that exist in another DB.
+    :param trees: the dict with blob-id or bom-id as key, each node value contains "hash_tree" list. This is supposed to be g_checksum_db or g_bomid_db
+    :param metadata_db: the dict with blob-id as key. This is supposed to be g_metadata_db or g_index_db.
+    """
+    found_blobs = {}
+    blobs = set()
+    for bomid in trees:
+        tree = trees[bomid]
+        if "hash_tree" not in tree:
+            continue
+        checksum_lines = tree["hash_tree"]
+        for checksum_line in checksum_lines:
+            blob = get_blob_id_from_checksum_line(checksum_line)
+            blobs.add(blob)
+            if blob in metadata_db:
+                #print("Found one matching blob in metadata db: " + blob + " metadata: " + str(metadata_db[blob]))
+                found_blobs[blob] = metadata_db[blob]
+    if g_jsonfile and args.verbose > 2:
+        save_json_db(g_jsonfile + "-found-blobs.json", found_blobs)
+    print("There are totally " + str(len(blobs)) + " unique blobs in the OmniBOR trees of " + str(len(trees)) + " bomid's")
+    print("There are totally " + str(len(metadata_db)) + " blobs in metadata DB")
+    print("There are totally " + str(len(found_blobs)) + " blobs that are found in metadata DB")
+    if metadata_db:
+        print("Found percent: " + str(100 * len(found_blobs)/len(metadata_db)) + "% blobs that are found in metadata DB")
+    if blobs:
+        print("Found percent: " + str(100 * len(found_blobs)/len(blobs)) + "% blobs that are found out of all unique blobs in the OmniBOR trees")
+
+
+def check_found_blobs_in_metadata_db(trees, metadata_db, leaf_nodes_only):
+    """
+    Check number and percentage of blobs in one DB that exist in another DB.
+    :param trees: the dict with blob-id or bom-id as key, each node value contains "hash_tree" list. This is supposed to be g_checksum_db or g_bomid_db
+    :param metadata_db: the dict with blob-id as key. This is supposed to be g_metadata_db or g_index_db.
+    :param leaf_nodes_only: if True, will check leaf nodes only.
+    """
+    if leaf_nodes_only:
+        check_leaf_blobs_in_metadata_db(trees, metadata_db)
+    else:
+        check_all_blobs_in_metadata_db(trees, metadata_db)
+
+
+def print_metadata_for_args_search(metadata_db, args):
+    """
+    Print associated metadata for files or checksums.
+    """
+    checksums = []
+    if args.files_to_search_cve:
+        checksums = [get_git_file_hash(afile) for afile in args.files_to_search_cve.split(",")]
+    elif args.checksums_to_search_cve:
+        checksums = args.checksums_to_search_cve.split(",")
+    ret = {}
+    for checksum in checksums:
+        if checksum in metadata_db:
+            ret[checksum] = metadata_db[checksum]
+    if ret:
+        print("Here is associated metadata:")
+        print(json.dumps(ret, indent=4, sort_keys=True))
+
+
+def find_parent_checksums_in_metadata_db(metadata_db, checksum):
+    """
+    Find the list of parent gitoids for a single gitoid.
+    """
+    ret = []
+    for gitoid in metadata_db:
+        value = metadata_db[gitoid]
+        if "hash_tree" not in value:
+            continue
+        if checksum in value["hash_tree"]:
+            if "file_path" in value:
+                ret.append(gitoid + " " + value["file_path"])
+            else:
+                ret.append(gitoid)
+    return ret
+
+
+def find_parent_checksums_for_args(metadata_db, args):
+    """
+    Find the list of parent gitoids for a list of gitoid.
+    """
+    checksums = []
+    if args.files_to_search_cve:
+        checksums = [get_git_file_hash(afile) for afile in args.files_to_search_cve.split(",")]
+    elif args.checksums_to_search_cve:
+        checksums = args.checksums_to_search_cve.split(",")
+    ret = {}
+    for checksum in checksums:
+        ret[checksum] = find_parent_checksums_in_metadata_db(metadata_db, checksum)
+    return ret
+
+
+def print_parent_bomids_for_args(args):
+    """
+    Print a list of parent BOM-IDs, which contain the checksums to search.
+    """
+    bom_dir = args.bom_dir
+    if args.bom_topdir:
+        bom_dir = args.bom_topdir
+    checksums = []
+    if args.files_to_search_cve:
+        checksums = [get_git_file_hash(afile) for afile in args.files_to_search_cve.split(",")]
+    elif args.checksums_to_search_cve:
+        checksums = args.checksums_to_search_cve.split(",")
+    parents = {}
+    for checksum in checksums:
+        parents[checksum] = get_all_bomids_with_checksum(bom_dir, checksum)
+    if g_jsonfile and args.verbose > 2:
+        save_json_db(g_jsonfile + "-parents.json", parents)
+    if args.verbose > 3:
+        print("Here is the parent OmniBOR BOM-IDs:")
+        print(json.dumps(parents, indent=4, sort_keys=True))
+    print("Summary of number of bomid parents:")
+    print(json.dumps({k : len(parents[k]) for k in parents}, indent=4, sort_keys=True))
+
+
+def print_parent_checksums_for_args(metadata_db, args):
+    """
+    Print a list of parent checksums or BOM-IDs, which contain the checksums to search.
+    """
+    if not metadata_db:
+        print_parent_bomids_for_args(args)
+        return
+    parents = find_parent_checksums_for_args(metadata_db, args)
+    if g_jsonfile and args.verbose > 2:
+        save_json_db(g_jsonfile + "-parents.json", parents)
+    if args.verbose > 3:
+        print("Here is the parent gitoids:")
+        print(json.dumps(parents, indent=4, sort_keys=True))
+    print("Summary of number of gitoid parents:")
+    print(json.dumps({k : len(parents[k]) for k in parents}, indent=4, sort_keys=True))
+
+
+hex_digits = "0123456789abcdef"
+def is_hex_string(string):
+    """
+    Check if a string contains only hexadecimal characters.
+    """
+    for c in string:
+        if c not in hex_digits:
+            return False
+    return True
+
+
+git_version_digits = "0123456789abcdef._"
+def is_git_version_string(string):
+    """
+    Check if a string is git version string like 2.31+gitAUTOINC+d4b7559457_cd9f958c4c format
+    """
+    index = string.find("+gitAUTOINC+")
+    if index < 0:
+        return False
+    for c in string[:index] + string[index+12:]:
+        if c not in git_version_digits:
+            return False
+    return True
+
+
+# some components can have single number version, like systemd 219 version.
+single_num_version_component_names = ("systemd", "uci", "ubus", "ubox", "libubox", "librpc", "odhcp6c", "jsonfilter")
+#single_hexnum_version_component_names = ("opkg",)  # no need to support this kind of component yet
+common_version_digits = "0123456789._-"
+
+def is_common_version_string(string, component_name=''):
+    """
+    Check if a string is a common version string, like 2.1.5 or v4.2.8p15 format.
+    Or for some special packages, 2014 or 9c97d5e format.
+    :param string: the string to check.
+    :param component_name: a hint to help determine if the string is a common version string.
+    """
+    tokens = string.split(".")
+    if len(tokens) > 7 or (len(tokens) == 1 and component_name not in single_num_version_component_names):
+        #and component_name not in single_hexnum_version_component_names):
+        return False
+    # just check the first 2 tokens, since the third token may contains alpha characters
+    new_string = ''.join(tokens[:2])
+    if new_string[0] == 'v':
+        new_string = new_string[1:]
+    #if component_name in single_hexnum_version_component_names and is_hex_string(new_string):
+    #    return True
+    for c in new_string:
+        if c not in common_version_digits:
+            return False
+    return True
+
+
+def is_version_string(string):
+    """
+    Check if a string is a version string.
+    """
+    tokens = string.split("-")
+    last_token = tokens[-1]
+    # if last_token is like -r0 or -r8, then remove it for further checks.
+    if last_token and last_token[0] == 'r' and last_token[1:].isdigit():
+        string = "-".join(tokens[:-1])
+    if not (string and (string[0].isdigit() or (len(string) > 1 and string[0] == 'v' and string[1].isdigit()))):
+        # first character of first token must be a decimal digit
+        return False
+    if is_git_version_string(string):
+        return True
+    return is_common_version_string(string)
+
+
+def derive_componant_name_version_from_path(path):
+    """
+    Try to derive the component name/version from a file path.
+    First look for version string, and then find the component name.
+    """
+    found_version_string = ''
+    tokens = path.split("/")
+    for token in tokens[-2:-12:-1]: # 10 tokens in reverse order should be sufficient, also skip filename itself
+        if is_version_string(token):
+            found_version_string = token
+            continue
+        if found_version_string: # XX/component-name/version/YY format
+            return (token, found_version_string)
+        # Check if a token is in component-name-version format
+        tokens2 = token.split("-")
+        if len(tokens2) < 2:
+            continue
+        for i in range(1, len(tokens2)):
+            token2 = tokens2[i]
+            name = "-".join(tokens2[:i])  # construct the component name
+            if is_common_version_string(token2, name):
+                # found a common version string, construct the version string, starting from token2, plus following hex-strings
+                versions = [token2,]
+                for token3 in tokens2[i+1:]:
+                    if not (is_hex_string(token3) or token3 in ("alpha", "beta")):
+                        break
+                    versions.append(token3)
+                return (name, "-".join(versions))
+    return ('', '')
+
+
+def get_common_substring_length(str1, str2, from_end=False):
+    """
+    Get the common substring length for two strings, either from beginning or end.
+    """
+    len1, len2 = len(str1), len(str2)
+    if from_end:
+        str1, str2 = str1[::-1], str2[::-1]
+    common_len = 0
+    for i in range(min(len1, len2)):
+        if str1[i] != str2[i]:
+            return common_len
+        common_len += 1
+    return common_len
+
+
+def get_best_package_from_index_db(index_db, blob_id, file_path):
+    """
+    Try to get the best matching package/version when multiple candidates exist in the index DB.
+    Each package version entry is supposed to have format of (package_name, version, file_size, path)
+    :param index_db: the index DB
+    :param blob_id: the blob_id to determine its belonging package
+    :param file_path: the file_path metadata from metadata DB
+    returns (picked name+version, packages)
+    """
+    packages = index_db[blob_id]
+    if len(packages) == 1:
+        best_package = packages[0]
+        name, version = best_package[0], best_package[1]
+        return ("INDEX " + name + " " + version, packages)
+    best_package = ''
+    max_common_len = 0
+    for package in packages:
+        if package[0] in file_path: # package name must be contained in file_path
+            if len(package) < 4: # assume all packages have the same length, there is no package[3], so no need to continue
+                best_package = package
+                break
+            common_len = 0
+            if file_path and len(package) > 3:
+                common_len = get_common_substring_length(file_path, package[3], True)
+                if common_len == len(package[3]): # found the best match already
+                    best_package = package
+                    break
+            if common_len > max_common_len: # keep the package whose file_path has the maximum length of matching substring
+                best_package = package
+                max_common_len = common_len
+    if not best_package:
+        best_package = packages[0]
+    name, version = best_package[0], best_package[1]
+    # Prepend INDEX to indicate that it is from the index DB
+    return ("INDEX " + name + " " + version, packages)
+
+
+def dict_append_or_create_list(db, key, new_value):
+    """
+    If a key exists in DB, then append new_value to the end of the list.
+    If the key does not exist, then create the list with new_value.
+    """
+    if key in db:
+        db[key].append(new_value)
+    else:
+        db[key] = [new_value,]
+
+
+def update_sbom_with_unknown_blob(sbom_db, blob_id):
+    """
+    This blob_id's package is unknown, try search it in g_index_db, and then update sbom_db.
+    """
+    if blob_id in g_index_db:
+        best_package, packages = get_best_package_from_index_db(g_index_db, blob_id, '')
+        blob_packages = (blob_id, packages)
+        dict_append_or_create_list(sbom_db, best_package, blob_packages)
+    else:
+        sbom_db["UNKNOWN_COMPONENT_VERSION"].append(blob_id)
+
+
+def derive_sbom_for_atree(tree, metadata_dir):
+    """
+    Try to derive name/version of packages for SBOM, for a single OmniBOR tree.
+    It first tries to derive name/version from the file_path metadata of g_metadata_db.
+    Then it tries to get name/version from g_index_db.
+    Blobs of same package name/version are grouped together in the sbom_db.
+    """
+    if args.leaf_nodes_only:
+        blob_ids = get_all_leaf_blobid_in_tree(tree)
+    else:
+        blob_ids, new_mapping_db = get_all_extra_blobid_in_tree(tree, metadata_dir, False)
+    sbom_db = {}
+    sbom_db["UNKNOWN_COMPONENT_VERSION"] = []
+    for blob_id in blob_ids:
+        if blob_id not in g_metadata_db:
+            update_sbom_with_unknown_blob(sbom_db, blob_id)
+            continue
+        else:
+            value = g_metadata_db[blob_id]
+            if "pkgs" in value: # this blob belongs to RPM/DEB
+                blob_str = blob_id
+                if "file_path" in value:
+                    blob_str = blob_id + " " + value["file_path"]
+                pkg_key = value["pkgs"][0]
+                dict_append_or_create_list(sbom_db, pkg_key, blob_str)
+                continue
+            if "file_path" not in value:
+                update_sbom_with_unknown_blob(sbom_db, blob_id)
+                continue
+            path = value["file_path"]
+            blob_str = blob_id + " " + path
+            name, version = derive_componant_name_version_from_path(path)
+            if name: # successfully derived name/version
+                pkg_key = name + " " + version
+                blob_packages = ''
+                if blob_id in g_index_db: # check if it exists in g_index_db
+                    blob_packages = (blob_str, g_index_db[blob_id])
+                if blob_packages:
+                    dict_append_or_create_list(sbom_db, pkg_key, blob_packages)
+                else:
+                    dict_append_or_create_list(sbom_db, pkg_key, blob_str)
+            else:
+                if blob_id in g_index_db:
+                    best_package, packages = get_best_package_from_index_db(g_index_db, blob_id, path)
+                    blob_packages = (blob_str, packages)
+                    dict_append_or_create_list(sbom_db, best_package, blob_packages)
+                else:
+                    sbom_db["UNKNOWN_COMPONENT_VERSION"].append(blob_str)
+    return sbom_db
+
+
+def derive_sbom(tree):
+    """
+    Try to derive name/version of packages for SBOM, for top-level tree, which contains a few OmniBOR trees.
+    """
+    sbom_db, sbom_detail_db = {}, {}
+    metadata_dir = bomsh_get_metadata_dir(args)
+    for key in tree:
+        subtree = tree[key]
+        sbom = derive_sbom_for_atree(subtree, metadata_dir)
+        sbom2 = {k : len(sbom[k]) for k in sbom} # sbom2 contains only summary (#blobs) for each package
+        num_blobs = sum(sbom2.values())
+        sbom2["TOTAL_NUM_BLOBS"] = num_blobs
+        sbom2["UNKNOWN_VERSION_PERCENT"] = 100 * sbom2["UNKNOWN_COMPONENT_VERSION"] / num_blobs
+        sbom_db[key] = sbom2
+        sbom_detail_db[key] = sbom
+    return sbom_db, sbom_detail_db
+
+
+############################################################
+#### End of metadata SBOM routines ####
+############################################################
+
 def rtd_parse_options():
     """
     Parse command options.
@@ -1809,6 +2293,8 @@ def rtd_parse_options():
                     help = "the comma-separated gitBOM ID list to search CVEs")
     parser.add_argument('-m', '--metadata_db_file',
                     help = "the JSON database file containing metadata for file checksums")
+    parser.add_argument('--index_db_file',
+                    help = "the JSON database file containing package name/version info for file checksums")
     parser.add_argument('--tmpdir',
                     help = "tmp directory, which is /tmp by default")
     parser.add_argument('-j', '--jsonfile',
@@ -1836,6 +2322,21 @@ def rtd_parse_options():
     parser.add_argument("--insert_sepstrs_in_doc",
                     action = "store_true",
                     help = "insert redundant blob/bom separator strings in gitBOM docs")
+    parser.add_argument("--find_parents",
+                    action = "store_true",
+                    help = "find parent gitoids for a list of files/checksums")
+    parser.add_argument("--derive_sbom",
+                    action = "store_true",
+                    help = "derive SBOM for the search result")
+    parser.add_argument("--leaf_nodes_only",
+                    action = "store_true",
+                    help = "only leaf nodes in the OmniBOR tree are considered for SBOM")
+    parser.add_argument("--check_blobs_in_db",
+                    action = "store_true",
+                    help = "find blobs of OmniBOR trees in metadata_db or index_db")
+    parser.add_argument("--enrich_metadata_with_pkgs",
+                    action = "store_true",
+                    help = "enrich metadata DB with RPM/DEB pkgs")
     parser.add_argument("-v", "--verbose",
                     action = "count",
                     default = 0,
@@ -1889,10 +2390,24 @@ def main():
         jsonfile = os.path.join(bomsh_bomdir, "bomsh_omnibor_treedb")
         if os.path.exists(jsonfile):
             g_metadata_db = load_json_db(jsonfile)
+    if g_metadata_db and args.enrich_metadata_with_pkgs:
+        enrich_metadata_db_with_pkgs(g_metadata_db)
+    if g_metadata_db and args.find_parents:
+        print_parent_checksums_for_args(g_metadata_db, args)
+        sys.exit()
+    global g_index_db
+    if args.index_db_file:
+        g_index_db = load_json_db(args.index_db_file)
     global g_checksum_db
     if args.raw_checksums_file:
         g_checksum_db = load_json_db(args.raw_checksums_file)
+        if g_checksum_db and args.find_parents:
+            print_parent_checksums_for_args(g_checksum_db, args)
+            sys.exit()
     elif args.bom_dir or args.bom_topdir:
+        if args.find_parents:
+            print_parent_checksums_for_args(None, args)
+            sys.exit()
         global g_bomid_db
         global g_gitbom_docfile_db
         if args.bom_topdir:
@@ -1901,13 +2416,21 @@ def main():
         else:
             bom_dir = args.bom_dir
             g_gitbom_docfile_db = get_all_gitbom_doc_files_in_dir(bom_dir, False)
-        verbose("There are " + str(len(g_gitbom_docfile_db)) + " total gitBOM docs in directory " + bom_dir)
+        if args.hashtype and args.hashtype.lower() == "sha256":
+            verbose("There are " + str(len(g_gitbom_docfile_db)) + " total OmniBOR sha256 docs in directory " + bom_dir)
+        else:
+            verbose("There are " + str(len(g_gitbom_docfile_db)) + " total OmniBOR sha1 docs in directory " + bom_dir)
         if args.files_to_search_cve:
             g_bomid_db = create_gitbom_doc_treedb_for_files(bom_dir, args.files_to_search_cve.split(","))
         elif args.checksums_to_search_cve:
             g_bomid_db = create_gitbom_doc_treedb_for_checksums(bom_dir, args.checksums_to_search_cve.split(","))
         else:
             g_bomid_db = create_gitbom_doc_treedb(bom_dir)
+        if not g_bomid_db:
+            print("There is no any matched bom-id for your search.")
+            if g_metadata_db:
+                print_metadata_for_args_search(g_metadata_db, args)
+            sys.exit()
     if args.verbose > 2:
         if g_bomid_db:
             save_json_db(g_jsonfile + "-treedb.json", g_bomid_db)
@@ -1915,6 +2438,19 @@ def main():
             save_json_db(g_jsonfile + "-treedb.json", g_checksum_db)
         save_json_db(g_jsonfile + "-bomdocdb.json", g_gitbom_docfile_db)
         save_json_db(g_jsonfile + "-bom-mappings.json", g_gitbom_doc_db)
+
+    if args.check_blobs_in_db:
+        trees = g_bomid_db
+        if not trees and g_checksum_db:
+            trees = g_checksum_db
+        if not trees:
+            print("There is no OmniBOR tree to check blobs!")
+            sys.exit()
+        if g_metadata_db:
+            check_found_blobs_in_metadata_db(trees, g_metadata_db, args.leaf_nodes_only)
+        elif g_index_db:
+            check_found_blobs_in_metadata_db(trees, g_index_db, args.leaf_nodes_only)
+        sys.exit()
 
     cve_result = {}
     if args.files_to_search_cve:
@@ -1937,7 +2473,7 @@ def main():
         print("Try -c/-f/-g option.")
     if g_jsonfile:
         save_json_db(g_jsonfile, cve_result)
-        if args.verbose > 2:
+        if args.verbose > 4:  # this cache_db can be huge sometimes
             save_json_db(g_jsonfile + "-cache.json", g_checksum_cache_db)
     print("\nHere is the CVE search results:")
     print(json.dumps(cve_result, indent=4, sort_keys=True))
