@@ -704,7 +704,10 @@ def unbundle_package(pkgfile, destdir=''):
     :param destdir: the destination directory to save unbundled files
     '''
     if not destdir:
-        destdir = os.path.join(g_tmpdir, "bomsh-" + os.path.basename(pkgfile))
+        extract_dir = os.path.join(g_tmpdir, "bomsh_extract_dir")
+        if not os.path.exists(extract_dir):
+            os.makedirs(extract_dir)
+        destdir = os.path.join(extract_dir, os.path.basename(pkgfile) + ".extractdir")
     if pkgfile[-4:] == ".rpm":
         cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; cd " + destdir + " ; rpm2cpio " + pkgfile + " | cpio -idm || true"
     elif pkgfile[-4:] == ".deb" or pkgfile[-5:] in (".udeb", ".ddeb"):

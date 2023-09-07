@@ -70,6 +70,7 @@ g_shell_cmd_rootdir = "/"
 g_cve_check_rules = None
 # Whether to do strict/exact program path comparision.
 g_strict_prog_path = False
+g_os_env_tmp_dir = "/tmp/"
 
 #
 # Helper routines
@@ -618,9 +619,30 @@ def get_all_subfiles_in_gcc_cmdline(gccline, pwd, prog):
     linker_skip_tokens = set(("-m", "-z", "-a", "-A", "-b", "-c", "-e", "-f", "-F", "-G", "-u", "-y", "-Y", "-soname", "--wrap",
                           "--architecture", "--format", "--mri-script", "--entry", "--auxiliary", "--filter", "--gpsize", "--oformat",
                           "--defsym", "--split-by-reloc", "-rpath", "-rpath-link", "--dynamic-linker", "-dynamic-linker"))
+    library_paths, library_names, add_token_to_library_path, add_token_to_library_name = [], [], False, False
     subfiles = []
     skip_token = False  # flag for skipping one single token
     for token in tokens[1:]:
+        if token[:2] == '-L':
+            if len(token) > 2:
+                library_paths.append(token[2:])
+            else:
+                add_token_to_library_path = True
+            continue
+        if token[:2] == '-l':
+            if len(token) > 2:
+                library_names.append(token[2:])
+            else:
+                add_token_to_library_name = True
+            continue
+        if add_token_to_library_path:
+            library_paths.append(token)
+            add_token_to_library_path = False
+            continue
+        if add_token_to_library_name:
+            library_names.append(token)
+            add_token_to_library_name = False
+            continue
         # C linker ld has a few more options that come with next token
         if token in skip_token_list or (is_cc_linker(prog) and token in linker_skip_tokens):
             # the next token must be skipped
@@ -636,6 +658,30 @@ def get_all_subfiles_in_gcc_cmdline(gccline, pwd, prog):
             subfiles.append(subfile)
         else:
             verbose("Warning: this subfile is not file: " + subfile)
+    verbose("library_paths: " + str(library_paths) + " library_names: " + str(library_names), LEVEL_3)
+    library_paths = set(library_paths)
+    # remove shared libraries from library_names
+    static_libs = []
+    for lib_name in set(library_names):
+        lib_filename = "lib" + lib_name + ".so"
+        shared_lib_exists = False
+        for lib_path in library_paths:
+            libfile = get_real_path(os.path.join(lib_path, lib_filename), pwd)
+            if os.path.isfile(libfile):
+                shared_lib_exists = True
+                verbose("Found shared library " + libfile)
+                break
+        if not shared_lib_exists:
+            static_libs.append("lib" + lib_name + ".a")
+    verbose("library_paths: " + str(library_paths) + " static_libs: " + str(static_libs), LEVEL_3)
+    # add static libraries to subfiles
+    for lib_filename in static_libs:
+        for lib_path in library_paths:
+            libfile = get_real_path(os.path.join(lib_path, lib_filename), pwd)
+            if os.path.isfile(libfile):
+                subfiles.append(libfile)
+                verbose("Adding static library " + libfile)
+                break
     # subfiles contain both input files and the output file
     infiles = [afile for afile in subfiles if afile != output_file]
     infiles = handle_linux_kernel_piggy_object(output_file, infiles, pwd)
@@ -868,7 +914,10 @@ def unbundle_package(pkgfile, destdir=''):
     :param destdir: the destination directory to save unbundled files, must be tmp dir to safely delete
     '''
     if not destdir:
-        destdir = os.path.join(g_tmpdir, "bomsh_hook_" + os.path.basename(pkgfile) + ".extractdir")
+        extract_dir = os.path.join(g_tmpdir, "bomsh_extract_dir")
+        if not os.path.exists(extract_dir):
+            os.makedirs(extract_dir)
+        destdir = os.path.join(extract_dir, os.path.basename(pkgfile) + ".extractdir")
     if pkgfile[-4:] == ".rpm":
         cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; cd " + destdir + " ; rpm2cpio " + pkgfile + " | cpio -idm 2>/dev/null || true"
     elif pkgfile[-4:] == ".deb" or pkgfile[-5:] in (".udeb", ".ddeb"):
@@ -975,7 +1024,7 @@ def get_rpmbuild_topdir():
         cmd = "rpmbuild --eval %{_topdir}"
         output = get_shell_cmd_output(cmd)
         return output.strip()
-    return ''
+    #return ''
 
 
 def replace_percent_var(version_str, var_value=''):
@@ -1568,6 +1617,35 @@ def get_d_files_from_files(infiles, pwd):
         return [get_d_file_path(afile, pwd, "a-") for afile in infiles]
 
 
+def read_clang_dot_dependency(contents, pwd):
+    '''
+    Read all the depend files from clang "-dependency-dot" generated depend.d file
+    :param depend_file: the generated dependency file
+    :param pwd: the working directory for the gcc command
+    '''
+    lines = contents.splitlines()
+    depend_files = []
+    for line in lines:
+        tokens = line.split('", label="')
+        if len(tokens) < 2:
+            continue
+        token1 = tokens[1]
+        loc = token1.find('"')
+        if loc < 0:
+            continue
+        afile = token1[:loc]
+        bfile = get_real_path(afile, pwd)  # first try relative path
+        if os.path.exists(bfile):
+            depend_files.append(bfile)
+            continue
+        bfile = get_real_path('/' + afile, pwd)  # then try absolute path
+        if os.path.exists(bfile):
+            depend_files.append(bfile)
+    if depend_files:
+        return ("bomsh_hook_cc_outfile.o", depend_files)
+    return ('', [])
+
+
 def read_depend_file(depend_file, pwd):
     '''
     Read all the depend files from gcc "-MD -MF" generated depend.d file
@@ -1577,6 +1655,8 @@ def read_depend_file(depend_file, pwd):
     if not os.path.exists(depend_file):
         return ('', [])
     contents = read_text_file(depend_file)
+    if contents[:24] == 'digraph "dependencies" {':
+        return read_clang_dot_dependency(contents, pwd)
     all_parts = contents.split("\n\n")  # get the first part only, due to -MP option.
     all_files = all_parts[0].split(": ")
     outfile = get_real_path(all_files[0].strip(), pwd)
@@ -1676,18 +1756,23 @@ def get_c_file_depend_files(gcc_cmd, pwd):
     output_file = os.path.join(g_tmpdir, "bomsh_hook_cc_outfile.o")
     gcc_cmd = replace_output_file_in_shell_command(gcc_cmd, output_file)
     depend_file = os.path.join(g_tmpdir, "bomsh_hook_target_dependency.d")
+    extra_options = " -MD -MF " + depend_file
+    if " -cc1 " in gcc_cmd and "clang" in gcc_cmd:
+        # the returned outfile seems to not used by any caller
+        extra_options = " -MT " + output_file + " -dependency-dot " + depend_file
+        #extra_options = " -MT " + output_file + " -dependency-file " + depend_file
     if g_shell_cmd_rootdir != "/":
         chroot_pwd = pwd
         if pwd.startswith(g_shell_cmd_rootdir):
             chroot_pwd = pwd[len(g_shell_cmd_rootdir):]
         if not chroot_pwd:
             chroot_pwd = "/"
-        cmd = 'chroot ' + g_shell_cmd_rootdir + ' sh -c "cd ' + chroot_pwd + " ; " + escape_shell_command(gcc_cmd) + " -MD -MF " + depend_file + '" 2>/dev/null || true'
+        cmd = 'chroot ' + g_shell_cmd_rootdir + ' sh -c "cd ' + chroot_pwd + " ; " + escape_shell_command(gcc_cmd) + extra_options + '" 2>/dev/null || true'
     else:
         mypwd = pwd
         if not mypwd:
             mypwd = "/"
-        cmd = "cd " + mypwd + " ; " + escape_shell_command(gcc_cmd) + " -MD -MF " + depend_file + " 2>/dev/null || true"
+        cmd = "cd " + mypwd + " ; " + escape_shell_command(gcc_cmd) + extra_options + " 2>/dev/null || true"
     #verbose("get_c_depend cmd: " + cmd)
     get_shell_cmd_output(cmd)
     real_depend_file = get_real_path(depend_file, pwd)
@@ -1764,6 +1849,7 @@ def handle_gcc_ctoexe_command(prog, pwddir, argv_str, pid, outfile, infiles):
             verbose("Warning: ldout file is not found, simply record outfile/infiles for this command")
             record_raw_info(outfile, infiles, pwddir, argv_str, pid, prog=prog)
             return outfile
+    get_os_env_tmp_dir()  # get env TMPDIR for use in finding tmp_o file
     cfiles = get_source_files_in_files(infiles)
     if not args.no_dependent_headers:
         if len(cfiles) == 1:
@@ -1850,10 +1936,23 @@ def process_gcc_command(prog, pwddir, argv_str, pid):
         return handle_gcc_ctoexe_command(prog, pwddir, argv_str, pid, outfile, infiles)
     else:  # this gcc only invokes LD to link *.o files, and is redundant, so record it for information only
         ignore = True
-        if "clang" in os.path.basename(prog):  # clang seems to not invoke LD?
-            ignore = False
+        #if "clang" in os.path.basename(prog):  # clang seems to not invoke LD?
+        #    ignore = False
         record_raw_info(outfile, infiles, pwddir, argv_str, pid, prog=prog, ignore_this_record=ignore)
     return outfile
+
+
+def get_os_env_tmp_dir():
+    '''
+    Get the system environment variable TMPDIR.
+    '''
+    tmpdir = os.getenv("TMPDIR")
+    if tmpdir:
+        global g_os_env_tmp_dir
+        if tmpdir[-1] == '/':
+            g_os_env_tmp_dir = tmpdir
+        else:
+            g_os_env_tmp_dir = tmpdir + '/'
 
 
 def get_first_tmp_o_file(afiles):
@@ -1862,7 +1961,7 @@ def get_first_tmp_o_file(afiles):
     '''
     for afile in afiles:
         bfile = get_noroot_path(afile)
-        if bfile[:5] == "/tmp/" and bfile[-2:] == ".o":
+        if (bfile[:5] == "/tmp/" or bfile.startswith(g_os_env_tmp_dir)) and bfile[-2:] == ".o":
             return afile
     return ''
 
@@ -1876,8 +1975,8 @@ def get_tmp_infiles_from_ldout_lines(ldout_lines):
     for line in ldout_lines:
         if line[:8] == "infile: ":
             tokens = line.split()
-            infile = tokens[3]
-            if infile[:5] == "/tmp/":
+            infile = tokens[3]  # infile is already noroot_path since it is read from ldout file
+            if (infile[:5] == "/tmp/" or infile.startswith(g_os_env_tmp_dir)) and infile[-2:] == ".o":
                 infiles.append( (tokens[1], infile) )
     return infiles
 
@@ -1955,6 +2054,7 @@ def process_ld_command(prog, pwddir, argv_str, pid):
         record_raw_info(outfile, infiles, pwddir, argv_str, pid, prog=prog)
         return outfile
     """
+    get_os_env_tmp_dir()  # get env TMPDIR for use in finding tmp_o file
     first_tmp_o = get_first_tmp_o_file(infiles)
     if first_tmp_o and is_gcc_invoked_ld_cmd(argv_str):
         if not args.no_auto_embed_bom_for_compiler_linker:
@@ -2477,6 +2577,7 @@ def process_javac_command(prog, pwddir, argv_str):
             break
     java_file = get_real_path(java_file, pwddir)
     outfile = get_real_path(outfile, pwddir)
+    infiles = [java_file, ]
     record_raw_info(outfile, infiles, pwddir, argv_str, prog=prog)
     return outfile
 
@@ -2721,6 +2822,18 @@ def update_srcfile_cve_rules_db(srcfile_db, cve_rules, rule_type):
                     srcfile_rules[cve] = {rule_type: afile_rule_value}
             else:
                 srcfile_db[afile] = {cve: {rule_type: afile_rule_value} }
+
+
+def any_string_in_content(strings, content):
+    """
+    :param strings: a list of strings to search
+    :param content: a long string, read from source file
+    return True if any string is found, otherwise False
+    """
+    for string in strings:
+        if string in content:
+            return True
+    return False
 
 
 def cve_check_rule(afile, rule, content=''):

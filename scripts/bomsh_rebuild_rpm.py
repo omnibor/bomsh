@@ -146,7 +146,7 @@ RUN cd /root ; git clone https://github.com/omnibor/bomsh.git ; \\
 CMD if [ -z "${BASELINE_REBUILD}" ]; then bomtrace_cmd="/tmp/bomtrace2 -w /tmp/bomtrace_watched_programs -c /tmp/bomtrace.conf -o /tmp/bomsh_hook_strace_logfile " ; fi ; \\
     if [ -z "${CHROOT_CFG}" ]; then CHROOT_CFG=default ; fi ; \\
     mkdir -p /out/bomsher_out ; cd /out/bomsher_out ; \\
-    $bomtrace_cmd mock -r /etc/mock/${CHROOT_CFG}.cfg --rebuild /out/bomsher_in/$SRC_RPM_FILE --resultdir=./tmprpms ; \\
+    $bomtrace_cmd mock -r /etc/mock/${CHROOT_CFG}.cfg $MOCK_OPTION --rebuild /out/bomsher_in/$SRC_RPM_FILE --resultdir=./tmprpms ; \\
     mkdir rpms ; cp tmprpms/*.rpm rpms ; rm -rf tmprpms ; \\
     if [ "${BASELINE_REBUILD}" ]; then exit 0 ; fi ; \\
     rm -rf omnibor omnibor_dir ; mv .omnibor omnibor ; mkdir -p bomsh_logfiles ; cp -f /tmp/bomsh_hook_*logfile* bomsh_logfiles/ ; \\
@@ -154,7 +154,7 @@ CMD if [ -z "${BASELINE_REBUILD}" ]; then bomtrace_cmd="/tmp/bomtrace2 -w /tmp/b
     rpmfiles=`for i in rpms/*.rpm ; do  echo -n $i, ; done | sed 's/.$//'` ; \\
     cp /tmp/bomsh*.py bomsh_logfiles ; cp /tmp/bomtrace* bomsh_logfiles ; \\
     if [ "${CVEDB_FILE}" ]; then cvedb_file_param="-d /out/bomsher_in/${CVEDB_FILE}" ; fi ; \\
-    /tmp/bomsh_search_cve.py -b omnibor_dir $cvedb_file_param -f $rpmfiles -vvv ; cp /tmp/bomsh_search_jsonfile* bomsh_logfiles/ ;
+    /tmp/bomsh_search_cve.py --derive_sbom -b omnibor_dir $cvedb_file_param -f $rpmfiles -vvv ; cp /tmp/bomsh_search_jsonfile* bomsh_logfiles/ ;
 '''
 
 def create_dockerfile(work_dir):
@@ -199,6 +199,9 @@ def run_docker(src_rpm_file, output_dir):
         docker_cmd += ' -e CVEDB_FILE=' + os.path.basename(args.cve_db_file)
     if args.baseline_rebuild:
         docker_cmd += ' -e BASELINE_REBUILD=baseline_only'
+    if args.mock_option:
+        # usually for the "--no-bootstrap-image" option for mock >= 5.0 version
+        docker_cmd += ' -e MOCK_OPTION="' + args.mock_option + '"'
     docker_cmd += ' -v ' + output_dir + ':/out $(docker build -t bomsher-rpm -q ' + bomsher_indir + ')'
     verbose("==== Here is the docker run command: " + docker_cmd, LEVEL_1)
     os.system(docker_cmd)
@@ -232,6 +235,8 @@ def rtd_parse_options():
                            "the available cfgs can be found at https://github.com/rpm-software-management/mock/tree/main/mock-core-configs/etc/mock")
     parser.add_argument('-d', '--cve_db_file',
                     help = "the CVE database file, with git blob ID to CVE mappings")
+    parser.add_argument("--mock_option",
+                    help = "additional command options to run mock from inside container image")
     parser.add_argument("-b", "--baseline_rebuild",
                     action = "store_true",
                     help = "baseline rebuild only, do not run bomtrace2 to generate OmniBOR documents")

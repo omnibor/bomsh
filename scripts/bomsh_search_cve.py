@@ -1478,6 +1478,18 @@ def cve_check_rule(afile, rule, content=''):
     return True
 
 
+def any_string_in_content(strings, content):
+    """
+    :param strings: a list of strings to search
+    :param content: a long string, read from source file
+    return True if any string is found, otherwise False
+    """
+    for string in strings:
+        if string in content:
+            return True
+    return False
+
+
 def cve_check_rules(afile, rules, content=''):
     ret = {}
     if not content:
