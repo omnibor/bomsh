@@ -155,7 +155,7 @@ CMD if [ "${SRC_TAR_DIR}" ]; then srctardir_param="--srctardir=/out/bomsher_in" 
     cp /tmp/yongkui-srcpkg/* bomsh_logfiles ; \\
     debfiles=`for i in debs/*.deb ; do  echo -n $i, ; done | sed 's/.$//'` ; \\
     if [ "${CVEDB_FILE}" ]; then cvedb_file_param="-d /out/bomsher_in/${CVEDB_FILE}" ; fi ; \\
-    /tmp/bomsh_search_cve.py -b omnibor_dir $cvedb_file_param -f $debfiles -vvv ; cp /tmp/bomsh_search_jsonfile* bomsh_logfiles/ ;
+    /tmp/bomsh_search_cve.py --derive_sbom -b omnibor_dir $cvedb_file_param -f $debfiles -vvv ; cp /tmp/bomsh_search_jsonfile* bomsh_logfiles/ ;
 '''
 
 def create_dockerfile(work_dir):

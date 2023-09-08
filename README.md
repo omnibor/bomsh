@@ -50,6 +50,8 @@ For a quick start of using the Bomsh tool, run the below command:
     $ git clone URL-of-this-git-repo bomsh
     $ wget http://vault.centos.org/8-stream/AppStream/Source/SPackages/sysstat-11.7.3-9.el8.src.rpm
     $ bomsh/scripts/bomsh_rebuild_rpm.py -c alma+epel-8-x86_64 --docker_image_base almalinux:8 -s sysstat-11.7.3-9.el8.src.rpm -d bomsh/scripts/sample_sysstat_cvedb.json -o outdir
+    $ # if mock is >= 5.0 version, then the below "--mock_option=--no-bootstrap-image" command option may be needed
+    $ bomsh/scripts/bomsh_rebuild_rpm.py -c alma+epel-8-x86_64 --docker_image_base almalinux:8 -s sysstat-11.7.3-9.el8.src.rpm -d bomsh/scripts/sample_sysstat_cvedb.json -o outdir --mock_option=--no-bootstrap-image
     $ grep -B1 -A3 CVElist outdir/bomsher_out/bomsh_logfiles/bomsh_search_jsonfile-details.json
     $ # the above should take only a few minutes, and the below may take tens of minutes
     $ wget https://buildinfos.debian.net/buildinfo-pool/s/sysstat/sysstat_11.7.3-1_all-amd64-source.buildinfo
