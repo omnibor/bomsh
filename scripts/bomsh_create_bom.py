@@ -446,7 +446,7 @@ def update_hash_tree_node_build_info(afile_db, ahash, outfile, key_value, key_st
         afile_db[key_str] = key_value
 
 
-def update_hash_tree_node_hashtree(db, ahash, outfile, infiles, argv_str, pid='', build_tool='', pkg_info=''):
+def update_hash_tree_node_hashtree(db, ahash, outfile, infiles, argv_str, pid='', build_tool='', pkg_info='', dynlibs=[]):
     '''
     Update the build_cmd and hashtree of a single node in the hash tree
 
@@ -457,6 +457,8 @@ def update_hash_tree_node_hashtree(db, ahash, outfile, infiles, argv_str, pid=''
     :param argv_str: the full shell command with all its command line options/parameters
     :param pid: the PID of the shell command
     :param build_tool: the build_tool info
+    :param pkg_info: the RPM/DEB package info
+    :param dynlibs: the dynamic library dependencies for the outfile
     returns the newly created hash_tree, empty or not. This is a list of checksums
     '''
     afile_db = db[ahash]
@@ -466,6 +468,9 @@ def update_hash_tree_node_hashtree(db, ahash, outfile, infiles, argv_str, pid=''
         update_hash_tree_node_build_info(afile_db, ahash, outfile, build_tool, "build_tool")
     if pkg_info:
         update_hash_tree_node_build_info(afile_db, ahash, outfile, pkg_info, "pkg_info")
+    if dynlibs and "dyn_libs" not in afile_db:  # not overwrite existing dyn_libs value
+        #afile_db["dyn_libs"] = [f[0] for f in dynlibs]
+        afile_db["dyn_libs"] = dynlibs  # easier to keep both checksum and path
     # Next update the hashtree as needed
     hash_tree = [f[0] for f in infiles]
     if pid and pid in g_pre_exec_db:
@@ -543,6 +548,13 @@ def update_hash_tree_db_and_gitbom(db, record):
         if not ahash:
             continue
         update_hash_tree_node_filepath(db, ahash, afile, cvehint)
+    dynlibs = []
+    if "dynlibs" in record:
+        dynlibs = record["dynlibs"]
+    for ahash, afile in dynlibs:
+        if not ahash:
+            continue
+        update_hash_tree_node_filepath(db, ahash, afile)
     if len(infiles) == 1 and checksum == infiles[0][0]:
         # input and output file have the exact same checksum, skip it
         verbose("Warning: unary transform of same checksum, skip updating hash tree DB.")
@@ -554,7 +566,7 @@ def update_hash_tree_db_and_gitbom(db, record):
         build_tool = record["build_tool"]
     if "pkg_info" in record:
         pkg_info = record["pkg_info"]
-    hash_tree = update_hash_tree_node_hashtree(db, checksum, outfile, infiles, argv_str, pid, build_tool=build_tool, pkg_info=pkg_info)
+    hash_tree = update_hash_tree_node_hashtree(db, checksum, outfile, infiles, argv_str, pid, build_tool=build_tool, pkg_info=pkg_info, dynlibs=dynlibs)
     verbose("There are " + str(len(hash_tree)) + " checksums in hash_tree for outfile: " + outfile)
     if g_bomdir:
         update_gitbom_dir(g_bomdir, hash_tree, checksum, outfile)
@@ -647,6 +659,18 @@ def read_raw_logfile(raw_logfile):
                     record["infiles"] = [(checksum, file_path, cve_hint),]
                 else:
                     record["infiles"].append( (checksum, file_path, cve_hint) )
+            elif line.startswith("dynlib: "):
+                tokens = line.split()
+                if len(tokens) > 3:
+                    checksum = tokens[1]
+                    file_path = tokens[3]
+                elif len(tokens) > 2:
+                    checksum = ''
+                    file_path = tokens[2]
+                if "dynlibs" not in record:
+                    record["dynlibs"] = [(checksum, file_path),]
+                else:
+                    record["dynlibs"].append( (checksum, file_path) )
             elif line.startswith("build_cmd: "):
                 record["build_cmd"] = line[11:]
             elif line.startswith("build_tool: "):
