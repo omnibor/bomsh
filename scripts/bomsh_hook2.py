@@ -601,7 +601,7 @@ def get_all_subfiles_in_gcc_cmdline(gccline, pwd, prog):
     """
     if " -o " not in gccline and " -c " not in gccline:
         verbose("Warning: no output file for gcc line: " + gccline, LEVEL_3)
-        return ('', [])
+        return ('', [], [])
     tokens = gccline.split()
     if " -o " in gccline:
         oindex = tokens.index("-o")
@@ -612,7 +612,7 @@ def get_all_subfiles_in_gcc_cmdline(gccline, pwd, prog):
         tokens2[-1] = "o"
         output_file = ".".join(tokens2)
     if output_file in ("/dev/null", "conftest.o", "conftest", "conftest2.o"):
-        return ('', [])
+        return ('', [], [])
     output_file = get_real_path(output_file, pwd)
     skip_token_list = set(("-MT", "-MF", "-x", "-I", "-B", "-D", "-L", "-isystem", "-iquote", "-idirafter", "-iprefix",
         "-isysroot", "-iwithprefix", "-iwithprefixbefore", "-imultilib", "-include"))
@@ -659,33 +659,41 @@ def get_all_subfiles_in_gcc_cmdline(gccline, pwd, prog):
         else:
             verbose("Warning: this subfile is not file: " + subfile)
     verbose("library_paths: " + str(library_paths) + " library_names: " + str(library_names), LEVEL_3)
-    library_paths = set(library_paths)
+    # subfiles contain both input files and the output file
+    subfiles = [afile for afile in subfiles if afile != output_file]
+    # Handle dynamic and static libraries
+    infiles, dyn_libs, static_libs = [], [], []
+    for afile in subfiles:  # remove shared libraries from infiles
+        if is_shared_library(afile):
+            if not args.record_no_dyn_libs:
+                dyn_libs.append(afile)
+        else:
+            infiles.append(afile)
     # remove shared libraries from library_names
-    static_libs = []
     for lib_name in set(library_names):
         lib_filename = "lib" + lib_name + ".so"
         shared_lib_exists = False
         for lib_path in library_paths:
             libfile = get_real_path(os.path.join(lib_path, lib_filename), pwd)
             if os.path.isfile(libfile):
+                if not args.record_no_dyn_libs:
+                    dyn_libs.append(libfile)
                 shared_lib_exists = True
                 verbose("Found shared library " + libfile)
                 break
         if not shared_lib_exists:
             static_libs.append("lib" + lib_name + ".a")
     verbose("library_paths: " + str(library_paths) + " static_libs: " + str(static_libs), LEVEL_3)
-    # add static libraries to subfiles
+    # add static libraries to infiles
     for lib_filename in static_libs:
         for lib_path in library_paths:
             libfile = get_real_path(os.path.join(lib_path, lib_filename), pwd)
             if os.path.isfile(libfile):
-                subfiles.append(libfile)
+                infiles.append(libfile)
                 verbose("Adding static library " + libfile)
                 break
-    # subfiles contain both input files and the output file
-    infiles = [afile for afile in subfiles if afile != output_file]
     infiles = handle_linux_kernel_piggy_object(output_file, infiles, pwd)
-    return (output_file, infiles)
+    return (output_file, infiles, dyn_libs)
 
 
 def get_all_subfiles_in_rustc_cmdline(gccline, pwd, prog):
@@ -1138,6 +1146,49 @@ def get_file_hash(afile, hash_alg="sha1", use_cache=True):
     return ''
 
 
+def get_file_hash_with_dict(afile, ahashes, hash_alg="sha1"):
+    '''
+    Get the hash value of a file with help of a dict.
+    :param afile: the file to calculate the git hash or digest.
+    :param ahashes: a dict of { hash_alg => { afile => hash } }
+    :param hash_alg: the hashing algorithm, either SHA1 or SHA256
+    '''
+    if ahashes:
+        hashes = ahashes[hash_alg]
+        if afile in hashes:
+            return hashes[afile]
+    return get_file_hash(afile, hash_alg)
+
+
+def can_find_all_hashes(hashes, afiles):
+    '''
+    Can we find all hashes for a list of files in HASHES dict?
+    :param hashes: a dict of { afile => hash }
+    :param afiles: a list of files
+    returns True if all hashes are found, otherwise False
+    '''
+    for afile in afiles:
+        if afile not in hashes:
+            return False
+    return True
+
+
+def get_dynlib_lines(dyn_libs, ahashes, hash_alg="sha1"):
+    '''
+    Get a list of text lines for a list of dynamic libraries.
+    :param dyn_libs: a list of dynamic library files
+    :param ahashes: a dict of { hash_alg => { afile => hash } }
+    :param hash_alg: the hashing algorithm, either SHA1 or SHA256
+    '''
+    # always try to utilize saved githash_file
+    if dyn_libs and not (ahashes and can_find_all_hashes(ahashes[hash_alg], dyn_libs)):
+        if not g_githash_extra_objects_list:
+            g_githash_extra_objects_list.extend(dyn_libs)
+        ahashes = {}
+        ahashes[hash_alg] = get_infile_hashes(dyn_libs, hash_alg, min_size=1)
+    return ["dynlib: " + get_file_hash_with_dict(dynlib, ahashes, hash_alg) + " path: " + dynlib for dynlib in dyn_libs]
+
+
 def get_noroot_path(afile):
     '''
     Get the path without rootdir prefix.
@@ -1154,6 +1205,8 @@ g_githash_cache = {}
 g_githash_cache_initial_size = 0
 # the below ld linker implicit object files are also cached
 g_githash_link_objects_list = ("crtbeginS.o", "crtendS.o", "Scrt1.o", "crti.o", "crtn.o", "crt1.o", "crtbegin.o", "crtend.o", "liblto_plugin.so")
+# the below is usually dynamic library files
+g_githash_extra_objects_list = []
 
 def get_git_file_hash_with_cache(afile, hash_alg="sha1"):
     '''
@@ -1165,27 +1218,29 @@ def get_git_file_hash_with_cache(afile, hash_alg="sha1"):
     if g_githash_cache and afile_key in g_githash_cache:
         return g_githash_cache[afile_key]
     ahash = get_file_hash(afile, hash_alg)
-    if not args.no_githash_cache_file and (afile[-2:] == ".h" or os.path.basename(afile) in g_githash_link_objects_list):
+    if not args.no_githash_cache_file and (afile[-2:] == ".h" or os.path.basename(afile) in g_githash_link_objects_list or afile in g_githash_extra_objects_list):
         # only cache header files or the ld linker implicit object files
         verbose("Saving header githash cache, hash: " + ahash + " afile: " + afile, LEVEL_3)
         g_githash_cache[afile_key] = ahash
     return ahash
 
 
-def get_infile_hashes(infiles, hash_alg):
+def get_infile_hashes(infiles, hash_alg, min_size=4):
     '''
     Get hashes for a list of input files
     :param infiles: a list of input files
+    :param hash_alg: the hashing algorithm, either SHA1 or SHA256
+    :param min_size: the minimum size of infiles to utilize g_githash_cache
     returns a dict of {infile : hash}
     '''
     global g_githash_cache
     if not args.no_githash_cache_file and not g_githash_cache:
         global g_githash_cache_initial_size
-        if len(infiles) > 4 and os.path.exists(g_githash_cache_file):
+        if len(infiles) >= min_size and os.path.exists(g_githash_cache_file):
             g_githash_cache = load_json_db(g_githash_cache_file)
             g_githash_cache_initial_size = len(g_githash_cache)
             verbose("load_json_db githash cache db, initial_size: " + str(g_githash_cache_initial_size), LEVEL_3)
-    if len(infiles) > 4:
+    if len(infiles) >= min_size:
         return {infile:get_git_file_hash_with_cache(infile, hash_alg) for infile in infiles}
     return {infile:get_file_hash(infile, hash_alg) for infile in infiles}
 
@@ -1398,12 +1453,12 @@ def gitbom_record_hash(outfile_checksum, outfile, infiles, infile_checksums, pwd
     if ignore_this_record:
         lines.append("ignore_this_record: information only")
     lines.append("build_cmd: " + argv_str)
-    # append additional lines here, like package name/version, etc.
-    if extra_lines:
-        lines.extend(extra_lines)
     if args.record_build_tool and prog:
         build_tool_info = get_build_tool_info(prog, pwd, hash_alg)
         lines.append(build_tool_info)
+    # append additional lines here, like package name/version, dynamic libraries, etc.
+    if extra_lines:
+        lines.extend(extra_lines)
     if pid:
         lines.append("==== End of raw info for PID " + pid + " process\n\n")
     else:
@@ -1511,7 +1566,7 @@ def gitbom_create_adg_and_record_hash(outfile, infiles, infile_hashes, adg_doc, 
     gitbom_record_hash(outhash, outfile, infiles, infile_hashes, pwd, argv_str, pid=pid, prog=prog, hash_alg=hash_alg, ignore_this_record=ignore_this_record, extra_lines=extra_lines)
 
 
-def record_raw_info(outfile, infiles, pwd, argv_str, pid='', prog='', outfile_checksum='', infile_checksums='', ignore_this_record=False, extra_lines=[]):
+def record_raw_info(outfile, infiles, pwd, argv_str, pid='', prog='', outfile_checksum='', infile_checksums='', ignore_this_record=False, extra_lines=[], dyn_libs=[]):
     '''
     Not just record the raw info for a list of infiles and outfile.
     The OmniBOR extra work to do for the build step
@@ -1525,6 +1580,8 @@ def record_raw_info(outfile, infiles, pwd, argv_str, pid='', prog='', outfile_ch
     :param outfile_checksum: the checksum of the output file
     :param infile_checksums: a dict of checksums of input files, { hash_alg : { infile : hash } }
     :param ignore_this_record: info only, ignore this record for create_bom processing
+    :param extra_lines: a list of text lines to append to existing lines, like pkg name/version, etc.
+    :param dyn_libs: a list of dynamic library files, similar as infiles, but treated differently
     '''
     sha1_infile_hashes = []
     sha1_adg_doc = ''
@@ -1553,10 +1610,12 @@ def record_raw_info(outfile, infiles, pwd, argv_str, pid='', prog='', outfile_ch
             gitbom_embed_bomid_elf(outfile, sha1_adg_hash, sha256_adg_hash)
     if "sha1" in g_hashtypes:
         gitbom_create_adg_and_record_hash(outfile, infiles, sha1_infile_hashes, sha1_adg_doc, sha1_adg_hash, pwd, argv_str, pid,
-                                          prog=prog, ignore_this_record=ignore_this_record, hash_alg="sha1", extra_lines=extra_lines)
+                                          prog=prog, ignore_this_record=ignore_this_record, hash_alg="sha1",
+                                          extra_lines=(extra_lines + get_dynlib_lines(dyn_libs, infile_checksums)))
     if "sha256" in g_hashtypes:
         gitbom_create_adg_and_record_hash(outfile, infiles, sha256_infile_hashes, sha256_adg_doc, sha256_adg_hash, pwd, argv_str, pid,
-                                          prog=prog, ignore_this_record=ignore_this_record, hash_alg="sha256", extra_lines=extra_lines)
+                                          prog=prog, ignore_this_record=ignore_this_record, hash_alg="sha256",
+                                          extra_lines=(extra_lines + get_dynlib_lines(dyn_libs, infile_checksums, "sha256")))
 
 ############################################################
 #### End of hash/checksum routines ####
@@ -1825,7 +1884,7 @@ def get_c_file_depend_files_multi(gcc_cmd, pwd, cfiles):
     return depends_list
 
 
-def handle_gcc_ctoexe_command(prog, pwddir, argv_str, pid, outfile, infiles):
+def handle_gcc_ctoexe_command(prog, pwddir, argv_str, pid, outfile, infiles, dyn_libs):
     '''
     Process the gcc command that compiles C/C++ source files to executable/.so directly
     :param prog: the program binary
@@ -1834,6 +1893,7 @@ def handle_gcc_ctoexe_command(prog, pwddir, argv_str, pid, outfile, infiles):
     :param pid: PID of the shell command
     :param outfile: the output file
     :param infiles: the list of input files
+    :param dyn_libs: a list of dynamic library files
     returns the outfile
     '''
     """
@@ -1847,7 +1907,7 @@ def handle_gcc_ctoexe_command(prog, pwddir, argv_str, pid, outfile, infiles):
         ldout_file = ldout_files[hash_alg]
         if not os.path.exists(ldout_file):
             verbose("Warning: ldout file is not found, simply record outfile/infiles for this command")
-            record_raw_info(outfile, infiles, pwddir, argv_str, pid, prog=prog)
+            record_raw_info(outfile, infiles, pwddir, argv_str, pid, prog=prog, dyn_libs=dyn_libs)
             return outfile
     get_os_env_tmp_dir()  # get env TMPDIR for use in finding tmp_o file
     cfiles = get_source_files_in_files(infiles)
@@ -1872,14 +1932,21 @@ def handle_gcc_ctoexe_command(prog, pwddir, argv_str, pid, outfile, infiles):
             # but we still try to create ADG docs and record the hashes of output and input files.
             gitbom_create_adg_and_record_hash(depends[1], depends[2], '', '', '', pwddir, argv_str, pid, prog=prog, outhash=depends[0], hash_alg=hash_alg)
             #record_raw_info(depends[1], depends[2], pwddir, argv_str, pid, prog=prog, outfile_checksum=depends[0], skip_embed_bomid=True)
+    # Get infiles and dyn_libs from ldout_lines
     d_infiles = { hash_alg: get_infiles_from_ldout_lines( ldout_lines[hash_alg] ) for hash_alg in ldout_files }
+    d_dynlibs = { hash_alg: get_dynlibs_from_ldout_lines( ldout_lines[hash_alg] ) for hash_alg in ldout_files }
     new_infiles = []
     for hash_alg in d_infiles:
-        new_infiles = d_infiles[hash_alg].keys()
+        new_infiles = list(d_infiles[hash_alg].keys())
         # sha1 and sha256 should have the exactly same list of infiles
         break
+    for hash_alg in d_dynlibs:
+        dyn_libs = d_dynlibs[hash_alg].keys()
+        break
+    for hash_alg in d_infiles:  # add dynlib hashes to d_infiles for later hash lookup in record_raw_info
+        d_infiles[hash_alg].update(d_dynlibs[hash_alg])
     # still try to embed bomid for the output file
-    record_raw_info(outfile, new_infiles, pwddir, argv_str, pid, prog=prog, infile_checksums=d_infiles)
+    record_raw_info(outfile, new_infiles, pwddir, argv_str, pid, prog=prog, infile_checksums=d_infiles, dyn_libs=dyn_libs)
     # the ldout file can now be removed
     for hash_alg in ldout_files:
         os.remove(ldout_files[hash_alg])
@@ -1910,7 +1977,7 @@ def process_gcc_command(prog, pwddir, argv_str, pid):
     global g_cve_check_rules
     if args.cve_check_dir:
         g_cve_check_rules = convert_to_srcfile_cve_rules_db(read_cve_check_rules(args.cve_check_dir))
-    (outfile, infiles) = get_all_subfiles_in_gcc_cmdline(argv_str, pwddir, prog)
+    (outfile, infiles, dyn_libs) = get_all_subfiles_in_gcc_cmdline(argv_str, pwddir, prog)
     verbose("get_all_subfiles_in_gcc_cmdline, outfile: " + outfile + " infiles: " + str(infiles), LEVEL_4)
     if not outfile:  # we don't support a.out as output file
         return ''
@@ -1933,12 +2000,12 @@ def process_gcc_command(prog, pwddir, argv_str, pid):
                     infiles = infiles2
         record_raw_info(outfile, infiles, pwddir, argv_str, pid, prog=prog)
     elif does_source_file_exist_in_files(infiles):  # compile source to exe/.so directly
-        return handle_gcc_ctoexe_command(prog, pwddir, argv_str, pid, outfile, infiles)
+        return handle_gcc_ctoexe_command(prog, pwddir, argv_str, pid, outfile, infiles, dyn_libs)
     else:  # this gcc only invokes LD to link *.o files, and is redundant, so record it for information only
         ignore = True
         #if "clang" in os.path.basename(prog):  # clang seems to not invoke LD?
         #    ignore = False
-        record_raw_info(outfile, infiles, pwddir, argv_str, pid, prog=prog, ignore_this_record=ignore)
+        record_raw_info(outfile, infiles, pwddir, argv_str, pid, prog=prog, ignore_this_record=ignore, dyn_libs=dyn_libs)
     return outfile
 
 
@@ -1984,11 +2051,24 @@ def get_tmp_infiles_from_ldout_lines(ldout_lines):
 def get_infiles_from_ldout_lines(ldout_lines):
     '''
     Get the list of infiles and their hashes from LD out file
-    :param ldout_file: the ldout file that stores the record raw_info for this LD command
+    :param ldout_lines: the text lines read from ldout file that stores the record raw_info for this LD command
     '''
     infiles = {}
     for line in ldout_lines:
         if line[:8] == "infile: ":
+            tokens = line.split()
+            infiles[tokens[3]] = tokens[1]
+    return infiles
+
+
+def get_dynlibs_from_ldout_lines(ldout_lines):
+    '''
+    Get the list of dynlib files and their hashes from LD out file
+    :param ldout_lines: the text lines read from ldout file that stores the record raw_info for this LD command
+    '''
+    infiles = {}
+    for line in ldout_lines:
+        if line[:8] == "dynlib: ":
             tokens = line.split()
             infiles[tokens[3]] = tokens[1]
     return infiles
@@ -2037,7 +2117,7 @@ def process_ld_command(prog, pwddir, argv_str, pid):
     :param pid: PID of the shell command
     '''
     # ld command can be handled the same way as gcc command, for outfile,infiles
-    (outfile, infiles) = get_all_subfiles_in_gcc_cmdline(argv_str, pwddir, prog)
+    (outfile, infiles, dyn_libs) = get_all_subfiles_in_gcc_cmdline(argv_str, pwddir, prog)
     if not outfile:  # we don't support a.out as output file
         return ''
     if not infiles:  # if infiles is empty, no need to record info for this ld cmd
@@ -2046,8 +2126,6 @@ def process_ld_command(prog, pwddir, argv_str, pid):
         # sometimes, ld cmd fails, for example, missing library -lciscosafec to link
         verbose("Warning: ld outfile does not exist: " + outfile)
         return ''
-    # explicitly remove shared libraries from the list of infiles
-    infiles = [afile for afile in infiles if not is_shared_library(afile)]
     """
     if args.no_dependent_headers:
         # the outfile should be generated by previous gcc compile command
@@ -2063,11 +2141,12 @@ def process_ld_command(prog, pwddir, argv_str, pid):
             rerun_shell_command(pwddir, argv_str)
         # this ld is invoked by gcc_ctoexe, and will be processed by later gcc, so this ld record is for info only
         for hash_alg in g_hashtypes:
-            raw_str = gitbom_record_hash('', outfile, infiles, '', pwddir, argv_str, pid=pid, ignore_this_record=True, hash_alg=hash_alg)
+            extra_lines = get_dynlib_lines(dyn_libs, None, hash_alg)
+            raw_str = gitbom_record_hash('', outfile, infiles, '', pwddir, argv_str, pid=pid, prog=prog, ignore_this_record=True, hash_alg=hash_alg, extra_lines=extra_lines)
             # Write the raw info to a file for later use by gcc
             write_bomsh_ldout_file(outfile, raw_str, hash_alg)
     else:
-        record_raw_info(outfile, infiles, pwddir, argv_str, pid, prog=prog)
+        record_raw_info(outfile, infiles, pwddir, argv_str, pid, prog=prog, dyn_libs=dyn_libs)
     return outfile
 
 
@@ -2997,6 +3076,9 @@ def rtd_parse_options():
     parser.add_argument("--record_build_tool",
                     action = "store_true",
                     help = "record build tool information")
+    parser.add_argument("--record_no_dyn_libs",
+                    action = "store_true",
+                    help = "do not record dynamic library dependencies as metadata")
     parser.add_argument("--no_githash_cache_file",
                     action = "store_true",
                     help = "not use a helper cache file to store githash of header files")
