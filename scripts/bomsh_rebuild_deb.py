@@ -155,7 +155,9 @@ CMD if [ "${SRC_TAR_DIR}" ]; then srctardir_param="--srctardir=/out/bomsher_in" 
     cp /tmp/yongkui-srcpkg/* bomsh_logfiles ; \\
     debfiles=`for i in debs/*.deb ; do  echo -n $i, ; done | sed 's/.$//'` ; \\
     if [ "${CVEDB_FILE}" ]; then cvedb_file_param="-d /out/bomsher_in/${CVEDB_FILE}" ; fi ; \\
-    /tmp/bomsh_search_cve.py --derive_sbom -b omnibor_dir $cvedb_file_param -f $debfiles -vvv ; cp /tmp/bomsh_search_jsonfile* bomsh_logfiles/ ;
+    /tmp/bomsh_search_cve.py --derive_sbom -b omnibor_dir $cvedb_file_param -f $debfiles -vvv ; cp /tmp/bomsh_search_jsonfile* bomsh_logfiles/ ; \\
+    if [ "${SYFT_SBOM}" ]; then /tmp/bomsh_sbom.py -b omnibor_dir -F $debfiles -vv --output_dir syft_sbom --sbom_format spdx --force_insert ; fi ; \\
+    if [ "${SYFT_SBOM}" ]; then /tmp/bomsh_sbom.py -b omnibor_dir -F $debfiles -vv --output_dir syft_sbom --sbom_format spdx-json --force_insert ; fi ;
 '''
 
 def create_dockerfile(work_dir):
@@ -198,6 +200,9 @@ def run_docker(buildinfo_file, output_dir):
     if args.cve_db_file:
         os.system("cp -f " + args.cve_db_file + " " + bomsher_indir)
         docker_cmd += ' -e CVEDB_FILE=' + os.path.basename(args.cve_db_file)
+    if args.syft_sbom:
+        # Generate SBOM document with the syft tool
+        docker_cmd += ' -e SYFT_SBOM=1'
     docker_cmd += ' -v ' + output_dir + ':/out $(docker build -t bomsher-deb -q ' + bomsher_indir + ')'
     verbose("==== Here is the docker run command: " + docker_cmd, LEVEL_1)
     os.system(docker_cmd)
@@ -233,6 +238,9 @@ def rtd_parse_options():
     parser.add_argument("-b", "--baseline_rebuild",
                     action = "store_true",
                     help = "baseline debrebuild only, do not run bomtrace2 to generate OmniBOR documents")
+    parser.add_argument("--syft_sbom",
+                    action = "store_true",
+                    help = "run syft to generate DEB SBOM in spdx/spdx-json SBOM format")
     parser.add_argument("-r", "--remove_intermediate_files",
                     action = "store_true",
                     help = "after run completes, delete all intermediate files like Dockerfile, etc.")
