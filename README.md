@@ -41,6 +41,8 @@ Multiple Python scripts are developed to work together with these tools.
 - bomsh_rebuild_deb.py script, which reproducibly rebuilds Debian packages from its buildinfo, and generates its OmniBOR documents.
 - bomsh_rebuild_rpm.py script, which rebuilds RPM packages from its source RPM, and generates its OmniBOR documents.
 - bomsh_index_debrepo.py script, which creates a blob index database for source packages of Debian/Ubuntu repositories.
+- bomsh_index_yocto.py script, which creates a blob index database for source packages of OpenEmbedded/Yocto.
+- bomsh_index_ws.py script, which creates a blob index database for software build workspace.
 - bomsh_sbom.py script, which creates or updates SPDX SBOM documents with OmniBOR info.
 
 Quick Start
