@@ -146,11 +146,13 @@ RUN cd /root ; git clone https://github.com/omnibor/bomsh.git ; \\
 CMD if [ -z "${BASELINE_REBUILD}" ]; then bomtrace_cmd="/tmp/bomtrace2 -w /tmp/bomtrace_watched_programs -c /tmp/bomtrace.conf -o /tmp/bomsh_hook_strace_logfile " ; fi ; \\
     if [ -z "${CHROOT_CFG}" ]; then CHROOT_CFG=default ; fi ; \\
     mkdir -p /out/bomsher_out ; cd /out/bomsher_out ; \\
-    $bomtrace_cmd mock -r /etc/mock/${CHROOT_CFG}.cfg $MOCK_OPTION --rebuild /out/bomsher_in/$SRC_RPM_FILE --resultdir=./tmprpms ; \\
+    $bomtrace_cmd mock -r /etc/mock/${CHROOT_CFG}.cfg $MOCK_OPTION --rebuild /out/bomsher_in/$SRC_RPM_FILE --resultdir=./tmprpms --no-cleanup-after ; \\
     mkdir rpms ; cp tmprpms/*.rpm rpms ; rm -rf tmprpms ; \\
     if [ "${BASELINE_REBUILD}" ]; then exit 0 ; fi ; \\
     rm -rf omnibor omnibor_dir ; mv .omnibor omnibor ; mkdir -p bomsh_logfiles ; cp -f /tmp/bomsh_hook_*logfile* bomsh_logfiles/ ; \\
-    /tmp/bomsh_create_bom.py -b omnibor_dir -r /tmp/bomsh_hook_raw_logfile.sha1 ; cp /tmp/bomsh_createbom_* bomsh_logfiles ; \\
+    /tmp/bomsh_index_ws.py --chroot_dir /var/lib/mock/${CHROOT_CFG}/root -p /out/bomsher_in/$SRC_RPM_FILE -r /tmp/bomsh_hook_raw_logfile.sha1 ; \\
+    /tmp/bomsh_create_bom.py -b omnibor_dir -r /tmp/bomsh_hook_raw_logfile.sha1 --index_db_file /tmp/bomsh-index-blob-pkg-db.json ; \\
+    cp /tmp/bomsh-index-* /tmp/bomsh_createbom_* bomsh_logfiles ; \\
     rpmfiles=`for i in rpms/*.rpm ; do  echo -n $i, ; done | sed 's/.$//'` ; \\
     cp /tmp/bomsh*.py bomsh_logfiles ; cp /tmp/bomtrace* bomsh_logfiles ; \\
     if [ "${CVEDB_FILE}" ]; then cvedb_file_param="-d /out/bomsher_in/${CVEDB_FILE}" ; fi ; \\

@@ -73,7 +73,7 @@ g_jsonfile = "/tmp/bomsh_search_jsonfile"
 # All the CVE lists to store CVEs in the search result tree
 g_cvelist_keys = ("NoCVElist", "CVElist", "FixedCVElist", "cvehint_CVElist", "cvehint_FixedCVElist")
 # the below are metadata keys that should not be recursed by tree recursion
-g_metadata_keys = ["file_path", "file_paths", "build_cmd", "pkg_info", "pkgs", "dyn_libs", "cvehints", "swh_path"] + list(g_cvelist_keys)
+g_metadata_keys = ["file_path", "file_paths", "build_cmd", "pkg_info", "pkgs", "prov_pkg", "dyn_libs", "cvehints", "swh_path"] + list(g_cvelist_keys)
 # The top level software heritage (SWH) directory
 g_swh_dir = ''
 # a list of source blob files directory for SWH tree
@@ -825,7 +825,7 @@ def create_hash_tree_for_checksum(checksum, ancestors, checksum_db, checksum_lin
         print("Error in creating hash tree: loop detected for checksum " + checksum + " ancestors: " + str(ancestors))
         return "RECURSION_LOOP_DETECTED"
     # some useful metadata to query/save in the result hash tree
-    useful_metadata_keys = ("file_path", "build_cmd", "pkg_info", "dyn_libs")
+    useful_metadata_keys = ("file_path", "build_cmd", "pkg_info", "prov_pkg", "dyn_libs")
     entry = {}
     if checksum in checksum_db:
         # Get a shallow copy which should keep metadata like file_path, etc., if it exists
@@ -2108,7 +2108,7 @@ def derive_componant_name_version_from_path(path):
     """
     found_version_string = ''
     tokens = path.split("/")
-    for token in tokens[-2:-12:-1]: # 10 tokens in reverse order should be sufficient, also skip filename itself
+    for token in (tokens[-2:-12:-1] + tokens[-2:]): # 10 tokens in reverse order should be sufficient, also filename itself is the last to check
         if is_version_string(token):
             found_version_string = token
             continue
@@ -2226,6 +2226,13 @@ def derive_sbom_for_atree(tree, metadata_dir):
             continue
         else:
             value = g_metadata_db[blob_id]
+            if "prov_pkg" in value: # this blob belongs to a specific RPM/DEB
+                blob_str = blob_id
+                if "file_path" in value:
+                    blob_str = blob_id + " " + value["file_path"]
+                pkg_key = value["prov_pkg"]
+                dict_append_or_create_list(sbom_db, pkg_key, blob_str)
+                continue
             if "pkgs" in value: # this blob belongs to RPM/DEB
                 blob_str = blob_id
                 if "file_path" in value:
@@ -2311,6 +2318,8 @@ def rtd_parse_options():
                     help = "the JSON database file containing package name/version info for file checksums")
     parser.add_argument('--tmpdir',
                     help = "tmp directory, which is /tmp by default")
+    parser.add_argument('-O', '--output_dir',
+                    help = "the output directory to store generated search result files")
     parser.add_argument('-j', '--jsonfile',
                     help = "the output JSON file for the search result")
     parser.add_argument('--cve_check_dir',
@@ -2371,6 +2380,11 @@ def rtd_parse_options():
     if args.tmpdir:
         g_tmpdir = args.tmpdir
         g_jsonfile = os.path.join(g_tmpdir, "bomsh_search_jsonfile")
+    if args.output_dir:
+        output_dir = args.output_dir
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        g_jsonfile = os.path.join(output_dir, "bomsh_search_jsonfile")
     if args.jsonfile:
         g_jsonfile = args.jsonfile
     global g_swh_dir

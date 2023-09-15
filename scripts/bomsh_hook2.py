@@ -815,12 +815,14 @@ def get_all_subfiles_in_ar_cmdline(arline, pwd):
     tokens = arline.split()
     if len(tokens) < 3:
         return ('', [])
-    if tokens[1] == "--plugin":  # remove "--plugin name" part
+    token1 = tokens[1]
+    if token1 == "--plugin":  # remove "--plugin name" part
         tokens = tokens[:1] + tokens[3:]
     if len(tokens) > 3 and args.pre_exec:
         return ('', [])
-    if not ((len(tokens) > 3 and "c" in tokens[1]) or (len(tokens) == 3 and "s" in tokens[1])):
+    if not ((len(tokens) > 3 and ("c" in token1 or "r" in token1)) or (len(tokens) == 3 and "s" in token1)):
         # Only "ar -c archive file1...fileN", "ar -c archive @filelist", and "ar -s archive" are supported
+        # also support "ar rvs file1...fileN" format
         return ('', [])
     if tokens[2] == "libconftest.a":
         return ('', [])

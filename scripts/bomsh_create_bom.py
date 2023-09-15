@@ -64,6 +64,9 @@ g_treedb = {}
 g_bomdb = {}
 # g_pre_exec_db temporarily stores the pre-exec checksum of the same input/output file for strip/ranlib commands.
 g_pre_exec_db = {}
+# index DB with checksum (blob_id) as key, containing package/component name/version, etc.
+# format of { blob_id => package_string } dict
+g_index_db = {}
 
 #
 # Helper routines
@@ -404,6 +407,9 @@ def update_hash_tree_node_filepath(db, ahash, afile, cvehint=None):
                 afile_db["file_paths"].append(afile)
         else:
             afile_db["file_paths"] = [afile_db["file_path"], afile]
+    # extra handling of provider pkg_info
+    if ahash in g_index_db:
+        afile_db["prov_pkg"] = g_index_db[ahash]
     # extra handling of cvehint
     if not cvehint:
         return
@@ -909,6 +915,8 @@ def rtd_parse_options():
                     help = "the file to save #lines read from raw_logfile, this option also means to read jsonfile for inital hash tree and read raw_logfile starting at #lseek_lines line")
     parser.add_argument('--tmpdir',
                     help = "tmp directory, which is /tmp by default")
+    parser.add_argument('--index_db_file',
+                    help = "the JSON database file containing package name/version info for file checksums")
     parser.add_argument('-j', '--jsonfile',
                     help = "the generated OmniBOR artifact tree JSON file")
     parser.add_argument('-p', '--package_files',
@@ -951,6 +959,7 @@ def rtd_parse_options():
     global g_with_bom_dir
     global g_raw_logfile
     global g_logfile
+    global g_index_db
     global g_jsonfile
     global g_tmpdir
     if args.tmpdir:
@@ -974,6 +983,8 @@ def rtd_parse_options():
         g_raw_logfile = args.raw_logfile
     if args.logfile:
         g_logfile = args.logfile
+    if args.index_db_file:
+        g_index_db = load_json_db(args.index_db_file)
     if args.jsonfile:
         g_jsonfile = args.jsonfile
 
