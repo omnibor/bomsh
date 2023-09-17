@@ -46,6 +46,7 @@ args = None
 g_chroot_dir = ''
 g_tmpdir = "/tmp"
 g_jsonfile = "/tmp/bomsh-index"
+g_package_type = "rpm"
 
 #
 # Helper routines
@@ -245,8 +246,8 @@ def get_chroot_path(path):
     """
     Get the real path in chroot environment.
     """
-    if g_chroot_dir:
-        return os.path.join(g_chroot_dir, path.lstrip("/"))
+    if g_chroot_dir and not path.startswith(g_chroot_dir):
+        return g_chroot_dir + path
     return path
 
 
@@ -272,13 +273,18 @@ def get_prov_pkg(path, use_cache=True):
     if not os.path.exists(chroot_path):
         verbose("Warning: this path does not exist: " + chroot_path, LEVEL_2)
         return ''
-    cmd = get_chroot_cmd('rpm -q --whatprovides ' + path + ' 2>/dev/null')
+    if g_package_type == "deb":
+        cmd = get_chroot_cmd('dpkg -S ' + path + ' 2>/dev/null')
+    else:
+        cmd = get_chroot_cmd('rpm -q --whatprovides ' + path + ' 2>/dev/null')
     verbose(cmd, LEVEL_2)
     try:
         output = get_shell_cmd_output(cmd)
         ret_pkg = output.splitlines()[0]  # if multiple packages, pick the first one only
     except subprocess.CalledProcessError:
         ret_pkg = ''
+    if ret_pkg.endswith(path):  # for dpkg -S output, which contains path at the end, so strip it
+        ret_pkg = ret_pkg[: - (len(path) + 2) ]
     if use_cache:
         g_prov_pkg_cache[path] = ret_pkg
     return ret_pkg
@@ -305,9 +311,20 @@ def get_provider_packages_for_files(infiles):
         else:
             pkg_db[package] = {"blobs" : [infile, ]}
     for package in pkg_db.keys():
-        pkg_info = get_installed_rpm_pkg_info(package)
+        pkg_info = get_installed_pkg_info(package)
         pkg_db[package]["pkg_info"] = pkg_info
     return pkg_db
+
+
+def get_all_installed_deb_packages():
+    '''
+    Get the list of all installed DEB packages in software build.
+    '''
+    cmd = get_chroot_cmd('dpkg -l || true')
+    verbose(cmd, LEVEL_3)
+    output = get_shell_cmd_output(cmd)
+    lines = output.splitlines()
+    return [ line.split()[1] for line in lines if line[:3] == 'ii ' ]
 
 
 def get_all_installed_rpm_packages():
@@ -315,6 +332,27 @@ def get_all_installed_rpm_packages():
     Get the list of all installed RPM packages in software build.
     '''
     cmd = get_chroot_cmd('rpm -qa || true')
+    verbose(cmd, LEVEL_3)
+    output = get_shell_cmd_output(cmd)
+    return output.splitlines()
+
+
+def get_all_installed_packages():
+    '''
+    Get the list of all installed RPM/DEB packages in software build.
+    '''
+    if g_package_type == "deb":
+        return get_all_installed_deb_packages()
+    return get_all_installed_rpm_packages()
+
+
+def get_deb_pkg_info(deb_file):
+    '''
+    Get the info of a DEB package file.
+    :param deb_file: the deb file
+    returns a list of lines of the package info.
+    '''
+    cmd = 'dpkg-deb -I ' + deb_file + ' || true'
     verbose(cmd, LEVEL_3)
     output = get_shell_cmd_output(cmd)
     return output.splitlines()
@@ -332,6 +370,18 @@ def get_rpm_pkg_info(rpm_file):
     return output.splitlines()
 
 
+def get_installed_deb_pkg_info(package):
+    '''
+    Get the info of an installed DEB package.
+    :param package: the installed DEB package name
+    returns a list of lines of the package info.
+    '''
+    cmd = get_chroot_cmd('dpkg -s ' + package + ' || true')
+    verbose(cmd, LEVEL_3)
+    output = get_shell_cmd_output(cmd)
+    return output.splitlines()
+
+
 def get_installed_rpm_pkg_info(package):
     '''
     Get the info of an installed RPM package.
@@ -339,6 +389,29 @@ def get_installed_rpm_pkg_info(package):
     returns a list of lines of the package info.
     '''
     cmd = get_chroot_cmd('rpm -qi ' + package + ' || true')
+    verbose(cmd, LEVEL_3)
+    output = get_shell_cmd_output(cmd)
+    return output.splitlines()
+
+
+def get_installed_pkg_info(package):
+    '''
+    Get the info of an installed RPM/DEB package.
+    :param package: the installed package name
+    returns a list of lines of the package info.
+    '''
+    if g_package_type == "deb":
+        return get_installed_deb_pkg_info(package)
+    return get_installed_rpm_pkg_info(package)
+
+
+def get_list_of_files_of_installed_deb_package(package):
+    '''
+    Get a list of installed files for a DEB package.
+    :param package: the installed RPM package name
+    returns a list of (checksum, file_path)
+    '''
+    cmd = get_chroot_cmd('dpkg -L ' + package + ' || true')
     verbose(cmd, LEVEL_3)
     output = get_shell_cmd_output(cmd)
     return output.splitlines()
@@ -356,6 +429,17 @@ def get_list_of_files_of_installed_rpm_package(package):
     return output.splitlines()
 
 
+def get_list_of_files_of_installed_package(package):
+    '''
+    Get a list of installed files for a RPM/DEB package.
+    :param package: the installed RPM/DEB package name
+    returns a list of (checksum, file_path)
+    '''
+    if g_package_type == "deb":
+        return get_list_of_files_of_installed_deb_package(package)
+    return get_list_of_files_of_installed_rpm_package(package)
+
+
 def get_packages_index_db(packages):
     '''
     Get the package database for a list of installed RPM packages.
@@ -364,8 +448,8 @@ def get_packages_index_db(packages):
     '''
     pkg_db = {}
     for package in packages:
-        pkg_info = get_installed_rpm_pkg_info(package)
-        afiles = get_list_of_files_of_installed_rpm_package(package)
+        pkg_info = get_installed_pkg_info(package)
+        afiles = get_list_of_files_of_installed_package(package)
         blobs = []
         for afile in afiles:
             bfile = get_chroot_path(afile)
@@ -403,7 +487,7 @@ def get_rpm_pkg_blobs(rpm_file):
 def get_rpm_pkgs_index_db(rpm_files):
     '''
     Get the package database for a list of user provided RPM packages.
-    :param packages: a list of RPM package files
+    :param rpm_files: a list of RPM package files
     returns a dict of { package => {"blobs": blobs, "pkg_info": pkg_info} }
     '''
     pkg_db = {}
@@ -412,6 +496,32 @@ def get_rpm_pkgs_index_db(rpm_files):
         blobs = get_rpm_pkg_blobs(rpm_file)
         pkg_db[os.path.basename(rpm_file)] = {"blobs": blobs, "pkg_info": pkg_info}
     return pkg_db
+
+
+def get_deb_pkgs_index_db(deb_files):
+    '''
+    Get the package database for a list of user provided DEB packages.
+    :param deb_files: a list of DEB source tarball files
+    returns a dict of { package => {"blobs": blobs, "pkg_info": pkg_info} }
+    '''
+    tarballs = get_deb_source_tarball_files()
+    verbose("DEB src tarballs: " + str(tarballs))
+    pkg_db = {}
+    for tarball in tarballs:
+        blobs = get_rpm_pkg_blobs(tarball)
+        pkg_db[os.path.basename(tarball)] = {"blobs": blobs, "pkg_info": []}
+    return pkg_db
+
+
+def get_pkgs_index_db(afiles):
+    '''
+    Get the package database for a list of user provided RPM/DEB packages.
+    :param afiles: a list of RPM/DEB package files or source tarballs
+    returns a dict of { package => {"blobs": blobs, "pkg_info": pkg_info} }
+    '''
+    if g_package_type == "deb":
+        return get_deb_pkgs_index_db(afiles)
+    return get_rpm_pkgs_index_db(afiles)
 
 
 def convert_pkg_db_to_blob_db(pkg_db):
@@ -449,7 +559,7 @@ def get_workspace_index_db(rpm_files, raw_logfile=''):
         infiles = read_all_infiles_from_raw_logfile(raw_logfile)
         pkg_db = get_provider_packages_for_files(infiles)
     else:
-        packages = get_all_installed_rpm_packages()
+        packages = get_all_installed_packages()
         if args.first_n_packages:
             first_n = int(args.first_n_packages)
             start_i = 0
@@ -457,8 +567,8 @@ def get_workspace_index_db(rpm_files, raw_logfile=''):
                 start_i = int(args.start_with_ith_package)
             packages = packages[ start_i : start_i + first_n ]
         pkg_db = get_packages_index_db(packages)
-    # Then merge the pkg DB generated from source RPM files
-    pkg_db2 = get_rpm_pkgs_index_db(rpm_files)
+    # Then merge the pkg DB generated from source RPM files or DEB tarballs
+    pkg_db2 = get_pkgs_index_db(rpm_files)
     pkg_db.update(pkg_db2)
     # Convert pkg_db to blob_db for use by bomsh_create_bom.py script
     blob_db = convert_pkg_db_to_blob_db(pkg_db)
@@ -469,6 +579,25 @@ def get_workspace_index_db(rpm_files, raw_logfile=''):
     if raw_logfile:
         convert_raw_logfile(raw_logfile, g_jsonfile + "-raw_logfile", blob_pkg_db)
     print("\nDone. Created " + g_jsonfile + "* package blob DBs.")
+
+
+def get_deb_source_tarball_files():
+    '''
+    Get the list of source tarball files for debian package build.
+    They are supposed to have been copied to bomsh_logfiles directory or g_chroot_dir.
+    '''
+    cmd = 'ls bomsh_logfiles/*.tar.* || true'
+    output = get_shell_cmd_output(cmd)
+    if output:
+        return output.splitlines()
+    if not (g_chroot_dir and os.path.exists(g_chroot_dir)):
+        return []
+    cmd = 'ls ' + g_chroot_dir + '/*.tar.* || true'
+    output = get_shell_cmd_output(cmd)
+    if output:
+        return output.splitlines()
+    return []
+
 
 ############################################################
 #### End of package database processing routines ####
@@ -531,6 +660,9 @@ def rtd_parse_options():
     global g_chroot_dir
     if args.chroot_dir:
         g_chroot_dir = args.chroot_dir
+    global g_package_type
+    if args.package_type:
+        g_package_type = args.package_type.lower()
 
     print ("Your command line is:")
     print (" ".join(sys.argv))

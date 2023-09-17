@@ -58,11 +58,17 @@ For a quick start of using the Bomsh tool, run the below command:
     $ grep -B1 -A3 CVElist outdir/bomsher_out/bomsh_logfiles/bomsh_search_jsonfile-details.json
     $ # the above should take only a few minutes, and the below may take tens of minutes
     $ wget https://buildinfos.debian.net/buildinfo-pool/s/sysstat/sysstat_11.7.3-1_all-amd64-source.buildinfo
-    $ bomsh/scripts/bomsh_rebuild_deb.py -f sysstat_11.7.3-1_all-amd64-source.buildinfo -d bomsh/scripts/sample_sysstat_cvedb.json -o outdir2 --syft_sbom
+    $ bomsh/scripts/bomsh_rebuild_deb.py -f sysstat_11.7.3-1_all-amd64-source.buildinfo -d bomsh/scripts/sample_sysstat_cvedb.json -o outdir2 --syft_sbom --mmdebstrap_no_cleanup
     $ grep -B1 -A3 CVElist outdir2/bomsher_out/bomsh_logfiles/bomsh_search_jsonfile-details.json
 
-Then explore and inspect all the output files in the outdir/bomsher_out directory, especially the outdir/bomsher_out/bomsh_logfiles/bomsh_hook_raw_logfile.sha1 file, which
-contains the list of build commands with details of output/input files that are recorded by the Bomsh tool.
+Then explore and inspect all the output files in the outdir/bomsher_out directory,
+especially the outdir/bomsher_out/bomsh_logfiles/bomsh_hook_raw_logfile.sha1 file,
+which contains the list of build commands with details of output/input files that
+are recorded by the Bomsh tool. The omnibor_dir/metadata/bomsh/* files contain
+useful metadata collected by Bomsh. Also the bomsh_logfiles/bomsh_search_jsonfile* files
+contain the constructed OmniBOR tree with relevant metadata for the built RPM/DEB packages,
+the bomsh_logfiles/bomsh-index-* files contain the relevant package/blobs database,
+and the syft_sbom/omnibor.*.spdx* files contain the SPDX SBOM documents with ExternalRef OmniBOR identifier.
 
 Compile Bombash and Bomtrace from Source
 ----------------------------------------
