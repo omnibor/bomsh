@@ -125,6 +125,36 @@ def fix_broken_symlinks(bomsher_outdir):
         fix_broken_symlink(symlink, os.path.join(bomsher_outdir, "omnibor"))
 
 
+# the patch text file to avoid deleting the mmdebstrap chroot directory
+mmdebstrap_patch_text = """--- mmdebstrap.bak	2023-09-16 18:50:42.032552913 +0000
++++ mmdebstrap	2023-09-17 04:50:00.625270814 +0000
+@@ -6187,6 +6187,7 @@
+             error "$options->{root} does not exist";
+         }
+         info "removing tempdir $options->{root}...";
++        info "Instead we move tempdir $options->{root} to /tmp/bomsh-mmroot dir ...";
+         if ($options->{mode} eq 'unshare') {
+             # We don't have permissions to remove the directory outside
+             # the unshared namespace, so we remove it here.
+@@ -6223,9 +6224,13 @@
+             # without unshare, we use the system's rm to recursively remove the
+             # temporary directory just to make sure that we do not accidentally
+             # remove more than we should by using --one-file-system.
+-            0 == system('rm', '--interactive=never', '--recursive',
+-                '--preserve-root', '--one-file-system', $options->{root})
+-              or error "rm failed: $?";
++            0 == system('rm', '-rf', '/tmp/bomsh-mmroot')
++              or error "rm -rf bomsh-mmroot failed: $?";
++            0 == system('mv', $options->{root}, '/tmp/bomsh-mmroot')
++              or error "mv bomsh-mmroot failed: $?";
++            # 0 == system('rm', '--interactive=never', '--recursive',
++            #     '--preserve-root', '--one-file-system', $options->{root})
++            #   or error "rm failed: $?";
+         } else {
+             error "unknown mode: $options->{mode}";
+         }
+"""
+
 g_bomsh_dockerfile_str = '''
 
 # Set up debrebuild/mmdebstrap environment
@@ -147,10 +177,15 @@ RUN cd /root ; git clone https://github.com/omnibor/bomsh.git ; \\
 CMD if [ "${SRC_TAR_DIR}" ]; then srctardir_param="--srctardir=/out/bomsher_in" ; fi ; \\
     if [ -z "${BASELINE_REBUILD}" ]; then bomtrace_cmd="/tmp/bomtrace2 -w /tmp/bomtrace_watched_programs -c /tmp/bomtrace.conf -o /tmp/bomsh_hook_strace_logfile " ; fi ; \\
     mkdir -p /out/bomsher_out ; cd /out/bomsher_out ; \\
+    if [ "${MM_NO_CLEANUP}" ]; then cp /usr/bin/mmdebstrap /usr/bin/mmdebstrap.bak ; \\
+    cp /usr/bin/mmdebstrap ./ ; patch -p0 < mmdebstrap_patch_file ; cp mmdebstrap /usr/bin/mmdebstrap ; fi ; \\
     $bomtrace_cmd debrebuild $srctardir_param --buildresult=./debs --builder=mmdebstrap /out/bomsher_in/$BUILDINFO_FILE ; \\
     if [ "${BASELINE_REBUILD}" ]; then exit 0 ; fi ; \\
     rm -rf omnibor omnibor_dir ; mv .omnibor omnibor ; mkdir -p bomsh_logfiles ; cp -f /tmp/bomsh_hook_*logfile* bomsh_logfiles/ ; \\
-    /tmp/bomsh_create_bom.py -b omnibor_dir -r /tmp/bomsh_hook_raw_logfile.sha1 ; cp /tmp/bomsh_createbom_* bomsh_logfiles ; \\
+    if [ "${MM_NO_CLEANUP}" ]; then index_db_param="--index_db_file /tmp/bomsh-index-blob-pkg-db.json" ; \\
+    /tmp/bomsh_index_ws.py --chroot_dir /tmp/bomsh-mmroot -r /tmp/bomsh_hook_raw_logfile.sha1 ; fi ; \\
+    /tmp/bomsh_create_bom.py -b omnibor_dir -r /tmp/bomsh_hook_raw_logfile.sha1 $index_db_param ; \\
+    cp /tmp/bomsh-index-* /tmp/bomsh_createbom_* bomsh_logfiles ; \\
     cp /tmp/bomsh*.py bomsh_logfiles ; cp /tmp/bomtrace* bomsh_logfiles ; \\
     cp /tmp/yongkui-srcpkg/* bomsh_logfiles ; \\
     debfiles=`for i in debs/*.deb ; do  echo -n $i, ; done | sed 's/.$//'` ; \\
@@ -200,6 +235,11 @@ def run_docker(buildinfo_file, output_dir):
     if args.cve_db_file:
         os.system("cp -f " + args.cve_db_file + " " + bomsher_indir)
         docker_cmd += ' -e CVEDB_FILE=' + os.path.basename(args.cve_db_file)
+    if args.mmdebstrap_no_cleanup:
+        # do not delete mmdebstrap chroot directory for bomsh_index_ws.py script
+        docker_cmd += ' -e MM_NO_CLEANUP=1'
+        # write the patch file for later use during docker run
+        write_text_file(os.path.join(bomsher_outdir, "mmdebstrap_patch_file"), mmdebstrap_patch_text)
     if args.syft_sbom:
         # Generate SBOM document with the syft tool
         docker_cmd += ' -e SYFT_SBOM=1'
@@ -241,6 +281,9 @@ def rtd_parse_options():
     parser.add_argument("--syft_sbom",
                     action = "store_true",
                     help = "run syft to generate DEB SBOM in spdx/spdx-json SBOM format")
+    parser.add_argument("--mmdebstrap_no_cleanup",
+                    action = "store_true",
+                    help = "do not cleanup chroot directory after mmdebstrap run")
     parser.add_argument("-r", "--remove_intermediate_files",
                     action = "store_true",
                     help = "after run completes, delete all intermediate files like Dockerfile, etc.")

@@ -815,11 +815,11 @@ def get_all_subfiles_in_ar_cmdline(arline, pwd):
     tokens = arline.split()
     if len(tokens) < 3:
         return ('', [])
-    token1 = tokens[1]
-    if token1 == "--plugin":  # remove "--plugin name" part
+    if tokens[1] == "--plugin":  # remove "--plugin name" part
         tokens = tokens[:1] + tokens[3:]
     if len(tokens) > 3 and args.pre_exec:
         return ('', [])
+    token1 = tokens[1]
     if not ((len(tokens) > 3 and ("c" in token1 or "r" in token1)) or (len(tokens) == 3 and "s" in token1)):
         # Only "ar -c archive file1...fileN", "ar -c archive @filelist", and "ar -s archive" are supported
         # also support "ar rvs file1...fileN" format
@@ -1188,7 +1188,7 @@ def get_dynlib_lines(dyn_libs, ahashes, hash_alg="sha1"):
             g_githash_extra_objects_list.extend(dyn_libs)
         ahashes = {}
         ahashes[hash_alg] = get_infile_hashes(dyn_libs, hash_alg, min_size=1)
-    return ["dynlib: " + get_file_hash_with_dict(dynlib, ahashes, hash_alg) + " path: " + dynlib for dynlib in dyn_libs]
+    return ["dynlib: " + get_file_hash_with_dict(dynlib, ahashes, hash_alg) + " path: " + get_noroot_path(dynlib) for dynlib in dyn_libs]
 
 
 def get_noroot_path(afile):
@@ -2391,6 +2391,18 @@ def select_the_patch_file(afile, bfile):
             return afile
 
 
+def get_noroot_patch_argv_str(argv_str, patch_file):
+    '''
+    Get the noroot path of patch file and replace it in the argv_str.
+    The argv_str of the patch cmd may contain chroot-prefixed patch file path.
+    :param argv_str: the argv_str of the patch command
+    :param patch_file: the chroot-prefixed patch file path
+    returns the new argv_str with the replacement of noroot-path
+    '''
+    noroot_patch_file = get_noroot_path(patch_file)
+    return argv_str.replace(patch_file, noroot_patch_file)
+
+
 def process_patch_command(prog, pwddir, argv_str, pid):
     '''
     Process the patch command.
@@ -2439,6 +2451,8 @@ def process_patch_command(prog, pwddir, argv_str, pid):
         # It must be the form of "patch originalfile patch-file".
         infile = get_real_path(new_tokens[0], pwddir)
         patch_file = get_real_path(new_tokens[1], pwddir)
+        # the patch file inside argv_str is usually the chroot path, we want to change it to noroot path.
+        argv_str = get_noroot_patch_argv_str(argv_str, patch_file)
         if args.pre_exec:
             for hash_alg in g_hashtypes:
                 # need to save the hash of the patch_file itself too
@@ -2462,6 +2476,8 @@ def process_patch_command(prog, pwddir, argv_str, pid):
         if not new_tokens:
             return ''
         patch_file = get_real_path(new_tokens[-1], pwddir)
+    # the patch file inside argv_str is usually the chroot path, we want to change it to noroot path.
+    argv_str = get_noroot_patch_argv_str(argv_str, patch_file)
     verbose("strip_num is " + str(strip_num) + " patch file is: " + patch_file, LEVEL_1)
     afiles = []
     with open(patch_file, 'r') as f:
