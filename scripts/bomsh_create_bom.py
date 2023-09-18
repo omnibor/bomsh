@@ -474,6 +474,16 @@ def update_hash_tree_node_hashtree(db, ahash, outfile, infiles, argv_str, pid=''
         update_hash_tree_node_build_info(afile_db, ahash, outfile, build_tool, "build_tool")
     if pkg_info:
         update_hash_tree_node_build_info(afile_db, ahash, outfile, pkg_info, "pkg_info")
+    if len(infiles) == 1 and not args.new_omnibor_doc_for_unary_transform and infiles[0][0] in db:
+        # unary transform and reuse bom_id, dyn_libs metadata will be lost if not pass from infile to outfile
+        infile_db = db[infiles[0][0]]
+        if "dyn_libs" in infile_db:
+            # pass dyn_libs metadata from child gitoid to parent gitoid
+            if dynlibs:
+                dynlibs.extend(infile_db["dyn_libs"])
+            else:
+                dynlibs = infile_db["dyn_libs"]  # no need to copy
+            verbose("Unary transform, pass dyn_libs metadata from infile " + str(infiles[0]) + " to outfile " + str((ahash, outfile)))
     if dynlibs and "dyn_libs" not in afile_db:  # not overwrite existing dyn_libs value
         #afile_db["dyn_libs"] = [f[0] for f in dynlibs]
         afile_db["dyn_libs"] = dynlibs  # easier to keep both checksum and path

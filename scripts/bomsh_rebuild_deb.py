@@ -183,7 +183,7 @@ CMD if [ "${SRC_TAR_DIR}" ]; then srctardir_param="--srctardir=/out/bomsher_in" 
     if [ "${BASELINE_REBUILD}" ]; then exit 0 ; fi ; \\
     rm -rf omnibor omnibor_dir ; mv .omnibor omnibor ; mkdir -p bomsh_logfiles ; cp -f /tmp/bomsh_hook_*logfile* bomsh_logfiles/ ; \\
     if [ "${MM_NO_CLEANUP}" ]; then index_db_param="--index_db_file /tmp/bomsh-index-blob-pkg-db.json" ; \\
-    /tmp/bomsh_index_ws.py --chroot_dir /tmp/bomsh-mmroot -r /tmp/bomsh_hook_raw_logfile.sha1 ; fi ; \\
+    /tmp/bomsh_index_ws.py --chroot_dir /tmp/bomsh-mmroot -r /tmp/bomsh_hook_raw_logfile.sha1 --package_type deb ; fi ; \\
     /tmp/bomsh_create_bom.py -b omnibor_dir -r /tmp/bomsh_hook_raw_logfile.sha1 $index_db_param ; \\
     cp /tmp/bomsh-index-* /tmp/bomsh_createbom_* bomsh_logfiles ; \\
     cp /tmp/bomsh*.py bomsh_logfiles ; cp /tmp/bomtrace* bomsh_logfiles ; \\
