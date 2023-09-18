@@ -1109,6 +1109,8 @@ def get_all_subfiles_in_rpmbuild_cmdline(rpmline, pwd):
     else:
         name_pattern = name + "-*" + version + "-*" + release + "*.rpm"
     rpmfiles = find_specific_file(rpmbuild_topdir, name_pattern)
+    # need to filter out the original src.rpm file
+    rpmfiles = [rpmfile for rpmfile in rpmfiles if "/originals/" not in rpmfile]
     if " -ba " not in rpmline and " -bs " not in rpmline:  # filter out src rpm files
         rpmfiles = [rpmfile for rpmfile in rpmfiles if rpmfile[-8:] != ".src.rpm"]
     for rpmfile in rpmfiles:
