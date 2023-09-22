@@ -1,0 +1,12 @@
+
+CC=gcc
+
+libd1.so: libd1.o
+	$(CC) -o libd1.so -shared libd1.o
+
+libd1.o: libd1.c
+	$(CC) -c -fPIC -o libd1.o libd1.c
+
+clean:
+	-rm libd1.o libd1.so
+
