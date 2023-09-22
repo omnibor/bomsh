@@ -44,6 +44,7 @@ Multiple Python scripts are developed to work together with these tools.
 - bomsh_index_yocto.py script, which creates a blob index database for source packages of OpenEmbedded/Yocto.
 - bomsh_index_ws.py script, which creates a blob index database for software build workspace.
 - bomsh_sbom.py script, which creates or updates SPDX SBOM documents with OmniBOR info.
+- bomsh_art_tree.py script, which grafts new subtrees or prunes existing subtrees of OmniBOR artifact trees.
 
 Quick Start
 -----------
@@ -68,7 +69,7 @@ are recorded by the Bomsh tool. The omnibor_dir/metadata/bomsh/* files contain
 useful metadata collected by Bomsh. Also the bomsh_logfiles/bomsh_search_jsonfile* files
 contain the constructed OmniBOR tree with relevant metadata for the built RPM/DEB packages,
 the bomsh_logfiles/bomsh-index-* files contain the relevant package/blobs database,
-and the syft_sbom/omnibor.*.spdx* files contain the SPDX SBOM documents with ExternalRef OmniBOR identifier.
+and the syft_sbom/omnibor* files contain the SPDX SBOM documents with ExternalRef OmniBOR identifier.
 
 Compile Bombash and Bomtrace from Source
 ----------------------------------------

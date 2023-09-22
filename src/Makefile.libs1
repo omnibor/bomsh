@@ -1,0 +1,12 @@
+
+CC=gcc
+
+libs1.a: libs1.o
+	ar rcs libs1.a libs1.o
+
+libs1.o: libs1.c
+	$(CC) -c -o libs1.o libs1.c
+
+clean:
+	-rm libs1.o libs1.a
+
