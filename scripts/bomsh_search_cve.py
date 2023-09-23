@@ -1787,7 +1787,7 @@ def get_all_leaf_blobid_in_tree(tree):
         blobid, bomid = get_blob_bom_id_from_checksum_line(node)
         if blobid and not bomid:
             result.append(blobid)
-        result.extend(get_all_blobid_in_tree(subtree))
+        result.extend(get_all_leaf_blobid_in_tree(subtree))
     return list(set(result))
 
 
