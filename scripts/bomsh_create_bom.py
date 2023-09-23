@@ -925,13 +925,18 @@ def convert_pkg_db_to_blob_db(pkg_db):
         blobs = pkg_entry["blobs"]
         for blob in blobs:
             checksum, path = blob
+            overwrite = True  # overwrite with newer package by default
             if checksum in blob_db:
                 old_package = blob_db[checksum][0]
                 if package != old_package:  # usually this is the COPYING file
                     verbose("Warning: new package " + str( (package, path) ) + " differs from old package: " + str( blob_db[checksum] ))
+                    if old_package.endswith(".src.rpm") and package.endswith(".rpm"):
+                        # src RPM has higher priority than arch-specific RPM, so do not overwrite it
+                        overwrite = False
                 else:
                     verbose("Warning: new path " + str( (package, path) ) + " differs from existing path: " + str( blob_db[checksum] ), LEVEL_2)
-            blob_db[checksum] = (package, path)  # only keep a single package, newer package overwrites older package
+            if overwrite:
+                blob_db[checksum] = (package, path)  # only keep a single package, newer package overwrites older package
     return blob_db
 
 
@@ -989,6 +994,7 @@ def rtd_parse_options():
                     help = "verbose output, can be supplied multiple times"
                            " to increase verbosity")
 
+    global args
     # Parse the command line arguments
     args = parser.parse_args()
 
@@ -1046,9 +1052,8 @@ def rtd_parse_options():
 
 
 def main():
-    global args
     # parse command line options first
-    args = rtd_parse_options()
+    rtd_parse_options()
 
     read_raw_logfile(g_raw_logfile)
     package_files = []
