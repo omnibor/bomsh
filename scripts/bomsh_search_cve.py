@@ -966,10 +966,11 @@ def find_cve_lists_for_checksums(checksums, is_bom_id=False):
     if g_jsonfile and args.verbose > 1:
         save_json_db(g_jsonfile + "-details.json", tree)
     if tree and args.derive_sbom:  # user may want to derive SBOM for the search result
-        sbom_db, sbom_detail_db = derive_sbom(tree)
+        sbom_sum_db, sbom_detail_db, dynlib_detail_db = derive_sbom(tree)
         if g_jsonfile and args.verbose > 1:
-            save_json_db(g_jsonfile + "-sbom.json", sbom_db)
+            save_json_db(g_jsonfile + "-sbom.json", sbom_sum_db)
             save_json_db(g_jsonfile + "-sbom-detail.json", sbom_detail_db)
+            save_json_db(g_jsonfile + "-dynlib-sbom-detail.json", dynlib_detail_db)
     if args.copyout_bomdir:  # Copy out necessary gitBOM docs only and truncated metadata files
         copy_all_bomdoc_in_tree(tree, args.copyout_bomdir)
         # Truncate the .omnibor/metadata/bomsh/* files too
@@ -1757,6 +1758,22 @@ def get_all_blob_bomid_in_tree(tree):
     return list(set(result))
 
 
+def get_all_dynlib_blobid_in_tree(tree):
+    """
+    Get a list of dynlib blob IDs for all the nodes in a CVE search result tree.
+    This function recurses on itself.
+    """
+    if not isinstance(tree, dict):
+        return []
+    result = []
+    for node in tree:
+        subtree = tree[node]
+        if "dyn_libs" in subtree:
+            result.extend([a[0] for a in subtree["dyn_libs"]])
+        result.extend(get_all_dynlib_blobid_in_tree(subtree))
+    return list(set(result))
+
+
 def get_all_leaf_blobid_in_tree(tree):
     """
     Get a list of leaf blob IDs for all the nodes in a CVE search result tree.
@@ -2207,16 +2224,23 @@ def update_sbom_with_unknown_blob(sbom_db, blob_id):
         sbom_db["UNKNOWN_COMPONENT_VERSION"].append(blob_id)
 
 
-def derive_sbom_for_atree(tree, metadata_dir):
+def derive_sbom_for_atree(tree, metadata_dir, dynlib_sbom=False):
     """
     Try to derive name/version of packages for SBOM, for a single OmniBOR tree.
+    The prov_pkg attribute of a blob has highest precedence for the owner package.
     It first tries to derive name/version from the file_path metadata of g_metadata_db.
     Then it tries to get name/version from g_index_db.
     Blobs of same package name/version are grouped together in the sbom_db.
+    :param tree: the search result tree for a specific artifact
+    :param metadata_dir: the directory to store bomsh metadata files
+    :param dynlib_sbom: dervie sbom for dynlib metadata or not
+    returns a dict of { pkg => list of ( blob_id, file_path) }
     """
-    if args.leaf_nodes_only:
+    if dynlib_sbom:  # for dyn_libs metadata only
+        blob_ids = get_all_dynlib_blobid_in_tree(tree)
+    elif args.leaf_nodes_only:  # for leaf blob IDs in the ADG
         blob_ids = get_all_leaf_blobid_in_tree(tree)
-    else:
+    else:  # for both leaf and non-leaf blob IDs in the ADG
         blob_ids, new_mapping_db = get_all_extra_blobid_in_tree(tree, metadata_dir, False)
     sbom_db = {}
     sbom_db["UNKNOWN_COMPONENT_VERSION"] = []
@@ -2268,19 +2292,29 @@ def derive_sbom_for_atree(tree, metadata_dir):
 def derive_sbom(tree):
     """
     Try to derive name/version of packages for SBOM, for top-level tree, which contains a few OmniBOR trees.
+    returns 3 dicts (sbom_sum_db, sbom_detail_db, dynlib_detail_db)
     """
-    sbom_db, sbom_detail_db = {}, {}
+    sbom_sum_db, sbom_detail_db, dynlib_detail_db = {}, {}, {}
     metadata_dir = bomsh_get_metadata_dir(args)
     for key in tree:
         subtree = tree[key]
         sbom = derive_sbom_for_atree(subtree, metadata_dir)
-        sbom2 = {k : len(sbom[k]) for k in sbom} # sbom2 contains only summary (#blobs) for each package
-        num_blobs = sum(sbom2.values())
-        sbom2["TOTAL_NUM_BLOBS"] = num_blobs
-        sbom2["UNKNOWN_VERSION_PERCENT"] = 100 * sbom2["UNKNOWN_COMPONENT_VERSION"] / num_blobs
-        sbom_db[key] = sbom2
+        dynlib_sbom = derive_sbom_for_atree(subtree, metadata_dir, True)
+        prov_pkgs = {k : len(sbom[k]) for k in sbom} # prov_pkgs dict contains only summary (#blobs) for each package
+        num_blobs = sum(prov_pkgs.values())
+        sbom_summary = {}
+        sbom_summary["TOTAL_NUM_BLOBS"] = num_blobs
+        sbom_summary["UNKNOWN_VERSION_PERCENT"] = 100 * prov_pkgs["UNKNOWN_COMPONENT_VERSION"] / num_blobs
+        sbom_summary["prov_pkgs"] = prov_pkgs
+        dynlibs = {k : len(dynlib_sbom[k]) for k in dynlib_sbom} # dynlibs dict contains only summary (#blobs) for each package
+        num_blobs = sum(dynlibs.values())
+        sbom_summary["DYNLIB_TOTAL_NUM_BLOBS"] = num_blobs
+        sbom_summary["DYNLIB_UNKNOWN_VERSION_PERCENT"] = 100 * dynlibs["UNKNOWN_COMPONENT_VERSION"] / num_blobs
+        sbom_summary["dyn_libs"] = dynlibs
+        sbom_sum_db[key] = sbom_summary
         sbom_detail_db[key] = sbom
-    return sbom_db, sbom_detail_db
+        dynlib_detail_db[key] = dynlib_sbom
+    return sbom_sum_db, sbom_detail_db, dynlib_detail_db
 
 
 ############################################################

@@ -723,12 +723,21 @@ def save_gitbom_dbs(bomsh_pkgs_raw_logfile):
         jsonfile = os.path.join(g_bomsh_bomdir, "bomsh_omnibor_doc_mapping")
         save_json_db(jsonfile, g_bomdb)
         treedb_jsonfile = os.path.join(g_bomsh_bomdir, "bomsh_omnibor_treedb")
-        os.system("cp " + g_jsonfile + " " + treedb_jsonfile)
+        shutil.copy(g_jsonfile, treedb_jsonfile)
         raw_logfile = os.path.join(g_bomsh_bomdir, "bomsh_hook_raw_logfile")
         if bomsh_pkgs_raw_logfile and os.path.getsize(bomsh_pkgs_raw_logfile) > 0:
             os.system("cat " + g_raw_logfile + " " + bomsh_pkgs_raw_logfile + " > "  + raw_logfile)
         else:
-            os.system("cp " + g_raw_logfile + " " + raw_logfile)
+            shutil.copy(g_raw_logfile, raw_logfile)
+        if args.index_db_file:
+            index_dbfile = os.path.join(g_bomsh_bomdir, "bomsh_index_blob_pkg_db")
+            shutil.copy(args.index_db_file, index_dbfile)
+        elif args.pkg_db_file:
+            pkg_dbfile = os.path.join(g_bomsh_bomdir, "bomsh_index_pkg_db")
+            shutil.copy(args.pkg_db_file, pkg_dbfile)
+            if g_index_db:
+                index_dbfile = os.path.join(g_bomsh_bomdir, "bomsh_index_blob_pkg_db")
+                save_json_db(index_dbfile, g_index_db)
     if bomsh_pkgs_raw_logfile:
         os.remove(bomsh_pkgs_raw_logfile)
     verbose("pre_exec DB:" + json.dumps(g_pre_exec_db, indent=4, sort_keys=True), LEVEL_3)
@@ -902,6 +911,30 @@ def is_elf_file(afile):
     return False
 
 
+def convert_pkg_db_to_blob_db(pkg_db):
+    '''
+    Convert a dict keyed with package to a dict keyed with blob ID.
+    :param pkg_db: a dict of { package => {"blobs": blobs, "pkg_info": pkg_info} }
+    returns a dict of { blob_id => (package, path) }
+    '''
+    blob_db = {}
+    for package in pkg_db:
+        pkg_entry = pkg_db[package]
+        if "blobs" not in pkg_entry:
+            continue
+        blobs = pkg_entry["blobs"]
+        for blob in blobs:
+            checksum, path = blob
+            if checksum in blob_db:
+                old_package = blob_db[checksum][0]
+                if package != old_package:  # usually this is the COPYING file
+                    verbose("Warning: new package " + str( (package, path) ) + " differs from old package: " + str( blob_db[checksum] ))
+                else:
+                    verbose("Warning: new path " + str( (package, path) ) + " differs from existing path: " + str( blob_db[checksum] ), LEVEL_2)
+            blob_db[checksum] = (package, path)  # only keep a single package, newer package overwrites older package
+    return blob_db
+
+
 ############################################################
 #### End of hash/checksum routines ####
 ############################################################
@@ -927,6 +960,8 @@ def rtd_parse_options():
                     help = "tmp directory, which is /tmp by default")
     parser.add_argument('--index_db_file',
                     help = "the JSON database file containing package name/version info for file checksums")
+    parser.add_argument('--pkg_db_file',
+                    help = "the JSON database file containing list of blobs for packages")
     parser.add_argument('-j', '--jsonfile',
                     help = "the generated OmniBOR artifact tree JSON file")
     parser.add_argument('-p', '--package_files',
@@ -995,6 +1030,11 @@ def rtd_parse_options():
         g_logfile = args.logfile
     if args.index_db_file:
         g_index_db = load_json_db(args.index_db_file)
+    elif args.pkg_db_file:
+        pkg_db = load_json_db(args.pkg_db_file)
+        # Convert pkg_db to blob_db for prov_pkg metadata query
+        blob_db = convert_pkg_db_to_blob_db(pkg_db)
+        g_index_db = { blob : v[0] for blob,v in blob_db.items() }
     if args.jsonfile:
         g_jsonfile = args.jsonfile
 
