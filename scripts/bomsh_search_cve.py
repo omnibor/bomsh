@@ -2304,12 +2304,14 @@ def derive_sbom(tree):
         num_blobs = sum(prov_pkgs.values())
         sbom_summary = {}
         sbom_summary["TOTAL_NUM_BLOBS"] = num_blobs
-        sbom_summary["UNKNOWN_VERSION_PERCENT"] = 100 * prov_pkgs["UNKNOWN_COMPONENT_VERSION"] / num_blobs
+        if num_blobs:
+            sbom_summary["UNKNOWN_VERSION_PERCENT"] = 100 * prov_pkgs["UNKNOWN_COMPONENT_VERSION"] / num_blobs
         sbom_summary["prov_pkgs"] = prov_pkgs
         dynlibs = {k : len(dynlib_sbom[k]) for k in dynlib_sbom} # dynlibs dict contains only summary (#blobs) for each package
         num_blobs = sum(dynlibs.values())
         sbom_summary["DYNLIB_TOTAL_NUM_BLOBS"] = num_blobs
-        sbom_summary["DYNLIB_UNKNOWN_VERSION_PERCENT"] = 100 * dynlibs["UNKNOWN_COMPONENT_VERSION"] / num_blobs
+        if num_blobs:
+            sbom_summary["DYNLIB_UNKNOWN_VERSION_PERCENT"] = 100 * dynlibs["UNKNOWN_COMPONENT_VERSION"] / num_blobs
         sbom_summary["dyn_libs"] = dynlibs
         sbom_sum_db[key] = sbom_summary
         sbom_detail_db[key] = sbom
