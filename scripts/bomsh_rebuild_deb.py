@@ -181,14 +181,14 @@ CMD if [ "${SRC_TAR_DIR}" ]; then srctardir_param="--srctardir=/out/bomsher_in" 
     cp /usr/bin/mmdebstrap ./ ; patch -p0 < mmdebstrap_patch_file ; cp mmdebstrap /usr/bin/mmdebstrap ; fi ; \\
     $bomtrace_cmd debrebuild $srctardir_param --buildresult=./debs --builder=mmdebstrap /out/bomsher_in/$BUILDINFO_FILE ; \\
     if [ "${BASELINE_REBUILD}" ]; then exit 0 ; fi ; \\
+    debfiles=`for i in debs/*.deb ; do  echo -n $i, ; done | sed 's/.$//'` ; \\
     rm -rf omnibor omnibor_dir ; mv .omnibor omnibor ; mkdir -p bomsh_logfiles ; cp -f /tmp/bomsh_hook_*logfile* bomsh_logfiles/ ; \\
     if [ "${MM_NO_CLEANUP}" ]; then index_db_param="--pkg_db_file /tmp/bomsh-index-pkg-db.json" ; \\
-    /tmp/bomsh_index_ws.py --chroot_dir /tmp/bomsh-mmroot -r /tmp/bomsh_hook_raw_logfile.sha1 --package_type deb ; fi ; \\
+    /tmp/bomsh_index_ws.py --chroot_dir /tmp/bomsh-mmroot -p $debfiles -r /tmp/bomsh_hook_raw_logfile.sha1 --package_type deb ; fi ; \\
     /tmp/bomsh_create_bom.py -b omnibor_dir -r /tmp/bomsh_hook_raw_logfile.sha1 $index_db_param ; \\
     cp /tmp/bomsh-index-* /tmp/bomsh_createbom_* bomsh_logfiles ; \\
     cp /tmp/bomsh*.py bomsh_logfiles ; cp /tmp/bomtrace* bomsh_logfiles ; \\
     cp /tmp/yongkui-srcpkg/* bomsh_logfiles ; \\
-    debfiles=`for i in debs/*.deb ; do  echo -n $i, ; done | sed 's/.$//'` ; \\
     if [ "${CVEDB_FILE}" ]; then cvedb_file_param="-d /out/bomsher_in/${CVEDB_FILE}" ; fi ; \\
     /tmp/bomsh_search_cve.py --derive_sbom -b omnibor_dir $cvedb_file_param -f $debfiles -vvv ; cp /tmp/bomsh_search_jsonfile* bomsh_logfiles/ ; \\
     if [ "${SYFT_SBOM}" ]; then /tmp/bomsh_sbom.py -b omnibor_dir -F $debfiles -vv --output_dir syft_sbom --sbom_format spdx --force_insert ; fi ; \\

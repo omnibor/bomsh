@@ -462,8 +462,9 @@ def get_packages_index_db(packages):
 
 def get_rpm_pkg_blobs(rpm_file):
     '''
-    Unbundle a RPM file and get a list of files inside this RPM package file.
-    :param rpm_file: the RPM file
+    Unbundle a RPM/DEB file and get a list of files inside this RPM/DEB package file.
+    unbundle_package is called twice to unbundle the tarballs inside the RPM/DEB package file.
+    :param rpm_file: the RPM file or the DEB file
     returns a list of (checksum, file_path)
     '''
     destdir = unbundle_package(rpm_file)
@@ -501,15 +502,25 @@ def get_rpm_pkgs_index_db(rpm_files):
 def get_deb_pkgs_index_db(deb_files):
     '''
     Get the package database for a list of user provided DEB packages.
-    :param deb_files: a list of DEB source tarball files
+    :param deb_files: a list of DEB package files
     returns a dict of { package => {"blobs": blobs, "pkg_info": pkg_info} }
     '''
+    dsc_file = get_deb_source_control_file()
+    verbose("DEB source control file: " + str(dsc_file))
+    dsc_pkg_info = []
+    if dsc_file:
+        dsc_pkg_info = read_pkg_info_from_dsc_file(dsc_file)
+    # The *.tar.xz source tarballs are also needed to build the index DB
     tarballs = get_deb_source_tarball_files()
     verbose("DEB src tarballs: " + str(tarballs))
     pkg_db = {}
+    for deb_file in deb_files:
+        pkg_info = get_deb_pkg_info(deb_file)
+        blobs = get_rpm_pkg_blobs(deb_file)
+        pkg_db[os.path.basename(deb_file)] = {"blobs": blobs, "pkg_info": pkg_info}
     for tarball in tarballs:
         blobs = get_rpm_pkg_blobs(tarball)
-        pkg_db[os.path.basename(tarball)] = {"blobs": blobs, "pkg_info": []}
+        pkg_db[os.path.basename(tarball)] = {"blobs": blobs, "pkg_info": dsc_pkg_info}
     return pkg_db
 
 
@@ -543,8 +554,8 @@ def convert_pkg_db_to_blob_db(pkg_db):
                 old_package = blob_db[checksum][0]
                 if package != old_package:  # usually this is the COPYING file
                     verbose("Warning: new package " + str( (package, path) ) + " differs from old package: " + str( blob_db[checksum] ))
-                    if old_package.endswith(".src.rpm") and package.endswith(".rpm"):
-                        # src RPM has higher priority than arch-specific RPM, so do not overwrite it
+                    if (old_package.endswith(".src.rpm") and package.endswith(".rpm")) or (".tar." in old_package and package.endswith(".deb")):
+                        # src RPM or tarball has higher priority than arch-specific RPM/DEB, so do not overwrite it
                         overwrite = False
                 else:
                     verbose("Warning: new path " + str( (package, path) ) + " differs from existing path: " + str( blob_db[checksum] ), LEVEL_2)
@@ -586,10 +597,81 @@ def get_workspace_index_db(rpm_files, raw_logfile=''):
     print("\nDone. Created " + g_jsonfile + "* package blob DBs.")
 
 
+def read_pkg_info_from_dsc_file(dsc_file):
+    '''
+    Read package info from the debian source control .dsc file.
+    returns a list of lines containing the package info.
+    '''
+    ret = []
+    with open(dsc_file, 'r') as f:
+        found = False
+        for line in f:
+            line = line.rstrip()
+            if line.startswith("-----BEGIN PGP SIGNED MESSAGE-----"):
+                found = True
+                continue
+            elif line.startswith("-----BEGIN PGP SIGNATURE-----"):
+                return ret[2:-1]  # the first two lines and the last line are not useful
+            if found:
+                ret.append(line)
+    return ret
+
+
+def get_deb_source_control_filename_from_buildinfo_file(buildinfo_file):
+    '''
+    Get the source control filename from provided .buildinfo file.
+    '''
+    with open(buildinfo_file, 'r') as f:
+        for line in f:
+            if line.strip().endswith(".dsc"):
+                tokens = line.split()
+                return tokens[-1]
+    return ''
+
+
+def get_deb_source_control_file():
+    '''
+    Get the debian source control file for debian package build.
+    The dsc file is supposed to have been copied to bomsh_logfiles directory or g_chroot_dir.
+    '''
+    dsc_filename = ''
+    if args.buildinfo_file:
+        dsc_filename = get_deb_source_control_file_from_buildinfo_file(args.buildinfo_file)
+        verbose("from buildinfo_file " + args.buildinfo_file + " we get dsc filename: " + dsc_filename)
+    if dsc_filename:
+        return get_dsc_source_control_file_with_filename(dsc_filename)
+    cmd = 'ls bomsh_logfiles/*.dsc || true'
+    output = get_shell_cmd_output(cmd)
+    if output:
+        return output.splitlines()[0]
+    if not (g_chroot_dir and os.path.exists(g_chroot_dir)):
+        return ''
+    cmd = 'ls ' + g_chroot_dir + '/*.dsc || true'
+    output = get_shell_cmd_output(cmd)
+    if output:
+        return output.splitlines()[0]
+    return ''
+
+
+def get_dsc_source_control_file_with_filename(dsc_filename):
+    '''
+    Get the debian source control file with a known filename.
+    The dsc file is supposed to have been copied to bomsh_logfiles directory or g_chroot_dir.
+    '''
+    dsc_file = os.path.join("bomsh_logfiles", dsc_filename)
+    if os.path.exists(dsc_file):
+        return dsc_file
+    dsc_file = os.path.join(g_chroot_dir, dsc_filename)
+    if os.path.exists(dsc_file):
+        return dsc_file
+    return ''
+
+
 def get_deb_source_tarball_files():
     '''
     Get the list of source tarball files for debian package build.
     They are supposed to have been copied to bomsh_logfiles directory or g_chroot_dir.
+    returns a list of tarball files.
     '''
     cmd = 'ls bomsh_logfiles/*.tar.* || true'
     output = get_shell_cmd_output(cmd)
@@ -633,6 +715,8 @@ def rtd_parse_options():
                     help = "a text file that contains a list of RPM/DEB package files to process")
     parser.add_argument('--package_dir',
                     help = "an extra comma-separated list of directories which contain RPM/DEB package files to process")
+    parser.add_argument('--buildinfo_file',
+                    help = "the buildinfo file for debian package build")
     parser.add_argument('--start_with_ith_package',
                     help = "start with the i-th package")
     parser.add_argument('--first_n_packages',
