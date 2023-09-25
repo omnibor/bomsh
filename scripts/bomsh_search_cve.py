@@ -806,12 +806,33 @@ def is_any_cvelist_in_entry(entry):
     return "NoCVElist" in entry or "CVElist" in entry or "FixedCVElist" in entry or "cvehint_CVElist" in entry or "cvehint_FixedCVElist" in entry
 
 
+def get_build_cmd_chain_till_non_unary_transform(checksum_db, checksum):
+    '''
+    Get the chain of build cmds for an outfile checksum, till non-unary transform.
+    :param checksum_db: metadata DB with checksum (blob_id) as key, containing various metadata like file_path/build_cmd/CVElist, etc.
+    :param checksum: the blob ID of an outfile
+    returns a list of build commands, from this checksum to the first non-unary transform outfile down the transform chain.
+    '''
+    chain = []
+    while checksum in checksum_db:
+        entry = checksum_db[checksum]
+        if "build_cmd" in entry:
+            chain.append(entry["build_cmd"])
+        if "hash_tree" not in entry:  # leaf node
+            return chain
+        if len(entry["hash_tree"]) != 1:  # non-unary transform
+            return chain
+        # go to the next level of checksum for this unary transform
+        checksum = entry["hash_tree"][0]
+    return chain
+
+
 g_checksum_cache_db = {}
 def create_hash_tree_for_checksum(checksum, ancestors, checksum_db, checksum_line):
     '''
     Create the hash tree for a checksum, based on the checksum database.
     This function recurses on itself.
-    :param checksum: the checksum provided, which should be node_id of checksum_db
+    :param checksum: the checksum provided, which should be node_id of checksum_db (which is usually the bom-id, not blob-id)
     :param ancestors: the list of checksums that are ancestors of this checksum
     :param checksum_db: the checksum database
     :param checksum_line: the checksum line from gitBOM doc for this checksum (node_id)
@@ -888,13 +909,17 @@ def create_hash_tree_for_checksum(checksum, ancestors, checksum_db, checksum_lin
         file_path = get_metadata_for_checksum_from_db(g_cvedb, blob_id, "file_path")
         if file_path:
             ret["file_path"] = file_path
-    if g_metadata_db:
+    if g_metadata_db:  # try to save metadata from g_metadata_db too
         for which_list in useful_metadata_keys:
             if which_list in ret:
                 continue
             metadata = get_metadata_for_checksum_from_db(g_metadata_db, blob_id, which_list)
             if metadata:
                 ret[which_list] = metadata
+        # if unary transform, then also try to save chained build commands till non-unary transform
+        build_cmd_chain = get_build_cmd_chain_till_non_unary_transform(g_metadata_db, blob_id)
+        if len(build_cmd_chain) > 1:  # it must be unary transform for this blob_id
+            ret["build_cmd_chain"] = build_cmd_chain
     # checksum_line contains both blob_id and bom_id, more accurate/representative than blob_id/bom_id alone
     g_checksum_cache_db[checksum_line] = ret
     ancestors.pop()  # remove myself from the list of ancestors

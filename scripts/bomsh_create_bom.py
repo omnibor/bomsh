@@ -270,9 +270,11 @@ def create_gitbom_doc_text(infiles, db):
         line = "blob " + ahash
         # if ahash is not in db, should we try to extract the embedded bom_id in the infile? probably NOT, due to impact on performance
         # plus, this infile may not exist in the file system when this script is run offline later.
-        if ahash in db:
+        if ahash in db and (ahash in g_treedb and "prune" not in g_treedb[ahash]):  # ahash must not have the prune attribute
             gitbom_hash = db[ahash]
             line += " bom " + gitbom_hash
+        if args.verbose > 1 and ahash in db and db[ahash] and ahash in g_treedb and "prune" in g_treedb[ahash]:
+            verbose("Info: non-leaf blob " + ahash + " has prune attribute", LEVEL_2)
         lines.append(line)
     lines.sort()
     return '\n'.join(lines) + '\n'
@@ -582,6 +584,9 @@ def update_hash_tree_db_and_gitbom(db, record):
         build_tool = record["build_tool"]
     if "pkg_info" in record:
         pkg_info = record["pkg_info"]
+    if "prune" in record:  # simply pass the prune attribute from record to g_treedb[checksum]
+        verbose("From raw_logfile, checksum " + checksum + " has prune attribute", LEVEL_2)
+        db[checksum]["prune"] = record["prune"]
     hash_tree = update_hash_tree_node_hashtree(db, checksum, outfile, infiles, argv_str, pid, build_tool=build_tool, pkg_info=pkg_info, dynlibs=dynlibs)
     verbose("There are " + str(len(hash_tree)) + " checksums in hash_tree for outfile: " + outfile)
     if g_bomdir:
@@ -700,6 +705,12 @@ def read_raw_logfile(raw_logfile):
                 tokens = line.split()
                 record["pid"] = tokens[1]
                 record["exec_mode"] = tokens[2]
+            elif line.startswith("prune: "):
+                tokens = line.split()
+                if len(tokens) > 1:
+                    record["prune"] = tokens[1]
+                else:
+                    record["prune"] = ''
             elif line.startswith("ignore_this_record:"):
                 record["ignore_this_record"] = True
                 #elif line.startswith("working_dir: "):
