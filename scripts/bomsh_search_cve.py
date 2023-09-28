@@ -683,19 +683,27 @@ def create_gitbom_doc_treedb_for_checksums(bomdir, checksums, use_checksum_line=
     treedb = {}
     for checksum in checksums:
         if is_dict:
-            bom_id = checksums[checksum]
+            embed_bom_id = checksums[checksum]
         else:
-            bom_id = ''
+            embed_bom_id = ''
+        if embed_bom_id:
+            print("\n==Info: embedded bom_id " + embed_bom_id + " in blob ID: " + checksum)
+        else:
+            print("\n==Warning: No embedded .omnibor section in blob ID: " + checksum)
+        bom_id = ''
+        if bom_db and checksum in bom_db:
+            bom_id = bom_db[checksum]
+            print("From recorded OmniBOR mappings, found bom_id " + bom_id + " for blob ID: " + checksum)
+        if embed_bom_id and bom_id and embed_bom_id != bom_id:
+            print("Warning: the embedded bom-id " + embed_bom_id + " is different from recorded bom-id mapping " + bom_id)
+        if not bom_id or (args.embedded_bom_id_first and embed_bom_id):
+            bom_id = embed_bom_id
+            if bom_id:
+                print("Will use embedded bom_id " + embed_bom_id + " for blob ID: " + checksum)
         if not bom_id:
-            print("Warning: No embedded .bom section in blob ID: " + checksum)
-            if bom_db and checksum in bom_db:
-                bom_id = bom_db[checksum]
-                print("From recorded gitBOM mappings, found bom_id " + bom_id + " for blob ID: " + checksum)
-            if not bom_id:
-                print("Warning: No recorded bom_id mapping for blob ID: " + checksum)
-                continue
-        verbose("blob_id: " + checksum + " bom_id: " + bom_id)
-        #verbose("blob_id: " + checksum + " bom_id: " + bom_id + " file: " + afile)
+            print("Warning: No embedded .omnibor section and no recorded bom_id mapping for blob ID: " + checksum)
+            continue
+        verbose("Will use mapping of blob_id: " + checksum + " bom_id: " + bom_id)
         if use_checksum_line:
             # Add below blob_id to bom_id mapping for convenience, which has the is_self_hashtree attribute to distinguish from regular nodes.
             checksum_line = "blob " + checksum + " bom " + bom_id
@@ -806,12 +814,33 @@ def is_any_cvelist_in_entry(entry):
     return "NoCVElist" in entry or "CVElist" in entry or "FixedCVElist" in entry or "cvehint_CVElist" in entry or "cvehint_FixedCVElist" in entry
 
 
+def get_build_cmd_chain_till_non_unary_transform(checksum_db, checksum):
+    '''
+    Get the chain of build cmds for an outfile checksum, till non-unary transform.
+    :param checksum_db: metadata DB with checksum (blob_id) as key, containing various metadata like file_path/build_cmd/CVElist, etc.
+    :param checksum: the blob ID of an outfile
+    returns a list of build commands, from this checksum to the first non-unary transform outfile down the transform chain.
+    '''
+    chain = []
+    while checksum in checksum_db:
+        entry = checksum_db[checksum]
+        if "build_cmd" in entry:
+            chain.append(entry["build_cmd"])
+        if "hash_tree" not in entry:  # leaf node
+            return chain
+        if len(entry["hash_tree"]) != 1:  # non-unary transform
+            return chain
+        # go to the next level of checksum for this unary transform
+        checksum = entry["hash_tree"][0]
+    return chain
+
+
 g_checksum_cache_db = {}
 def create_hash_tree_for_checksum(checksum, ancestors, checksum_db, checksum_line):
     '''
     Create the hash tree for a checksum, based on the checksum database.
     This function recurses on itself.
-    :param checksum: the checksum provided, which should be node_id of checksum_db
+    :param checksum: the checksum provided, which should be node_id of checksum_db (which is usually the bom-id, not blob-id)
     :param ancestors: the list of checksums that are ancestors of this checksum
     :param checksum_db: the checksum database
     :param checksum_line: the checksum line from gitBOM doc for this checksum (node_id)
@@ -888,13 +917,17 @@ def create_hash_tree_for_checksum(checksum, ancestors, checksum_db, checksum_lin
         file_path = get_metadata_for_checksum_from_db(g_cvedb, blob_id, "file_path")
         if file_path:
             ret["file_path"] = file_path
-    if g_metadata_db:
+    if g_metadata_db:  # try to save metadata from g_metadata_db too
         for which_list in useful_metadata_keys:
             if which_list in ret:
                 continue
             metadata = get_metadata_for_checksum_from_db(g_metadata_db, blob_id, which_list)
             if metadata:
                 ret[which_list] = metadata
+        # if unary transform, then also try to save chained build commands till non-unary transform
+        build_cmd_chain = get_build_cmd_chain_till_non_unary_transform(g_metadata_db, blob_id)
+        if len(build_cmd_chain) > 1:  # it must be unary transform for this blob_id
+            ret["build_cmd_chain"] = build_cmd_chain
     # checksum_line contains both blob_id and bom_id, more accurate/representative than blob_id/bom_id alone
     g_checksum_cache_db[checksum_line] = ret
     ancestors.pop()  # remove myself from the list of ancestors
@@ -954,6 +987,32 @@ def bomsh_get_metadata_dir(args):
     return metadata_dir
 
 
+def get_metadata_stripped_tree(tree):
+    '''
+    Get a new dict tree with all metadata stripped.
+    This function recurses on itself.
+    :param tree: a subtree of the CVE search result tree with metadata details
+    returns a new dict with checksum_line nodes only, without any addtional metadata.
+    '''
+    new_tree = {}
+    for checksum in tree:
+        if checksum.startswith("blob "):
+            new_tree[checksum] = get_metadata_stripped_tree(tree[checksum])
+    return new_tree
+
+
+def get_tree_with_metadata_stripped(tree):
+    '''
+    Get a new dict tree with all metadata stripped.
+    :param tree: the CVE search result top-level tree with metadata details
+    returns a new dict with checksum_line nodes only, without any addtional metadata.
+    '''
+    new_tree = {}
+    for checksum in tree:
+        new_tree[checksum] = get_metadata_stripped_tree(tree[checksum])
+    return new_tree
+
+
 def find_cve_lists_for_checksums(checksums, is_bom_id=False):
     '''
     find all the CVEs for a list of checksums.
@@ -965,6 +1024,7 @@ def find_cve_lists_for_checksums(checksums, is_bom_id=False):
         tree = create_hash_tree_for_checksums(checksums, g_checksum_db)
     if g_jsonfile and args.verbose > 1:
         save_json_db(g_jsonfile + "-details.json", tree)
+        save_json_db(g_jsonfile + "-adg.json", get_tree_with_metadata_stripped(tree))
     if tree and args.derive_sbom:  # user may want to derive SBOM for the search result
         sbom_sum_db, sbom_detail_db, dynlib_detail_db = derive_sbom(tree)
         if g_jsonfile and args.verbose > 1:
@@ -2375,6 +2435,9 @@ def rtd_parse_options():
                     help = "the new directory to copy out or store the relevant gitBOM doc and metadata files for the search result")
     parser.add_argument('--subtree_collapsed_bomdir',
                     help = "the new directory to copy out or store the relevant subtree-collapsed gitBOM doc and metadata files for the search result")
+    parser.add_argument("--embedded_bom_id_first",
+                    action = "store_true",
+                    help = "when finding the associated bom-id for artifact, the embedded bom-id is first checked, then other methods")
     parser.add_argument("--remove_sepstrs_in_doc",
                     action = "store_true",
                     help = "remove redundant blob/bom separator strings in gitBOM docs")
