@@ -190,7 +190,7 @@ def read_all_infiles_from_raw_logfile(raw_logfile, read_dynlib=True):
     ret = set()
     with open(raw_logfile, 'r') as f:
         for line in f:
-            if line[:8] in ("infile: ", "dynlib: "):
+            if line[:8] in ("infile: ", "dynlib: ") or line.startswith("outfile: "):
                 tokens = line.split()
                 if len(tokens) > 3:
                     checksum = tokens[1]
