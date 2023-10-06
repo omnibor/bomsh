@@ -2331,7 +2331,7 @@ def derive_sbom_for_atree(tree, metadata_dir, dynlib_sbom=False):
             blob_str = blob_id + " " + path
             name, version = derive_componant_name_version_from_path(path)
             if name: # successfully derived name/version
-                pkg_key = name + " " + version
+                pkg_key = "DERIVED_PKG " + name + " " + version
                 blob_packages = ''
                 if blob_id in g_index_db: # check if it exists in g_index_db
                     blob_packages = (blob_str, g_index_db[blob_id])
