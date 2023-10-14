@@ -82,6 +82,16 @@ def get_or_create_dir(destdir):
     return os.path.abspath(destdir)
 
 
+def write_text_file(afile, text):
+    '''
+    Write a string to a text file.
+
+    :param afile: the text file to write
+    '''
+    with open(afile, 'w') as f:
+         return f.write(text)
+
+
 def append_text_file(afile, text):
     '''
     Append a string to a text file.
@@ -342,7 +352,7 @@ def get_all_shared_libraries():
     libs = libs_64bit
     for line in lines:
         tokens = line.strip().split()
-        if ": (from " in line:
+        if ": (from " in line or (len(tokens) == 1 and line[0] == '/' and tokens[0][-1] == ':'):
             lib_dir = tokens[0].rstrip(":")
             lib_dir_changed = True
             verbose("See a new lib_dir " + lib_dir)
@@ -436,6 +446,10 @@ def create_raw_logfile_for_files(afiles):
         print("==Creating raw_logfile for " + str(len(afiles)) + " files: " + str(afiles))
     else:
         print("==Creating raw_logfile for " + str(len(afiles)) + " files.")
+    if "sha1" in g_hashtypes:
+        write_text_file(g_raw_logfile + ".sha1", "")
+    if "sha256" in g_hashtypes:
+        write_text_file(g_raw_logfile + ".sha256", "")
     for afile in afiles:
         filetype = get_filetype( get_chroot_path(afile) )
         name_libs = g_dynlib_namedb["64bit"]

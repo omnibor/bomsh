@@ -146,17 +146,25 @@ RUN cd /root ; git clone https://github.com/omnibor/bomsh.git ; \\
 CMD if [ -z "${BASELINE_REBUILD}" ]; then bomtrace_cmd="/tmp/bomtrace2 -w /tmp/bomtrace_watched_programs -c /tmp/bomtrace.conf -o /tmp/bomsh_hook_strace_logfile " ; fi ; \\
     if [ -z "${CHROOT_CFG}" ]; then CHROOT_CFG=default ; fi ; \\
     mkdir -p /out/bomsher_out ; cd /out/bomsher_out ; \\
-    $bomtrace_cmd mock -r /etc/mock/${CHROOT_CFG}.cfg $MOCK_OPTION --rebuild /out/bomsher_in/$SRC_RPM_FILE --resultdir=./tmprpms --no-cleanup-after ; \\
+    # Need to put the extra MOCK_OPTION into an array for use by later mock command ; \\
+    echo $MOCK_OPTION ; eval "mock_opt=($MOCK_OPTION)" ; declare -p mock_opt ; \\
+    echo $bomtrace_cmd mock -r /etc/mock/${CHROOT_CFG}.cfg --rebuild /out/bomsher_in/$SRC_RPM_FILE --resultdir=./tmprpms --no-cleanup-after "${mock_opt[@]}" ; \\
+    # Run strace to collect artifact dependency fragments (ADF) for rpmbuild ; \\
+    $bomtrace_cmd mock -r /etc/mock/${CHROOT_CFG}.cfg --rebuild /out/bomsher_in/$SRC_RPM_FILE --resultdir=./tmprpms --no-cleanup-after "${mock_opt[@]}" ; \\
     mkdir rpms ; cp tmprpms/*.rpm rpms ; rm -rf tmprpms ; \\
     if [ "${BASELINE_REBUILD}" ]; then exit 0 ; fi ; \\
     rpmfiles=`for i in rpms/*.rpm ; do  echo -n $i, ; done | sed 's/.$//'` ; \\
     rm -rf omnibor omnibor_dir ; mv .omnibor omnibor ; mkdir -p bomsh_logfiles ; cp -f /tmp/bomsh_hook_*logfile* bomsh_logfiles/ ; \\
+    # Create the package index database for prov_pkg metadata of source files ; \\
     /tmp/bomsh_index_ws.py --chroot_dir /var/lib/mock/${CHROOT_CFG}/root -p $rpmfiles -r /tmp/bomsh_hook_raw_logfile.sha1 ; \\
+    # Create the OmniBOR manifest document and metadata database ; \\
     /tmp/bomsh_create_bom.py -b omnibor_dir -r /tmp/bomsh_hook_raw_logfile.sha1 --pkg_db_file /tmp/bomsh-index-pkg-db.json ; \\
-    cp /tmp/bomsh-index-* /tmp/bomsh_createbom_* bomsh_logfiles ; \\
+    cp /etc/os-release /tmp/bomsh-index-* /tmp/bomsh_createbom_* bomsh_logfiles ; \\
     cp /tmp/bomsh*.py bomsh_logfiles ; cp /tmp/bomtrace* bomsh_logfiles ; \\
     if [ "${CVEDB_FILE}" ]; then cvedb_file_param="-d /out/bomsher_in/${CVEDB_FILE}" ; fi ; \\
+    # Create the OmniBOR ADG trees for built RPM packages based on the OmniBOR manifest document and metadata database ; \\
     /tmp/bomsh_search_cve.py --derive_sbom -b omnibor_dir $cvedb_file_param -f $rpmfiles -vvv ; cp /tmp/bomsh_search_jsonfile* bomsh_logfiles/ ; \\
+    # Extra handling of syft generated SPDX SBOM documents ; \\
     if [ "${SYFT_SBOM}" ]; then /tmp/bomsh_sbom.py -b omnibor_dir -F $rpmfiles -vv --output_dir syft_sbom --sbom_format spdx ; fi ; \\
     if [ "${SYFT_SBOM}" ]; then /tmp/bomsh_sbom.py -b omnibor_dir -F $rpmfiles -vv --output_dir syft_sbom --sbom_format spdx-json ; fi ;
 '''
@@ -206,6 +214,7 @@ def run_docker(src_rpm_file, output_dir):
     if args.mock_option:
         # usually for the "--no-bootstrap-image" option for mock >= 5.0 version
         docker_cmd += ' -e MOCK_OPTION="' + args.mock_option + '"'
+        verbose("Extra mock options: " + args.mock_option, LEVEL_2)
     if args.syft_sbom:
         # Generate SBOM document with the syft tool
         docker_cmd += ' -e SYFT_SBOM=1'
