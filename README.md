@@ -8,7 +8,10 @@ Table of Contents
 * [Generating OmniBOR Docs with Bomtrace2](#Generating-OmniBOR-Docs-with-Bomtrace2)
 * [Generating OmniBOR ADGs for Debian or RPM Packages with Bomtrace2](#Generating-OmniBOR-ADGs-for-Debian-or-RPM-Packages-with-Bomtrace2)
 * [Reducing Storage of Generated OmniBOR Docs](#Reducing-Storage-of-Generated-OmniBOR-Docs)
+* [Manipulating OmniBOR Artifact Tree with Grafting and Pruning](#Manipulating-OmniBOR-Artifact-Tree-with-Grafting-and-Pruning)
 * [Creating Index Database for Debian Source Packages](#Creating-Index-Database-for-Debian-Source-Packages)
+* [Creating Runtime Dependency Tree for ELF Binaries](#Creating-Runtime-Dependency-Tree-for-ELF-Binaries)
+* [Creating Runtime Dependency Tree for Python Scripts](#Creating-Runtime-Dependency-Tree-for-Python-Scripts)
 * [Creating CVE Database for Software](#Creating-CVE-Database-for-Software)
 * [Software Vulnerability CVE Search](#Software-Vulnerability-CVE-Search)
 * [Software Vulnerability CVE Search for JAVA Packages](#Software-Vulnerability-CVE-Search-for-JAVA-Packages)
@@ -45,6 +48,8 @@ Multiple Python scripts are developed to work together with these tools.
 - bomsh_index_ws.py script, which creates a blob index database for software build workspace.
 - bomsh_sbom.py script, which creates or updates SPDX SBOM documents with OmniBOR info.
 - bomsh_art_tree.py script, which grafts new subtrees or prunes existing subtrees of OmniBOR artifact trees.
+- bomsh_dynlib.py script, which creates raw_logfile of runtime-dependency fragments for ELF executables.
+- bomsh_pylib.py script, which creates raw_logfile of runtime-dependency fragments for Python scripts.
 
 Quick Start
 -----------
@@ -55,7 +60,7 @@ For a quick start of using the Bomsh tool, run the below command:
     $ wget http://vault.centos.org/8-stream/AppStream/Source/SPackages/sysstat-11.7.3-9.el8.src.rpm
     $ bomsh/scripts/bomsh_rebuild_rpm.py -c alma+epel-8-x86_64 --docker_image_base almalinux:8 -s sysstat-11.7.3-9.el8.src.rpm -d bomsh/scripts/sample_sysstat_cvedb.json -o outdir --syft_sbom
     $ # if mock is >= 5.0 version, then the below "--mock_option=--no-bootstrap-image" command option may be needed
-    $ bomsh/scripts/bomsh_rebuild_rpm.py -c alma+epel-8-x86_64 --docker_image_base almalinux:8 -s sysstat-11.7.3-9.el8.src.rpm -d bomsh/scripts/sample_sysstat_cvedb.json -o outdir --syft_sbom --mock_option=--no-bootstrap-image
+    $ bomsh/scripts/bomsh_rebuild_rpm.py -c alma+epel-8-x86_64 --docker_image_base almalinux:8 -s sysstat-11.7.3-9.el8.src.rpm -d bomsh/scripts/sample_sysstat_cvedb.json -o outdir --syft_sbom --mock_option="--no-bootstrap-image --define 'packager BOMSH user $(id -un) at $(hostname)'"
     $ grep -B1 -A3 CVElist outdir/bomsher_out/bomsh_logfiles/bomsh_search_jsonfile-details.json
     $ # the above should take only a few minutes, and the below may take tens of minutes
     $ wget https://buildinfos.debian.net/buildinfo-pool/s/sysstat/sysstat_11.7.3-1_all-amd64-source.buildinfo
@@ -115,9 +120,11 @@ Do the following to generate OmniBOR docs for the HelloWorld program with Bomtra
     $ cat /tmp/bomsh_createbom_jsonfile
 
 Bomtrace2 works together with the new bomsh_hook2.py script, which records only necessary raw info.
+The raw info contains ADFs (Artifact Dependency Fragments) for generated artifacts.
+Each artifact dependency fragment contains an output file and a list of input files and their GITOIDs, as well as some metadata like build_cmd, build_tool, etc.
 The raw info is recorded in /tmp/bomsh_hook_raw_logfile.sha1, which only contains the SHA1 checksums of the parsed input/output files of the shell commands.
 After software build is done, a new bomsh_create_bom.py script is run to read the raw_logfile
-and do the hash-tree generation, as well as OmniBOR doc creation and .note.omnibor section embedding.
+and do the hash-tree generation, as well as OmniBOR doc creation and metadata collection/aggregation.
 The generated hash-tree database is saved in /tmp/bomsh_createbom_jsonfile.
 The original bomsh_hook.py is essentially divided into two scripts: bomsh_hook2.py + bomsh_create_bom.py
 The two new scripts should generate the exact same OmniBOR artifact database /tmp/bomsh_createbom_jsonfile as the /tmp/bomsh_hook_jsonfile of the old bomsh_hook.py script.
@@ -477,6 +484,63 @@ Here is an example for Ubuntu kernel build:
     $ # the below command recovers the newly created subtree-collapsed OmniBOR docs in the new recover-bomdir:
     $ ./bomsh_search_cve.py --bom_dir collapse-bomdir --copyout_bomdir recover-bomdir --insert_sepstrs_in_doc
 
+Manipulating OmniBOR Artifact Tree with Grafting and Pruning
+------------------------------------------------------------
+
+Sometimes it is necessary to manipulate OmniBOR manifest documents to create a new artifact tree.
+For example, we want to hide the details of a proprietary library, or the OmniBOR details
+of a third-party library is provided later after software build and we want to amend the OmniBOR
+artifact tree with the OmniBOR details of this third-party library.
+This will require the manipulation of OmniBOR documents, to prune existing subtrees or graft new subtrees.
+A new bomsh_art_tree.py script is created for this purpose.
+
+Here is an example of grafting and pruning OmniBOR artifact trees:
+
+    $ git clone URL-of-this-git-repo bomsh
+    $ wget http://vault.centos.org/8-stream/AppStream/Source/SPackages/sysstat-11.7.3-9.el8.src.rpm
+    $ bomsh/scripts/bomsh_rebuild_rpm.py -c alma+epel-8-x86_64 --docker_image_base almalinux:8 -s sysstat-11.7.3-9.el8.src.rpm -d bomsh/scripts/sample_sysstat_cvedb.json -o outdir --syft_sbom --mock_option="--no-bootstrap-image --define 'packager BOMSH user $(id -un) at $(hostname)'"
+    $ cp outdir/bomsher_out/bomsh_logfiles/bomtrace2 /tmp ; cp bomsh/scripts/*.py /tmp
+    $ cd bomsh/src ; make -f Makefile.libd1 clean ; make -f Makefile.libd1 libd1.so
+    $ rm -rf .omnibor /tmp/bomsh_hook_* omnibor_libs1 ; make -f Makefile.libs1 clean ; /tmp/bomtrace2 make -f Makefile.libs1 libs1.a ; /tmp/bomsh_create_bom.py -r /tmp/bomsh_hook_raw_logfile.sha1 -b omnibor_libs1
+    $ rm -rf .omnibor /tmp/bomsh_hook_* omnibor_hello2 ; make clean ; /tmp/bomtrace2 make -f Makefile hello2 ; /tmp/bomsh_create_bom.py -r /tmp/bomsh_hook_raw_logfile.sha1 -b omnibor_hello2
+    $ # You will see the embedded OmniBOR bom-id with the below readelf command
+    $ readelf -x .note.omnibor hello2
+    $ # Now you should NOT see the OmniBOR subtree for libsa1.a library when searching for hello2 binary
+    $ /tmp/bomsh_search_cve.py -vvv -b omnibor_hello2 -f hello2 ; cat /tmp/bomsh_search_jsonfile-details.json
+    $ ### Grafting the artifact subtree of libs1.a library to the main tree of hello2
+    $ /tmp/bomsh_art_tree.py -B omnibor_libs1,omnibor_hello2 -O new_omnibor_hello2 -f hello2
+    $ # After grafting, you should see the OmniBOR subtree for libsa1.a library when searching for hello2 binary
+    $ /tmp/bomsh_search_cve.py -vvv -b new_omnibor_hello2 -f hello2 ; cat /tmp/bomsh_search_jsonfile-details.json
+    $ # Also the embedded OmniBOR bom-id is changed accordingly. Note a new new_omnibor_hello2/artifacts/hello2 with changed bom-id is created by default
+    $ readelf -x .note.omnibor hello2 new_omnibor_hello2/artifacts/hello2
+    $ # If you want to change hello2 directly, then you can add --change_in_place option
+    $ rm -rf new_omnibor_hello2 ; /tmp/bomsh_art_tree.py -B omnibor_libs1,omnibor_hello2 -O new_omnibor_hello2 -f hello2 --change_in_place
+    $ readelf -x .note.omnibor hello2
+    $ ### Pruning the artifact subtree of libs1.a library from the main tree of hello2
+    $ /tmp/bomsh_art_tree.py -B new_omnibor_hello2 -O prune_omnibor_hello2 --prune_gitoids $(git hash-object libs1.a) -f hello2
+    $ # After pruning, you should NOT see the OmniBOR subtree for libs1.a library when searching for hello2 binary
+    $ /tmp/bomsh_search_cve.py -vvv -b prune_omnibor_hello2/new_omnibor_hello2 -f hello2 ; cat /tmp/bomsh_search_jsonfile-details.json
+    $ # Also the embedded OmniBOR bom-id is changed accordingly. Again note a new hello2 with changed bom-id is created by default
+    $ readelf -x .note.omnibor hello2 prune_omnibor_hello2/new_omnibor_hello2/artifacts/hello2
+    $ # If you want to change hello2 directly, then you can add --change_in_place option
+    $ rm -rf prune_omnibor_hello2 ; /tmp/bomsh_art_tree.py -B new_omnibor_hello2 -O prune_omnibor_hello2 --prune_gitoids $(git hash-object libs1.a) -f hello2 --change_in_place
+    $ readelf -x .note.omnibor hello2
+
+The above is just a very simple example to demonstrate the use of this
+bomsh_art_tree.py script. It has other options to let user customize the behavior.
+User can run "bomsh_art_tree.py --help" to find out more.
+
+As a result, multiple OmniBOR bom-ids can be associated with a single
+artifact at the same time for a single software build instance.
+For example, internal development engineers can have a bom-id which
+have all the subtrees of your company's proprietary software, while
+external customers only have a bom-id without the subtrees of your
+company's proprietary software.
+
+Most importantly, with Bomsh scripts, user does not need to rebuild software in order to get a different
+OmniBOR artifact tree. User can easily connect multiple OmniBOR artifact trees to form a new artifact tree.
+The Bomsh post-processing scripts significantly increase the flexibility for software vendors.
+
 Creating Index Database for Debian Source Packages
 --------------------------------------------------
 
@@ -496,6 +560,51 @@ The bomsh-index-db.json contains the { blob => list of packages } mappings.
 The bomsh-index-summary.json contains some summary information, the { deb_release => summary stats of num_packages, total_size } mappings.
 The full index database will be huge, and in the above example, we only do it for the first 3 packages in each release.
 To get only the bomsh-index-summary.json result, you can specify "--first_n_packages 0" option, which will not download or process any source package.
+
+A few similar scripts are created too. The bomsh_index_yocto.py script can create index database for Yocto projects.
+The bomsh_index_ws.py script can create index database for RPM/Debian build workspace.
+
+Creating Runtime Dependency Tree for ELF Binaries
+-------------------------------------------------
+
+A new bomsh_dynlib.py script is developed to create runtime dependency for Linux ELF executables and dynamic libraries.
+It utilizes the readelf program to read the dynamic section of the ELF binary files,
+create artifact dependency fragments (ADFs) for all relevant libraries, and save in a raw_logfile.
+This raw_logfile is then fed to other Bomsh scripts to create the OmniBOR database and artifact dependency graph (ADG) trees.
+
+Here is an example of creating OmniBOR artifact dependency trees for some Linux binaries:
+
+    $ git clone URL-of-this-git-repo bomsh
+    $ bomsh/scripts/bomsh_dynlib.py -f /usr/sbin/sshd,/usr/bin/sha1sum --hashtype sha1,sha256
+    $ bomsh/scripts/bomsh_create_bom.py -r /tmp/bomsh_dynlib_raw_logfile.sha1 -b omnibor_dir
+    $ bomsh/scripts/bomsh_search_cve.py -vvv -b omnibor_dir -f /usr/sbin/sshd,/usr/bin/sha1sum
+    $ ls -tl /tmp/bomsh_search_jsonfile* ; cat /tmp/bomsh_search_jsonfile-details.json
+
+The bomsh_dynlib.py script also has -d option, which specifies a directory and the script will analyze all ELF executables/libraries in that directory.
+It can generate a snapshot identifier for your Linux system/container, or a subset of ELF executables,
+so that you can compare multiple run environments or provide customers a reference snapshot ID.
+The generated OmniBOR bom-id is like the SHA1 checksum for downloaded ISO image, now this OmniBOR ID stands for a tree of relevant ELF binary files.
+For example, if the sshd-omnibor-id of customer system is collected, then you can check or verify if you have the same run environment for SSH daemon as your customer.
+
+Creating Runtime Dependency Tree for Python Scripts
+---------------------------------------------------
+
+A new bomsh_pylib.py script is developed to create runtime dependency for Python scripts.
+It does some static analysis on imported Python modules in each Python .py script,
+create artifact dependency fragments (ADFs) for all Python scripts, and save in a raw_logfile.
+This raw_logfile is then fed to other Bomsh scripts to create the OmniBOR database and artifact dependency graph (ADG) trees.
+
+Here is an example of creating OmniBOR artifact dependency trees for some Python scripts:
+
+    $ git clone URL-of-this-git-repo bomsh
+    $ bomsh/scripts/bomsh_pylib.py -f bomsh/scripts/bomsh_hook2.py,bomsh/scripts/bomsh_pstree.py --hashtype sha1,sha256
+    $ bomsh/scripts/bomsh_create_bom.py -r /tmp/bomsh_pylib_raw_logfile.sha256 -b omnibor_dir --hashtype sha256
+    $ bomsh/scripts/bomsh_search_cve.py -vvv -b omnibor_dir -f bomsh/scripts/bomsh_hook2.py,bomsh/scripts/bomsh_pstree.py --hashtype sha256
+    $ ls -tl /tmp/bomsh_search_jsonfile* ; cat /tmp/bomsh_search_jsonfile-details.json
+
+The bomsh_pylib.py script also has -d option, which specifies a directory and the script will analyze all *.py files in that directory.
+Similarly as ELF binaries, you can generate a snapshot identifier for your set of Python scripts,
+so that you can compare multiple Python run environments or provide customers a reference snapshot ID.
 
 Creating CVE Database for Software
 ----------------------------------

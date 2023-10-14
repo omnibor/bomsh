@@ -560,7 +560,7 @@ def merge_bom_dirs(bom_dirs, destdir):
     save_json_db(os.path.join(bomsh_metadata_dir, "bomsh_omnibor_doc_mapping"), bom_db)
     save_json_db(os.path.join(bomsh_metadata_dir, "bomsh_index_blob_pkg_db"), index_db)
     verbose("===Done saving generated metadata docs to metadata dir: " + bomsh_metadata_dir, LEVEL_2)
-    return destdir
+    return [destdir, ]
 
 
 def prune_bom_dir(bom_dir, blob_ids, destdir):

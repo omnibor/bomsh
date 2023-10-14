@@ -1403,10 +1403,14 @@ def create_symlink_for_adg_doc(ahash, adg_doc, destdir):
 # The "--set-section-alignment <name>=<align>" option was introduced in objcopy 2.33 version.
 # so "--set-section-alignment .note.omnibor=4" cannot yet be used for objcopy < 2.33 version
 g_embed_bom_script = '''
-if objdump -s -j .note.omnibor HELLO_FILE >/dev/null 2>/dev/null ; then
-  GITBOM_BUILD_MODE= objcopy --update-section .note.omnibor=NOTE_FILE --set-section-flags .note.omnibor=alloc,readonly HELLO_FILE >/dev/null 2>/dev/null
+num_omnibor=$(objdump -s -j .note.omnibor HELLO_FILE 2>/dev/null | grep "Contents of section .note.omnibor:" | wc -l)
+if [ $num_omnibor -eq 0 ] ; then
+  objcopy --add-section .note.omnibor=NOTE_FILE --set-section-flags .note.omnibor=alloc,readonly HELLO_FILE >/dev/null 2>/dev/null
+elif [ $num_omnibor -eq 1 ] ; then
+  objcopy --update-section .note.omnibor=NOTE_FILE --set-section-flags .note.omnibor=alloc,readonly HELLO_FILE >/dev/null 2>/dev/null
 else
-  GITBOM_BUILD_MODE= objcopy --add-section .note.omnibor=NOTE_FILE --set-section-flags .note.omnibor=alloc,readonly HELLO_FILE >/dev/null 2>/dev/null
+  objcopy --remove-section .note.omnibor HELLO_FILE >/dev/null 2>/dev/null
+  objcopy --add-section .note.omnibor=NOTE_FILE --set-section-flags .note.omnibor=alloc,readonly HELLO_FILE >/dev/null 2>/dev/null
 fi
 '''
 
