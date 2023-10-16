@@ -144,7 +144,7 @@ RUN cd /root ; git clone https://github.com/omnibor/bomsh.git ; \\
 # if BASELINE_REBUILD is not empty, then it will not use bomtrace2 to run mock, that is, the baseline run.
 # if CHROOT_CFG is not empty, then the provided mock chroot_cfg will be used, otherwise, default.cfg is used.
 CMD if [ -z "${BASELINE_REBUILD}" ]; then bomtrace_cmd="/tmp/bomtrace2 -w /tmp/bomtrace_watched_programs -c /tmp/bomtrace.conf -o /tmp/bomsh_hook_strace_logfile " ; fi ; \\
-    if [ -z "${CHROOT_CFG}" ]; then CHROOT_CFG=default ; fi ; \\
+    if [ -z "${CHROOT_CFG}" ]; then CHROOT_CFG=$(basename $(readlink /etc/mock/default.cfg) .cfg) ; fi ; \\
     mkdir -p /out/bomsher_out ; cd /out/bomsher_out ; \\
     # Need to put the extra MOCK_OPTION into an array for use by later mock command ; \\
     echo $MOCK_OPTION ; eval "mock_opt=($MOCK_OPTION)" ; declare -p mock_opt ; \\
@@ -159,6 +159,7 @@ CMD if [ -z "${BASELINE_REBUILD}" ]; then bomtrace_cmd="/tmp/bomtrace2 -w /tmp/b
     /tmp/bomsh_index_ws.py --chroot_dir /var/lib/mock/${CHROOT_CFG}/root -p $rpmfiles -r /tmp/bomsh_hook_raw_logfile.sha1 ; \\
     # Create the OmniBOR manifest document and metadata database ; \\
     /tmp/bomsh_create_bom.py -b omnibor_dir -r /tmp/bomsh_hook_raw_logfile.sha1 --pkg_db_file /tmp/bomsh-index-pkg-db.json ; \\
+    cp /var/lib/mock/${CHROOT_CFG}/root/etc/os-release bomsh_logfiles/mock-os-release ; \\
     cp /etc/os-release /tmp/bomsh-index-* /tmp/bomsh_createbom_* bomsh_logfiles ; \\
     cp /tmp/bomsh*.py bomsh_logfiles ; cp /tmp/bomtrace* bomsh_logfiles ; \\
     if [ "${CVEDB_FILE}" ]; then cvedb_file_param="-d /out/bomsher_in/${CVEDB_FILE}" ; fi ; \\
@@ -179,7 +180,7 @@ def create_dockerfile(work_dir):
     else:
         from_str = 'FROM almalinux:9'
     bomsh_dockerfile_str = g_bomsh_dockerfile_str
-    if "mageia" in args.chroot_cfg:  # special handling for mageia platform due to file permission check with multiple levels of symlinks
+    if args.chroot_cfg and "mageia" in args.chroot_cfg:  # special handling for mageia platform due to file permission check with multiple levels of symlinks
         tokens = g_bomsh_dockerfile_str.splitlines()
         # insert one line to do sed replacement of bomtrace.conf file to change bomtrace config
         bomsh_dockerfile_str = '\n'.join(tokens[:11] + ["    sed -i -e 's/#skip_checking_prog_access=1/skip_checking_prog_access=1/' /tmp/bomtrace.conf ; \\",] + tokens[11:]) + '\n'
