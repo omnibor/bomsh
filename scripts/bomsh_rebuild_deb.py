@@ -1,4 +1,4 @@
-#! /bin/env python3
+#! /usr/bin/env python3
 # Copyright (c) 2023 Cisco and/or its affiliates.
 #
 # SPDX-License-Identifier: Apache-2.0
@@ -158,7 +158,8 @@ mmdebstrap_patch_text = """--- mmdebstrap.bak	2023-09-16 18:50:42.032552913 +000
 g_bomsh_dockerfile_str = '''
 
 # Set up debrebuild/mmdebstrap environment
-RUN apt-get update ; apt-get install -y git wget mmdebstrap devscripts python3-pycurl python3-yaml apt-utils ; \\
+RUN apt update ; export DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true ; \\
+    apt install -y git wget mmdebstrap devscripts autoconf python3-pycurl python3-yaml apt-utils ; \\
     rm -rf /var/lib/apt/lists/* ;
 
 # Set up bomtrace2/bomsh environment
