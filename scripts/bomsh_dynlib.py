@@ -1,4 +1,4 @@
-#! /bin/env python3
+#! /usr/bin/env python3
 # Copyright (c) 2022 Cisco and/or its affiliates.
 #
 # SPDX-License-Identifier: Apache-2.0
@@ -345,7 +345,7 @@ def get_all_shared_libraries():
     output = get_shell_cmd_output(cmd)
     verbose(output, LEVEL_2)
     if not output:
-        return libs
+        return all_libs
     libs_32bit, libs_64bit = all_libs["32bit"], all_libs["64bit"]
     lib_dir, lib_dir_changed = '', False
     lines = output.splitlines()
@@ -486,9 +486,9 @@ def rtd_parse_options():
     parser.add_argument('--hashtype',
                     help = "the hash type, like sha1/sha256, the default is sha1")
     parser.add_argument('-f', '--files',
-                    help = "comma-separated files to change embedded bom-id")
+                    help = "comma-separated files")
     parser.add_argument('-d', '--dirs',
-                    help = "comma-separated directories to search for files that need to change embedded bom-id")
+                    help = "comma-separated directories to search for files")
     parser.add_argument('--chroot_dir',
                     help = "the mock chroot directory")
     parser.add_argument("-v", "--verbose",

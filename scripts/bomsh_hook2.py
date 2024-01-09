@@ -1,4 +1,4 @@
-#! /bin/env python3
+#! /usr/bin/env python3
 # Copyright (c) 2022 Cisco and/or its affiliates.
 #
 # SPDX-License-Identifier: Apache-2.0

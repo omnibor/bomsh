@@ -1,4 +1,4 @@
-#! /bin/env python3
+#! /usr/bin/env python3
 # Copyright (c) 2022 Cisco and/or its affiliates.
 #
 # SPDX-License-Identifier: Apache-2.0
@@ -160,6 +160,31 @@ def find_all_suffix_files(builddir, suffix):
     return files
 
 
+def get_empty_init_py_hash(afile, hash_alg="sha1", use_cache=True):
+    '''
+    Get the hash value for an empty __init__.py file, which represents a Python package.
+    Instead of using the empty __init__.py file, all .py files under the dirpath are
+    sorted and concatenated to a temporary file, and then calculate the hash.
+    :param afile: the __init__.py file to calculate the git hash or digest.
+    :param hash_alg: the hashing algorithm, either SHA1 or SHA256
+    '''
+    pyfiles = []
+    dirname = os.path.dirname(afile)
+    for dirpath, dirs, files in os.walk(dirname):
+        for f in files:
+            if os.path.basename(f).endswith(".py"):
+                pyfiles.append(f)
+        break
+    # Concatenate all pyfiles to a tmp file and calculate its hash
+    outfile = os.path.join(g_tmpdir, "bomsh_pylib_initpy_concat")
+    with open(outfile, 'w') as outf:
+        for pyfile in sorted(pyfiles):
+            outf.write(read_text_file(os.path.join(dirpath, pyfile)))
+    ahash = get_file_hash(outfile, hash_alg, False)
+    os.remove(outfile)
+    return ahash
+
+
 # a dict to cache the computed hash of files
 g_git_file_hash_cache = {}
 
@@ -173,6 +198,9 @@ def get_file_hash(afile, hash_alg="sha1", use_cache=True):
         afile_key = afile + "." + hash_alg
         if afile_key in g_git_file_hash_cache:
             return g_git_file_hash_cache[afile_key]
+    if os.path.basename(afile) == "__init__.py" and os.path.getsize(afile) < 100:
+        # special handling for an empty __init__.py file, use 100 as the threshold
+        return get_empty_init_py_hash(afile, hash_alg, use_cache)
     if hash_alg == "sha256":
         cmd = 'printf "blob $(wc -c < ' + afile + ')\\0" | cat - ' + afile + ' 2>/dev/null | sha256sum | head --bytes=-4 || true'
     else:
