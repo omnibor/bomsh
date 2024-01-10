@@ -1,5 +1,10 @@
 *.o
+src/*.so
+src/*.a
+src/*.o
 src/hello
+src/hello2
 bombash
 bomtrace
 bomtrace2
+bomtrace3

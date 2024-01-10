@@ -34,3 +34,4 @@ jobs:
       - name: Check
         run: |
           ls bomtrace2
+          ls bomtrace3

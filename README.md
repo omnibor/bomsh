@@ -5,6 +5,7 @@ Table of Contents
 * [Overview](#Overview)
 * [Quick Start](#Quick-Start)
 * [Compile Bombash and Bomtrace from Source](#Compile-Bombash-and-Bomtrace-from-Source)
+* [Generating OmniBOR Docs with Bomtrace3](#Generating-OmniBOR-Docs-with-Bomtrace3)
 * [Generating OmniBOR Docs with Bomtrace2](#Generating-OmniBOR-Docs-with-Bomtrace2)
 * [Generating OmniBOR ADGs for Debian or RPM Packages with Bomtrace2](#Generating-OmniBOR-ADGs-for-Debian-or-RPM-Packages-with-Bomtrace2)
 * [Reducing Storage of Generated OmniBOR Docs](#Reducing-Storage-of-Generated-OmniBOR-Docs)
@@ -28,9 +29,9 @@ Bomsh is collection of tools to explore the OmniBOR idea. It includes the below 
 
 Bombash: a BASH-based shell to generate [OmniBOR](https://omnibor.io/) [artifact trees](https://omnibor.io/glossary/artifact_tree/) for software.
 
-Bomtrace/Bomtrace2: a STRACE-based tool to generate [OmniBOR](https://omnibor.io/) [artifact trees](https://omnibor.io/glossary/artifact_tree/) for software.
+Bomtrace/Bomtrace2/Bomtrace3: a STRACE-based tool to generate [OmniBOR](https://omnibor.io/) [artifact trees](https://omnibor.io/glossary/artifact_tree/) for software.
 
-Note: Bombash and Bomtrace are deprecated, only Bomtrace2 is actively developing and supported.
+Note: Bombash and Bomtrace are deprecated, only Bomtrace2 and Bomtrace3 are actively developing and supported.
 
 Multiple Python scripts are developed to work together with these tools.
 - bomsh_hook.py script, invoked by Bombash and Bomtrace for each shell command during software build.
@@ -79,8 +80,8 @@ and the syft_sbom/omnibor* files contain the SPDX SBOM documents with ExternalRe
 Compile Bombash and Bomtrace from Source
 ----------------------------------------
 
-The Bombash tool is based on BASH, and Bomtrace/Bomtrace2 is based on STRACE. The corresponding patch files are stored in the patches directory.
-To compile Bombash/Bomtrace2 from source, do the following steps:
+The Bombash tool is based on BASH, and Bomtrace/Bomtrace2/Bomtrace3 is based on STRACE. The corresponding patch files are stored in the patches directory.
+To compile Bombash/Bomtrace2/Bomtrace3 from source, do the following steps:
 
     $ git clone URL-of-this-git-repo bomsh
     $ git clone https://git.savannah.gnu.org/git/bash.git
@@ -93,14 +94,44 @@ To compile Bombash/Bomtrace2 from source, do the following steps:
     $ ./bootstrap ; ./configure ; make
     $ # if configure fails, try add --disable-mpers or --enable-mpers=check
     $ cp src/strace ../bomsh/bin/bomtrace2
+    $ cd ..
+    $ git clone https://github.com/strace/strace.git strace3
+    $ cd strace3 ; patch -p1 < ../bomsh/.devcontainer/patches/bomtrace3.patch
+    $ cp ../bomsh/.devcontainer/src/*.[hc] src/
+    $ ./bootstrap ; ./configure ; make
+    $ # if configure fails, try add --disable-mpers or --enable-mpers=check
+    $ cp src/strace ../bomsh/bin/bomtrace3
 
-To automatically create the bombash/bomtrace/bomtrace2 binaries run:
+To automatically create the bomtrace2/bomtrace3 binaries run:
 
     $ git clone URL-of-this-git-repo bomsh
     $ cd bomsh
     $ docker run -it --rm -v ${PWD}:/out $(cd .devcontainer && docker build -q .)
 
-And you will find the bombash, bomtrace, and bomtrace2 files have been copied into '.' on your host.
+And you will find the bomtrace2 and bomtrace3 files have been copied into '.' on your host.
+
+Generating OmniBOR Docs with Bomtrace3
+-------------------------------------
+
+Bomtrace3 is version 3 of Bomtrace.
+Bomtrace3 improves performance over Bomtrace2, and has more command options/features.
+Do the following to generate OmniBOR docs for the HelloWorld program with Bomtrace3.
+
+    $ git clone URL-of-this-git-repo bomsh
+    $ cd bomsh/src
+    $ ../bin/bomtrace3 make
+    $ ../scripts/bomsh_create_bom.py -r /tmp/bomsh_hook_raw_logfile.sha1 -b /tmp/bomdir
+    $ ls -tl /tmp/bomdir/objects /tmp/bomdir/metadata/bomsh
+    $ cat /tmp/bomsh_hook_raw_logfile.sha1
+    $ cat /tmp/bomsh_createbom_jsonfile
+
+Bomtrace3 does not need to work together with the bomsh_hook2.py script to record necessary raw info.
+Bomtrace3 has integrated the functionality of the bomsh_hook2.py script by rewritting it in C code.
+Except for this difference, all other steps to generate OmniBOR documents are the same.
+
+By running with all C code instead of invoking Python scripts,
+Bomtrace3 saves a lot of process context switches overhead, thus improving the performance significantly over Bomtrace2.
+Bomtrace2 is a few (2x to 5x) times slower than the baseline run, while Bomtrace3 has only about 10% or 20% runtime overhead.
 
 Generating OmniBOR Docs with Bomtrace2
 -------------------------------------
@@ -998,14 +1029,14 @@ If you have any good ideas, please share with us. More people involved, more use
 Notes
 -----
 
-1. This has been tested on Ubuntu20.04/AlmaLinux8/Centos8/RedHat8.
+1. This has been tested on Ubuntu22.04/Ubuntu20.04/AlmaLinux9/AlmaLinux8/Centos8/RedHat8.
 
 2. Most of the generated files by the scripts are put in /tmp directory by default, except the OmniBOR docs are put in ${PWD}/.omnibor directory.
 This is configurable. The tmp directory can be changed with the --tmpdir option. The omnibor directory can be changed with the -b/--bom_dir option.
 
-3. The performance is not optimized for the script. The build time is roughly doubled with Bomsh for now.
+3. The performance of Bomtrace3 is about 20% overhead.
 
-4. The bomsh_hook.py and bomsh_create_bom.py scripts call git/head/ar/readelf/xxd/objcopy, make sure they are installed.
+4. The bomsh_hook2.py and bomsh_create_bom.py scripts call git/head/ar/readelf/xxd/objcopy, make sure they are installed.
 
 5. The bomsh_create_bom_java.py script calls git/head/diff/xxd/javap/jar/zip, make sure they are installed.
 
