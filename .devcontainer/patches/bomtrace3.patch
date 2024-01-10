@@ -1,0 +1,90 @@
+diff --git a/src/Makefile.am b/src/Makefile.am
+index 44398cc2b..ff62c9a2f 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -63,6 +63,8 @@ libstrace_a_SOURCES =	\
+ 	bind.c		\
+ 	bjm.c		\
+ 	block.c		\
++	bomsh_config.c	\
++	bomsh_hook.c	\
+ 	bpf.c		\
+ 	bpf_attr.h	\
+ 	bpf_filter.c	\
+@@ -334,6 +336,8 @@ libstrace_a_SOURCES =	\
+ 	sendfile.c	\
+ 	sg_io_v3.c	\
+ 	sg_io_v4.c	\
++	sha1.c		\
++	sha256.c	\
+ 	shutdown.c	\
+ 	sigaltstack.c	\
+ 	sigevent.h	\
+diff --git a/src/execve.c b/src/execve.c
+index a9224543b..c09d2d1d7 100644
+--- a/src/execve.c
++++ b/src/execve.c
+@@ -13,6 +13,8 @@
+  */
+ 
+ #include "defs.h"
++#include "bomsh_config.h"
++#include "bomsh_hook.h"
+ 
+ static void
+ printargv(struct tcb *const tcp, kernel_ulong_t addr)
+@@ -96,6 +98,9 @@ printargc(struct tcb *const tcp, kernel_ulong_t addr)
+ static void
+ decode_execve(struct tcb *tcp, const unsigned int index)
+ {
++	/* record this command and run some prehook analysis */
++	(void)bomsh_record_command(tcp, index);
++
+ 	/* pathname */
+ 	printpath(tcp, tcp->u_arg[index + 0]);
+ 	tprint_arg_next();
+diff --git a/src/strace.c b/src/strace.c
+index 780e51e91..4067b11e2 100644
+--- a/src/strace.c
++++ b/src/strace.c
+@@ -43,6 +43,8 @@
+ #include "delay.h"
+ #include "wait.h"
+ #include "secontext.h"
++#include "bomsh_config.h"
++#include "bomsh_hook.h"
+ 
+ /* In some libc, these aren't declared. Do it ourself: */
+ extern char **environ;
+@@ -3988,6 +3990,8 @@ dispatch_event(const struct tcb_wait_data *wd)
+ 		break;
+ 
+ 	case TE_EXITED:
++		/* Run the hook program to do analysis */
++		bomsh_hook_program(current_tcp->pid);
+ 		print_exited(current_tcp, current_tcp->pid, status);
+ 		droptcb(current_tcp);
+ 		return true;
+@@ -4185,11 +4189,21 @@ terminate(void)
+ 	exit(exit_code);
+ }
+ 
++void strace_set_outfname(const char *fname)
++{
++	outfname = fname;
++}
++
++void strace_init(int argc, char *argv[]) {
++	init(argc, argv);
++}
++
+ int
+ main(int argc, char *argv[])
+ {
+ 	setlocale(LC_ALL, "");
+-	init(argc, argv);
++	bomsh_init(argc, argv);
++	//init(argc, argv);
+ 
+ 	exit_code = !nprocs;
+ 

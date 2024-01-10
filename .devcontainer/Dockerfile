@@ -10,14 +10,21 @@ RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
 WORKDIR /home/vscode
 RUN git clone https://github.com/strace/strace.git
 WORKDIR /home/vscode/strace
-RUN ./bootstrap && ./configure --enable-mpers=check && make
-COPY ./patches/bomtrace2.patch ./
+COPY ./patches/bomtrace2.patch ./patches/bomtrace3.patch ./
+COPY ./src/*.[ch] src/
 
 FROM strace as bomtrace2
+WORKDIR /home/vscode/strace
 RUN patch -p1 < bomtrace2.patch
-RUN make
+RUN ./bootstrap && ./configure --enable-mpers=check && make
+
+FROM strace as bomtrace3
+WORKDIR /home/vscode/strace
+RUN patch -p1 < bomtrace3.patch
+RUN ./bootstrap && ./configure --enable-mpers=check && make
 
 FROM base as copy
 WORKDIR /in
 COPY --from=bomtrace2 /home/vscode/strace/src/strace ./bomtrace2
+COPY --from=bomtrace3 /home/vscode/strace/src/strace ./bomtrace3
 CMD cp * /out
