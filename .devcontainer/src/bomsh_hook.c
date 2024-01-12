@@ -320,6 +320,15 @@ static void bomsh_free_string_array(char **array)
 // free the allocated memory for this command
 static void bomsh_free_cmd(bomsh_cmd_data_t *cmd)
 {
+	if (cmd->refcount) {
+		bomsh_log_printf(8, "\nCmd memory refcount-- from %d for pid %d\n", cmd->refcount, cmd->pid);
+		cmd->refcount --;
+		return;
+	}
+	bomsh_log_printf(8, "\nFreeing the cmd memory for pid %d\n", cmd->pid);
+	if (cmd->cat_cmd) {
+		bomsh_free_cmd(cmd->cat_cmd);
+	}
 	// no need to free output_file, since output_file is not allocated.
 	if (cmd->pwd) {
 		free(cmd->pwd);
@@ -386,10 +395,8 @@ static void bomsh_log_cmd_data(bomsh_cmd_data_t *cmd, int level)
 	if (cmd->stdout_file) {
 		bomsh_log_printf(level, "\nstdout_file: %s", cmd->stdout_file);
 	}
-	if (cmd->cat_cmdline) {
-		bomsh_log_printf(level, "\ncat_cmline: %s", cmd->cat_cmdline);
-	}
 	bomsh_log_string_array(level, cmd->argv, (char *)" ", (char *)"\nargv cmdline:", NULL);
+	bomsh_log_printf(level, "\nrefcount: %d", cmd->refcount);
 	bomsh_log_printf(level, "\nskip record raw info: %d", cmd->skip_record_raw_info);
 	if (cmd->output_file) {
 		bomsh_log_printf(level, "\noutput file: %s", cmd->output_file);
@@ -401,6 +408,10 @@ static void bomsh_log_cmd_data(bomsh_cmd_data_t *cmd, int level)
 	bomsh_log_string_array(level, cmd->input_sha256, (char *)"\n ", (char *)"\ninput file SHA256 hashes:", NULL);
 	bomsh_log_string_array(level, cmd->input_files2, (char *)" ", (char *)"\ninput files2:", NULL);
 	bomsh_log_string(level, "\nEnd of cmd_data\n");
+	if (cmd->cat_cmd) {
+		bomsh_log_string(level, "--Extra info: the associated cat cmd data:");
+		bomsh_log_cmd_data(cmd->cat_cmd, level);
+	}
 }
 
 //static int bomsh_cmd_num = 0;  // useful to collect some stats about bomsh_cmds size
@@ -610,6 +621,40 @@ static char * bomsh_get_pwd(struct tcb *tcp)
 	}
 	bomsh_pwddir[bytes] = 0;
 	return strdup(bomsh_pwddir);
+}
+
+// get fd0/stdin file for a traced process (usually patch).
+static char * bomsh_get_stdin_file(struct tcb *tcp)
+{
+	char cwd_file[32] = "";
+	static char bomsh_stdin_file[PATH_MAX] = "";
+	sprintf(cwd_file, "/proc/%d/fd/0", tcp->pid);
+	int bytes = readlink(cwd_file, bomsh_stdin_file, PATH_MAX);
+	if (bytes == -1) {
+	       return NULL;
+	}
+	bomsh_stdin_file[bytes] = 0;
+	if (strncmp(bomsh_stdin_file, "/dev/", 5) == 0) {
+		return NULL;
+	}
+	return strdup(bomsh_stdin_file);
+}
+
+// get fd1/stdout file for a traced process (usually cat).
+static char * bomsh_get_stdout_file(struct tcb *tcp)
+{
+	char cwd_file[32] = "";
+	static char bomsh_stdout_file[PATH_MAX] = "";
+	sprintf(cwd_file, "/proc/%d/fd/1", tcp->pid);
+	int bytes = readlink(cwd_file, bomsh_stdout_file, PATH_MAX);
+	if (bytes == -1) {
+	       return NULL;
+	}
+	bomsh_stdout_file[bytes] = 0;
+	if (strncmp(bomsh_stdout_file, "/dev/", 5) == 0) {
+		return NULL;
+	}
+	return strdup(bomsh_stdout_file);
 }
 
 // Get the real path, or absolute path including /root/pwd/afile
@@ -1236,7 +1281,20 @@ static void bomsh_record_out_infiles(bomsh_cmd_data_t *cmd, int hash_alg, char *
 
 static void bomsh_record_cmdline(bomsh_cmd_data_t *cmd, int level)
 {
-	bomsh_log_string_array(level, cmd->argv, (char *)" ", (char *)"\nbuild_cmd:", NULL);
+	if (cmd->cat_cmd) {
+		bomsh_log_string_array(level, cmd->cat_cmd->argv, (char *)" ", (char *)"\nbuild_cmd:", NULL);
+		bomsh_log_string_array(level, cmd->argv, (char *)" ", (char *)" |", NULL);
+	} else {
+		bomsh_log_string_array(level, cmd->argv, (char *)" ", (char *)"\nbuild_cmd:", NULL);
+		if (cmd->stdin_file) {
+			bomsh_log_string(level, " < ");
+			int len = 0;
+			if (cmd->root[1]) {
+				len = strlen(cmd->root);
+			}
+			bomsh_log_string(level, cmd->stdin_file + len);
+		}
+	}
 }
 
 // record ADF (Artifact Dependency Fragment) for a specific hash algorithm
@@ -1285,6 +1343,7 @@ static void bomsh_record_raw_info2_infile(bomsh_cmd_data_t *cmd, char *outfile, 
 	bomsh_cmd_get_hash(cmd, outfile, hash_alg, ahash);
 	if (strcmp(ahash, in_hash) == 0) {
 		// no change in file content
+		bomsh_log_printf(18, "\nSkip recording raw info, due to no content change for outfile %s\n", outfile);
 		return;
 	}
 	bomsh_record_afile2(cmd, outfile, "\noutfile: ", hash_alg, ahash, level);
@@ -1878,6 +1937,399 @@ static void bomsh_process_strip_command(bomsh_cmd_data_t *cmd, int pre_exec_mode
 	}
 }
 
+/******** cat/patch command handling routines ********/
+
+#define BOMSH_PIPE_CMDS_SIZE 10
+
+// list of cmds with active pipes
+static bomsh_cmd_data_t *bomsh_pipe_cmds[2][BOMSH_PIPE_CMDS_SIZE];
+
+// add a new cmd to list of active pipes, IN_OR_OUT can only be 0 or 1, 0 means IN and 1 means OUT.
+// for cat cmd, its stdout is pipe, thus IN_OR_OUT is 1 for cat
+// for patch cmd, its stdin is pipe, thus IN_OR_OUT is 0 for patch
+static void bomsh_add_pipe_cmd(bomsh_cmd_data_t *cmd, int in_or_out)
+{
+	bomsh_cmd_data_t **cmds = bomsh_pipe_cmds[in_or_out];
+	for (int i=0; i < BOMSH_PIPE_CMDS_SIZE; i++) {
+		if (!cmds[i]) {
+			cmds[i] = cmd;
+			bomsh_log_printf(8, "\nSucceed to add pid %d to %s PIPE cmds slot %d\n",
+					cmd->pid, in_or_out ? "OUT" : "IN", i);
+			return;
+		}
+	}
+	bomsh_log_printf(8, "\nFailed to add pid %d to %s PIPE cmds\n", cmd->pid, in_or_out ? "OUT" : "IN");
+}
+
+static void bomsh_remove_pipe_cmd(bomsh_cmd_data_t *cmd, int in_or_out)
+{
+	bomsh_cmd_data_t **cmds = bomsh_pipe_cmds[in_or_out];
+	for (int i=0; i < BOMSH_PIPE_CMDS_SIZE; i++) {
+		if (cmds[i] == cmd) {
+			cmds[i] = NULL;
+			bomsh_log_printf(8, "\nSucceed to remove pid %d from %s PIPE cmds slot %d\n",
+					cmd->pid, in_or_out ? "OUT" : "IN", i);
+			return;
+		}
+	}
+	bomsh_log_printf(8, "\nFailed to remove pid %d from %s PIPE cmds\n", cmd->pid, in_or_out ? "OUT" : "IN");
+}
+
+// find the other cmd with matching IN_OR_OUT pipe
+// for patch CMD, in_or_out should be 1, since we are finding a matching pipe from cat, which has OUT PIPE.
+// for cat CMD, in_or_out should be 0, since we are finding a matching pipe from patch, which has IN PIPE.
+static bomsh_cmd_data_t *bomsh_find_match_pipe_cmd(bomsh_cmd_data_t *cmd, int in_or_out)
+{
+	bomsh_cmd_data_t **cmds = bomsh_pipe_cmds[in_or_out];
+	for (int i=0; i < BOMSH_PIPE_CMDS_SIZE; i++) {
+		if (cmds[i]) {
+			if ((in_or_out && strcmp(cmd->stdin_file, cmds[i]->stdout_file) == 0) ||
+				(!in_or_out && strcmp(cmd->stdout_file, cmds[i]->stdin_file) == 0)) {
+				bomsh_log_printf(8, "\nSuccessfully find matching cmd with pid %d from %s PIPE cmds slot %d for my PID %d\n",
+					cmds[i]->pid, in_or_out ? "OUT" : "IN", i, cmd->pid);
+				return cmds[i];
+			}
+		}
+	}
+	bomsh_log_printf(8, "\nFailed to find matching cmd from %s PIPE cmds for my PID %d\n", in_or_out ? "OUT" : "IN", cmd->pid);
+	return NULL;
+}
+
+// is it the start of a patch line that contains the file name to patch?
+static int is_leading_token_for_patch_file_line(char *p)
+{
+	return (*p == '-' && *(p+1) == '-' && *(p+2) == '-' && *(p+3) == ' ') ||
+		(*p == '+' && *(p+1) == '+' && *(p+2) == '+' && *(p+3) == ' ') ||
+		(*p == '*' && *(p+1) == '*' && *(p+2) == '*' && *(p+3) == ' ');
+}
+
+// read patch file and return the list of files to patch.
+// return the number of files to patch in the patch file.
+// if FILES is not NULL, then the list of files will be put there.
+static int bomsh_read_patch_file(bomsh_cmd_data_t *cmd, char *patch_file, int strip_num, char ***files)
+{
+	char *patch_str = bomsh_read_file(patch_file, NULL);
+	bomsh_log_printf(22, "\nReading patch_file: %s the whole patch_str:\n%s\n", patch_file, patch_str);
+	if (!patch_str) {
+		return 0;
+	}
+
+	char *p = patch_str;
+	char buf[1024]; // should be enough to hold file to patch
+	int num_files = 0;
+	// record the start position and length of each file
+	char *afiles[200]; int alens[200];
+	while (*p) {
+		if (is_leading_token_for_patch_file_line(p)) {
+			p += 4;
+			char *q = p;
+			int strips = strip_num;
+			char *space = NULL;
+			while (*q != '\t' && *q != '\n') { // find the ending position
+				if (*q == ' ') space = q;
+				if (*q == '/') {
+					strips --;
+					if (!strips) p = q + 1; // found the start of the file
+				}
+				q++;
+			}
+			int len = (int)(q - p);
+			if (space) { // if there is space character, then this is invalid file
+				if (bomsh_verbose > 10) {
+					memcpy(buf, p, len); buf[len] = 0;
+					bomsh_log_printf(10, "found invalid file %s\n", buf);
+				}
+				p = q; continue;
+			} else if (bomsh_verbose > 10) {
+				memcpy(buf, p, len); buf[len] = 0;
+				bomsh_log_printf(10, "found valid file %s\n", buf);
+			}
+			afiles[num_files] = p;  // start position of the file
+			alens[num_files] = len; // the string length of the file
+			num_files ++;
+			if (num_files >= 200) {
+				bomsh_log_printf(8, "Warning: reached maximum of 200 files to patch in patch file: %s\n", patch_file);
+				break;
+			}
+			p = q;
+		}
+		p++;
+	}
+	bomsh_log_printf(8, "find %d files from the patch_str\n", num_files);
+	if (!num_files || num_files % 2 != 0) {
+		bomsh_log_printf(8, "\nWarning: odd number %d of files found in patch file: %s\n", num_files, patch_file);
+		return 0;
+	}
+	int num_files2 = num_files/2;
+
+	char **bfiles = malloc( (num_files2 + 1) * sizeof(char *) );
+	char *cfile; int clen;
+	// select the files to patch from two candidates
+	for (int i=0; i < num_files2 ; i++) {
+		char *afile = afiles[i * 2]; int alen = alens[i * 2];
+		char *bfile = afiles[i * 2 + 1]; int blen = alens[i * 2 + 1];
+		// The file with shorter length is preferred if it exists.
+		if (alen == blen && strncmp(afile, bfile, alen) == 0) {
+			cfile = afile; clen = alen;
+		} else if (alen == strlen("/dev/null") && strncmp(afile, "/dev/null", strlen("/dev/null")) == 0) {
+			cfile = bfile; clen = blen;
+		} else if (blen == strlen("/dev/null") && strncmp(bfile, "/dev/null", strlen("/dev/null")) == 0) {
+			cfile = afile; clen = alen;
+		} else if (alen <= blen) {
+			memcpy(buf, afile, alen); buf[alen] = 0;
+			if (bomsh_check_permission(buf, cmd->pwd, cmd->root, F_OK)) {
+				cfile = afile; clen = alen;
+			} else {
+				cfile = bfile; clen = blen;
+			}
+		} else {
+			memcpy(buf, bfile, blen); buf[blen] = 0;
+			if (bomsh_check_permission(buf, cmd->pwd, cmd->root, F_OK)) {
+				cfile = bfile; clen = blen;
+			} else {
+				cfile = afile; clen = alen;
+			}
+		}
+		memcpy(buf, cfile, clen); buf[clen] = 0;
+		bfiles[i] = strdup(buf);
+		bomsh_log_printf(8, "selected file to patch: %s\n", buf);
+	}
+	bfiles[num_files2] = NULL;
+	if (files) *files = bfiles;
+	bomsh_log_printf(8, "Found %d files to patch\n", num_files2);
+	return num_files2;
+}
+
+// Parse cmd->argv, and get all files from the command line
+static void get_all_subfiles_in_cat_cmdline(bomsh_cmd_data_t *cmd)
+{
+	int array_size = 10;
+	int num_array = 0;
+	char **array = malloc(array_size * sizeof(char *));
+	char **p = cmd->argv;
+	p++; // start from argv[1]
+	while (*p) {
+		char *token = *p; p++; // p points to next token already
+		if (token[0] == '-') {
+			continue;
+		}
+		bomsh_log_printf(4, "found cat infile: %s\n", token);
+		array[num_array++] = strdup(token);
+		if (num_array >= array_size) {
+			array_size *= 2;
+			array = realloc(array, array_size * sizeof(char *));
+		}
+	}
+	array[num_array] = NULL;
+	cmd->input_files = array;
+	cmd->num_inputs = num_array;
+	if (!cmd->output_file && num_array) {
+		cmd->output_file = array[0]; // need to set it because record_raw_info checks output_file
+	}
+}
+
+// Get the -pNUM option value for the patch command
+static int get_strip_num_of_patch_command(bomsh_cmd_data_t *cmd)
+{
+	char *strip_num_str = NULL;
+	char **p = cmd->argv;
+	p++; // start from argv[1]
+	while (*p) {
+		char *token = *p; p++; // p points to next token already
+		if (strncmp(token, "-p", 2) == 0) {
+			int len = strlen(token);
+			if (len > 2) {
+				strip_num_str = token + 2;
+			} else {
+				strip_num_str = *p; p++;
+			}
+			break;
+		}
+		if (strcmp(token, "--strip") == 0) {
+			strip_num_str = *p; p++;
+			break;
+		}
+		if (strncmp(token, "--strip=", 8) == 0) {
+			strip_num_str = token + 8;
+			break;
+		}
+	}
+	if (strip_num_str) {
+		return atoi(strip_num_str);
+	}
+	return 0;
+}
+
+// Get the --input=PATCHFILE for the patch command
+static char * get_input_patch_file_of_patch_command(bomsh_cmd_data_t *cmd)
+{
+	char *input_patch = NULL;
+	char *token = NULL;
+	char **p = cmd->argv;
+	p++; // start from argv[1]
+	while (*p) {
+		token = *p; p++; // p points to next token already
+		if (strncmp(token, "-i", 2) == 0) {
+			int len = strlen(token);
+			if (len > 2) {
+				input_patch = token + 2;
+			} else {
+				input_patch = *p; p++;
+			}
+			break;
+		}
+		if (strcmp(token, "--input") == 0) {
+			input_patch = *p; p++;
+			break;
+		}
+		if (strncmp(token, "--input=", 8) == 0) {
+			input_patch = token + 8;
+			break;
+		}
+	}
+	if (input_patch) {
+		return input_patch;
+	} else { // must be form: patch [options] [originalfile [patchfile]]
+		return token; // last token is the patchfile
+	}
+}
+
+// Get all infiles from patch files and get hash of all infiles
+static void bomsh_prehook_patch_cmd(bomsh_cmd_data_t *patch_cmd)
+{
+	// list of patch files may not be ready yet for "cat file | patch -p1" case
+	if (!patch_cmd->input_files2) return;
+
+	int strip_num = get_strip_num_of_patch_command(patch_cmd);
+	bomsh_log_printf(8, "Get strip num of %d for patch cmd\n", strip_num);
+
+	char **afiles = NULL;
+	int array_size = 100;
+	int num_array = 0;
+	char **array = malloc( array_size * sizeof(char *) );
+	char **p = patch_cmd->input_files2; // the list of patch files
+	while (*p) {
+		char *token = *p; p++;
+		char *patch_file = get_real_path(patch_cmd, token);
+		// need to get the real path of the patch file to read successfully
+		bomsh_log_printf(7, "\nRead patch file: %s real-path: %s\n", token, patch_file);
+		int num_files = bomsh_read_patch_file(patch_cmd, patch_file, strip_num, &afiles);
+		free(patch_file);
+		for (int j = 0; j< num_files; j++) {
+			array[num_array++] = afiles[j];
+			if (num_array >= array_size) {
+				array_size *= 2;
+				array = realloc(array, num_array * sizeof(char *));
+			}
+		}
+		free(afiles);
+	}
+	array[num_array] = NULL;
+	patch_cmd->num_inputs = num_array;
+	patch_cmd->input_files = array;
+	if (array) {
+		patch_cmd->output_file = array[0];  // need to set it because record_raw_info checks output_file
+	}
+	// now get hash of all infiles for patch command
+	get_hash_of_infiles(patch_cmd);
+}
+
+// process the associated cat/patch command in pre-exec mode
+static void bomsh_prehook_cat_patch_cmd(bomsh_cmd_data_t *cat_cmd, bomsh_cmd_data_t *patch_cmd)
+{
+	bomsh_log_printf(8, "\nPrehook the matching cat pid %d and patch pid %d\n", cat_cmd->pid, patch_cmd->pid);
+	get_all_subfiles_in_cat_cmdline(cat_cmd);
+	patch_cmd->input_files2 = malloc((cat_cmd->num_inputs + 1) * sizeof(char *));
+	int i;
+	for (i=0; i < cat_cmd->num_inputs; i++) {
+		patch_cmd->input_files2[i] = strdup(cat_cmd->input_files[i]);
+	}
+	patch_cmd->input_files2[i] = NULL;
+	patch_cmd->cat_cmd = cat_cmd;  // link cat cmd to the matching patch cmd
+	cat_cmd->refcount ++;  // delay the memory free of the cat cmd
+	bomsh_log_printf(8, "\nCmd memory refcount++ to %d for cat pid %d\n", cat_cmd->refcount, cat_cmd->pid);
+}
+
+// we only support the basic form of "cat 1.patch ... N.patch | patch -p1" command with pipes.
+// the list of patch files will be put into cat_cmd->input_files as well as patch_cmd->input_files2
+static void bomsh_process_cat_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
+{
+	if (pre_exec_mode) {
+		bomsh_log_string(3, "\npre-exec mode, get stdout for cat command\n");
+		char *stdout_file = bomsh_get_stdout_file(cmd->tcp);
+		if (!stdout_file || strncmp(stdout_file, "pipe:[", 6) != 0) {
+			cmd->skip_record_raw_info = 1;
+			return;
+		}
+		cmd->stdout_file = stdout_file;
+		bomsh_cmd_data_t *match_cmd = bomsh_find_match_pipe_cmd(cmd, 0);
+		if (match_cmd) {
+			bomsh_prehook_cat_patch_cmd(cmd, match_cmd);
+			// Now patch files are known, will get infiles from the patch files
+			bomsh_prehook_patch_cmd(match_cmd);
+		}
+		bomsh_add_pipe_cmd(cmd, 1);
+		return;
+	} else {
+		if (cmd->skip_record_raw_info) return;
+		bomsh_log_string(3, "\nrecord raw_info for cat command after EXECVE syscall\n");
+		bomsh_remove_pipe_cmd(cmd, 1);
+	}
+}
+
+static void bomsh_record_raw_info_patch_command(bomsh_cmd_data_t *cmd)
+{
+	bomsh_log_printf(8, "record raw info for patch cmd pid %d\n", cmd->pid);
+	if (cmd->input_sha1 || cmd->input_sha256) { // should always reach here
+		bomsh_record_raw_info2(cmd);
+	} else { // should never reach here
+		bomsh_record_raw_info(cmd);
+	}
+}
+
+static void bomsh_process_patch_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
+{
+	if (pre_exec_mode) {
+		bomsh_log_string(3, "\npre-exec mode, get subfiles for patch command\n");
+		char *stdin_file = bomsh_get_stdin_file(cmd->tcp);
+		cmd->stdin_file = stdin_file;
+		if (stdin_file) {
+			if (strncmp(stdin_file, "pipe:[", 6) == 0) {
+				bomsh_cmd_data_t *match_cmd = bomsh_find_match_pipe_cmd(cmd, 1);
+				if (match_cmd) { // link the cat_cmd and patch_cmd
+					bomsh_prehook_cat_patch_cmd(match_cmd, cmd);
+				}
+				bomsh_add_pipe_cmd(cmd, 0);
+			} else {
+				bomsh_log_printf(8, "non-pipe patch cmd with stdin input %s\n", cmd->stdin_file);
+				cmd->input_files2 = malloc(2 * sizeof(char *));
+				cmd->input_files2[0] = strdup(cmd->stdin_file);
+				cmd->input_files2[1] = NULL;
+			}
+		} else {
+			char *patch_file = get_input_patch_file_of_patch_command(cmd);
+			bomsh_log_printf(8, "input patch file is %s from patch cmd\n", patch_file);
+			if (!patch_file) {
+				cmd->skip_record_raw_info = 1;
+				return;
+			}
+			cmd->input_files2 = malloc(2 * sizeof(char *));
+			cmd->input_files2[0] = strdup(patch_file);
+			cmd->input_files2[1] = NULL;
+		}
+		// Now patch files are known, will get infiles from the patch files
+		bomsh_prehook_patch_cmd(cmd);
+		return;
+	} else {
+		if (cmd->skip_record_raw_info) return;
+		bomsh_log_string(3, "\nrecord raw_info for patch command after EXECVE syscall\n");
+		if (cmd->stdin_file && strncmp(cmd->stdin_file, "pipe:[", 6) == 0) bomsh_remove_pipe_cmd(cmd, 0);
+		bomsh_record_raw_info_patch_command(cmd);
+	}
+}
+
+/******** end of cat/patch command handling routines ********/
+
 /******** top level command handling routines ********/
 
 // main routine to handle all recorded shell commands.
@@ -1895,6 +2347,10 @@ static void bomsh_process_shell_command(bomsh_cmd_data_t *cmd, int pre_exec_mode
 		bomsh_process_strip_command(cmd, pre_exec_mode, 1);
 	} else if (is_strip_command(name)) {
 		bomsh_process_strip_command(cmd, pre_exec_mode, 0);
+	} else if (strcmp(name, "cat") == 0) {
+		bomsh_process_cat_command(cmd, pre_exec_mode);
+	} else if (strcmp(name, "patch") == 0) {
+		bomsh_process_patch_command(cmd, pre_exec_mode);
 	} else {
 		bomsh_log_printf(15, "\nNot-supported shell command: %s\n", prog);
 	}
