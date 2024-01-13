@@ -372,6 +372,13 @@ static void bomsh_free_cmd(bomsh_cmd_data_t *cmd)
 		}
 		free(cmd->depend_file);
 	}
+	// cmd->depends_outfile is just a pointer, no need to free
+	if (cmd->depends_array) {
+		free(cmd->depends_array);
+	}
+	if (cmd->depends_buf) {
+		free(cmd->depends_buf);
+	}
 	free(cmd);
 }
 
@@ -397,9 +404,15 @@ static void bomsh_log_string_array(int level, char **array, char *sep, char *hea
 // for debugging purpose
 static void bomsh_log_cmd_data(bomsh_cmd_data_t *cmd, int level)
 {
+	if (bomsh_verbose < level) return;
 	bomsh_log_printf(level, "\nStart of cmd_data, pid: %d pwd: %s root: %s path: %s", cmd->pid, cmd->pwd, cmd->root, cmd->path);
 	if (cmd->depend_file) {
 		bomsh_log_printf(level, "\ndepend_file: %s", cmd->depend_file);
+	}
+	bomsh_log_string_array(level, cmd->depends_array, (char *)"\n ", (char *)"\ndepends array:", NULL);
+	if (cmd->depends_outfile) {
+		bomsh_log_printf(level, "\ndepends_outfile: %s", cmd->depends_outfile);
+		bomsh_log_printf(level, "\ndepends_outfile_exist: %d", cmd->depends_outfile_exist);
 	}
 	if (cmd->stdin_file) {
 		bomsh_log_printf(level, "\nstdin_file: %s", cmd->stdin_file);
@@ -1096,11 +1109,38 @@ static int bomsh_read_depend_file(char *depend_file, char ***depends, char **dep
 		p++;
 	}
 	bomsh_log_printf(22, "\nDone parsing depend_str, num_depends: %d\n", num_depends);
-	char **depend_array = (char **)malloc(num_depends * sizeof(char *));
+	char **depend_array = (char **)malloc((num_depends + 1) * sizeof(char *));
 	memcpy(depend_array, bomsh_depend_array, num_depends * sizeof(char *));
+	depend_array[num_depends] = NULL;
 	*depends = depend_array;
 	*depend_buf = depend_str;
 	return num_depends;
+}
+
+// read depend file and save results into cmd->depends_array, etc.
+static void bomsh_cmd_read_depend_file(bomsh_cmd_data_t *cmd)
+{
+	char **depends_array = NULL;
+	char *depends_buf = NULL;
+	char *output_file = NULL;
+	char *depend_file = cmd->depend_file;
+
+	char buf[PATH_MAX];
+	char *depend_file2 = get_real_path2(cmd, depend_file, buf);
+	// need to get the real path of the depend file to read successfully
+	bomsh_log_printf(7, "\nRead gcc dependency from depfile: %s real-path: %s\n", depend_file, depend_file2);
+	int num_depends = bomsh_read_depend_file(depend_file2, &depends_array, &depends_buf, &output_file);
+
+	cmd->depends_buf = depends_buf;
+	cmd->depends_array = depends_array;
+	cmd->depends_num = num_depends;
+	cmd->depends_outfile = output_file;
+	// outfile from depend file may not be correct path, so need to check if it exists
+	if (bomsh_check_permission(output_file, cmd->pwd, cmd->root, F_OK)) {
+		cmd->depends_outfile_exist = 1;
+	} else {
+		bomsh_log_printf(7, "WarnInfo: not-existent outfile %s from depfile: %s\n", output_file, depend_file);
+	}
 }
 
 // run a child process to generate dependency for GCC compilation
@@ -1239,21 +1279,10 @@ static void bomsh_record_dynlibs(bomsh_cmd_data_t *cmd, char **array, int hash_a
 }
 
 // record both outfile and infiles from the dependency file
-static void bomsh_record_files_from_depfile(bomsh_cmd_data_t *cmd, char *depend_file, int hash_alg, char *ahash, int level)
+static void bomsh_record_files_from_depfile(bomsh_cmd_data_t *cmd, int hash_alg, char *ahash, int level)
 {
-	char **depends_array = NULL;
-	char *depends_buf = NULL;
-	char *output_file = NULL;
-	char *depend_file2 = get_real_path(cmd, depend_file);
-	// need to get the real path of the depend file to read successfully
-	bomsh_log_printf(7, "\nRead gcc dependency from depfile: %s real-path: %s\n", depend_file, depend_file2);
-	int num_depends = bomsh_read_depend_file(depend_file2, &depends_array, &depends_buf, &output_file);
-	free(depend_file2);
-	// outfile from depend file may not be correct path, so need to check if it exists
-	if (bomsh_check_permission(output_file, cmd->pwd, cmd->root, F_OK)) {
-		bomsh_record_afile(cmd, output_file, "\noutfile: ", hash_alg, ahash, level);
-	} else {
-		bomsh_log_printf(7, "WarnInfo: not-existent outfile %s from depfile: %s\n", output_file, depend_file);
+	char **depends_array = cmd->depends_array;
+	if (!cmd->depends_outfile_exist) {
 		// if the outfile path from depend file does not exist, then try the outfile from argv
 		if (!cmd->output_file) {
 			cmd->output_file = get_outfile_in_argv(cmd->argv);
@@ -1267,14 +1296,12 @@ static void bomsh_record_files_from_depfile(bomsh_cmd_data_t *cmd, char *depend_
 				bomsh_log_string(7, "Warning: no output file found from argv\n");
 			}
 			// anyway, let's log the outfile from the depend file
-			bomsh_record_afile(cmd, output_file, "\noutfile: ", hash_alg, ahash, level);
+			bomsh_record_afile(cmd, cmd->depends_outfile, "\noutfile: ", hash_alg, ahash, level);
 		}
 	}
-	for (int i=0; i<num_depends; i++) {
+	for (int i=0; i < cmd->depends_num; i++) {
 		bomsh_record_afile(cmd, depends_array[i], "\ninfile: ", hash_alg, ahash, level);
 	}
-	free(depends_array);
-	free(depends_buf);
 }
 
 static void bomsh_record_out_infiles(bomsh_cmd_data_t *cmd, int hash_alg, char *ahash, int level)
@@ -1282,7 +1309,7 @@ static void bomsh_record_out_infiles(bomsh_cmd_data_t *cmd, int hash_alg, char *
 	// cmd->depend_file should have been verified to exist, when we are here, so no need to check permission again
 	if (cmd->depend_file) {
 		// if we have depend_file, then it must be gcc compilation
-		bomsh_record_files_from_depfile(cmd, cmd->depend_file, hash_alg, ahash, level);
+		bomsh_record_files_from_depfile(cmd, hash_alg, ahash, level);
 	} else {
 		bomsh_record_afile(cmd, cmd->output_file, "\noutfile: ", hash_alg, ahash, level);
 		if (cmd->input_files) {
@@ -1704,6 +1731,12 @@ static void bomsh_process_gcc_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 	}
 	// when we are here, if cmd->depend_file is not NULL, then depend_file must exist;
 	// or if cmd->denpend_file is NULL, then cmd->input_files must not be NULL.
+	if (cmd->depend_file) {
+		bomsh_log_printf(5, "Start reading depend file %s\n", cmd->depend_file);
+		bomsh_cmd_read_depend_file(cmd);
+		bomsh_log_cmd_data(cmd, 24);
+		bomsh_log_printf(5, "After reading depend file %s\n", cmd->depend_file);
+	}
 	bomsh_record_raw_info(cmd);
 }
 
@@ -2554,6 +2587,43 @@ static void bomsh_process_samefile_converter_command(bomsh_cmd_data_t *cmd, int 
 	}
 }
 
+// cmdline format: Usage: build setup system zoffset.h image
+// example: arch/x86/boot/tools/build arch/x86/boot/setup.bin arch/x86/boot/vmlinux.bin arch/x86/boot/zoffset.h arch/x86/boot/bzImage
+static void get_all_subfiles_in_bzimage_build_cmdline(bomsh_cmd_data_t *cmd)
+{
+	int argc = 0;
+	char **p = cmd->argv;
+	while (*p) { // count number of args
+		p++; argc++;
+	}
+	if (argc < 5) {
+		return;
+	}
+	cmd->output_file = cmd->argv[4];
+	char **array = malloc( (argc - 1) * sizeof(char *) );
+	p = &(cmd->argv[1]); // start from argv[1]
+	int i;
+	for (i=0; i < argc-2; i++, p++) {
+		array[i] = strdup(*p);
+	}
+	array[i] = NULL;
+	cmd->num_inputs = i;
+	cmd->input_files = array;
+}
+
+// Process the bzImage build command in Linux kernel build.
+static void bomsh_process_bzimage_build_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
+{
+	if (pre_exec_mode) {
+		bomsh_log_string(3, "\npre-exec mode, get subfiles for bzimage-build command\n");
+		get_all_subfiles_in_bzimage_build_cmdline(cmd);
+	} else {
+		if (cmd->skip_record_raw_info) return;
+		bomsh_log_string(3, "\nrecord raw_info for bzimage-build command after EXECVE syscall\n");
+		bomsh_record_raw_info(cmd);
+	}
+}
+
 static int is_rpmsign_command(bomsh_cmd_data_t *cmd, char *name)
 {
 	if (strcmp(name, "rpmsign") == 0) {
@@ -2583,6 +2653,7 @@ static int is_rpmsign_command(bomsh_cmd_data_t *cmd, char *name)
 // if pre_exec_mode is 0, it means after  the EXECVE syscall
 static void bomsh_process_shell_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 {
+	// cmd->path can be relative, like "scripts/sign-file" or "./scripts/sorttable" during kernel build
 	char *prog = cmd->path;
 	char *name = bomsh_basename(prog);
 	if (is_cc_compiler(name)) {
@@ -2601,10 +2672,12 @@ static void bomsh_process_shell_command(bomsh_cmd_data_t *cmd, int pre_exec_mode
 		bomsh_process_patch_command(cmd, pre_exec_mode);
 	} else if (is_samefile_converter_command(name)) {
 		bomsh_process_samefile_converter_command(cmd, pre_exec_mode);
-	} else if (strcmp(name, "sepdebugcrcfix") == 0) {
-		bomsh_process_sepdebugcrcfix_command(cmd, pre_exec_mode);
 	} else if (strcmp(name, "dwz") == 0) {
 		bomsh_process_strip_like_command(cmd, pre_exec_mode, 2);
+	} else if (strcmp(name, "sepdebugcrcfix") == 0) {
+		bomsh_process_sepdebugcrcfix_command(cmd, pre_exec_mode);
+	} else if (strcmp(prog, "arch/x86/boot/tools/build") == 0) {
+		bomsh_process_bzimage_build_command(cmd, pre_exec_mode);
 	} else if (is_rpmsign_command(cmd, name)) {
 		bomsh_process_strip_like_command(cmd, pre_exec_mode, 3);
 	} else if (strcmp(name, "chrpath") == 0) {
