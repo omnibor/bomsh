@@ -29,8 +29,14 @@ typedef struct bomsh_cmddata {
 	char **input_files2; // the unchanged input files of this command, array of pointers, last is NULL
 	char **input_sha1; // the SHA1 hashes of input files, array of pointers, last is NULL
 	char **input_sha256; // the SHA256 hashes of input files, array of pointers, last is NULL
-	char *depend_file; // the created depend file for gcc compile
 	char **dynlib_files; // the dynamic library files of gcc command, array of pointers, last is NULL
+
+	char *depend_file; // the created depend file for gcc compile
+	char **depends_array; // the input files from depend file, array of pointers, last is NULL
+	char *depends_buf; // the buffer to hold the depend file content
+	char *depends_outfile; // the pointer to the output file in the depends_buf
+	int depends_outfile_exist; // does the output file in the depends_buf exist?
+	int depends_num; // number of files in the depends_array
 
 	char *stdin_file; // the stdin for the patch command, which can be a pipe
 	char *stdout_file; // the stdout for the cat command, which can be a pipe

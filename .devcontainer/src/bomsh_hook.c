@@ -33,6 +33,7 @@ linker_skip_tokens[] = {"-m", "-z", "-a", "-A", "-b", "-c", "-e", "-f", "-F", "-
 	"--architecture", "--format", "--mri-script", "--entry", "--auxiliary", "--filter", "--gpsize", "--oformat",
 	"--defsym", "--split-by-reloc", "-rpath", "-rpath-link", "--dynamic-linker", "-dynamic-linker"};
 
+// strip, eu-strip, dwz, rpmsign are both same input/output file, for a list of multiple files
 static const char *
 strip_skip_token_list[] = {"-F", "--target", "-I", "--input-target", "-O", "--output-target",
 	"-K", "--keep-symbol", "-N", "--strip-symbol", "-R", "--remove-section",
@@ -40,12 +41,23 @@ strip_skip_token_list[] = {"-F", "--target", "-I", "--input-target", "-O", "--ou
 
 static const char *eu_strip_skip_token_list[] = {"-F", "-f", "-R", "--remove-section"};
 
+static const char *
+dwz_skip_token_list[] = {"-m", "--multifile", "-M", "--multifile-name", "-l", "--low-mem-die-limit", "-L", "--max-die-limit"};
+
+static const char *rpmsign_skip_token_list[] = {"--macros", "--fskpath", "--certpath", "--verityalgo"};
+
+// single file as both input and output
+static const char *samefile_converter_list[] = {"ranlib", "objtool", "debugedit", "sortextable", "sorttable", "resolve_btfids"};
+
 static void bomsh_token_init(void)
 {
 	qsort(gcc_skip_token_list, sizeof(gcc_skip_token_list)/sizeof(*gcc_skip_token_list), sizeof(char *), strcmp_comparator);
 	qsort(linker_skip_tokens, sizeof(linker_skip_tokens)/sizeof(*linker_skip_tokens), sizeof(char *), strcmp_comparator);
 	qsort(strip_skip_token_list, sizeof(strip_skip_token_list)/sizeof(*strip_skip_token_list), sizeof(char *), strcmp_comparator);
 	qsort(eu_strip_skip_token_list, sizeof(eu_strip_skip_token_list)/sizeof(*eu_strip_skip_token_list), sizeof(char *), strcmp_comparator);
+	qsort(dwz_skip_token_list, sizeof(dwz_skip_token_list)/sizeof(*dwz_skip_token_list), sizeof(char *), strcmp_comparator);
+	qsort(rpmsign_skip_token_list, sizeof(rpmsign_skip_token_list)/sizeof(*rpmsign_skip_token_list), sizeof(char *), strcmp_comparator);
+	qsort(samefile_converter_list, sizeof(samefile_converter_list)/sizeof(*samefile_converter_list), sizeof(char *), strcmp_comparator);
 }
 
 static int bomsh_is_gcc_skip_token(char *token)
@@ -360,6 +372,13 @@ static void bomsh_free_cmd(bomsh_cmd_data_t *cmd)
 		}
 		free(cmd->depend_file);
 	}
+	// cmd->depends_outfile is just a pointer, no need to free
+	if (cmd->depends_array) {
+		free(cmd->depends_array);
+	}
+	if (cmd->depends_buf) {
+		free(cmd->depends_buf);
+	}
 	free(cmd);
 }
 
@@ -385,9 +404,15 @@ static void bomsh_log_string_array(int level, char **array, char *sep, char *hea
 // for debugging purpose
 static void bomsh_log_cmd_data(bomsh_cmd_data_t *cmd, int level)
 {
+	if (bomsh_verbose < level) return;
 	bomsh_log_printf(level, "\nStart of cmd_data, pid: %d pwd: %s root: %s path: %s", cmd->pid, cmd->pwd, cmd->root, cmd->path);
 	if (cmd->depend_file) {
 		bomsh_log_printf(level, "\ndepend_file: %s", cmd->depend_file);
+	}
+	bomsh_log_string_array(level, cmd->depends_array, (char *)"\n ", (char *)"\ndepends array:", NULL);
+	if (cmd->depends_outfile) {
+		bomsh_log_printf(level, "\ndepends_outfile: %s", cmd->depends_outfile);
+		bomsh_log_printf(level, "\ndepends_outfile_exist: %d", cmd->depends_outfile_exist);
 	}
 	if (cmd->stdin_file) {
 		bomsh_log_printf(level, "\nstdin_file: %s", cmd->stdin_file);
@@ -1084,11 +1109,38 @@ static int bomsh_read_depend_file(char *depend_file, char ***depends, char **dep
 		p++;
 	}
 	bomsh_log_printf(22, "\nDone parsing depend_str, num_depends: %d\n", num_depends);
-	char **depend_array = (char **)malloc(num_depends * sizeof(char *));
+	char **depend_array = (char **)malloc((num_depends + 1) * sizeof(char *));
 	memcpy(depend_array, bomsh_depend_array, num_depends * sizeof(char *));
+	depend_array[num_depends] = NULL;
 	*depends = depend_array;
 	*depend_buf = depend_str;
 	return num_depends;
+}
+
+// read depend file and save results into cmd->depends_array, etc.
+static void bomsh_cmd_read_depend_file(bomsh_cmd_data_t *cmd)
+{
+	char **depends_array = NULL;
+	char *depends_buf = NULL;
+	char *output_file = NULL;
+	char *depend_file = cmd->depend_file;
+
+	char buf[PATH_MAX];
+	char *depend_file2 = get_real_path2(cmd, depend_file, buf);
+	// need to get the real path of the depend file to read successfully
+	bomsh_log_printf(7, "\nRead gcc dependency from depfile: %s real-path: %s\n", depend_file, depend_file2);
+	int num_depends = bomsh_read_depend_file(depend_file2, &depends_array, &depends_buf, &output_file);
+
+	cmd->depends_buf = depends_buf;
+	cmd->depends_array = depends_array;
+	cmd->depends_num = num_depends;
+	cmd->depends_outfile = output_file;
+	// outfile from depend file may not be correct path, so need to check if it exists
+	if (bomsh_check_permission(output_file, cmd->pwd, cmd->root, F_OK)) {
+		cmd->depends_outfile_exist = 1;
+	} else {
+		bomsh_log_printf(7, "WarnInfo: not-existent outfile %s from depfile: %s\n", output_file, depend_file);
+	}
 }
 
 // run a child process to generate dependency for GCC compilation
@@ -1227,21 +1279,10 @@ static void bomsh_record_dynlibs(bomsh_cmd_data_t *cmd, char **array, int hash_a
 }
 
 // record both outfile and infiles from the dependency file
-static void bomsh_record_files_from_depfile(bomsh_cmd_data_t *cmd, char *depend_file, int hash_alg, char *ahash, int level)
+static void bomsh_record_files_from_depfile(bomsh_cmd_data_t *cmd, int hash_alg, char *ahash, int level)
 {
-	char **depends_array = NULL;
-	char *depends_buf = NULL;
-	char *output_file = NULL;
-	char *depend_file2 = get_real_path(cmd, depend_file);
-	// need to get the real path of the depend file to read successfully
-	bomsh_log_printf(7, "\nRead gcc dependency from depfile: %s real-path: %s\n", depend_file, depend_file2);
-	int num_depends = bomsh_read_depend_file(depend_file2, &depends_array, &depends_buf, &output_file);
-	free(depend_file2);
-	// outfile from depend file may not be correct path, so need to check if it exists
-	if (bomsh_check_permission(output_file, cmd->pwd, cmd->root, F_OK)) {
-		bomsh_record_afile(cmd, output_file, "\noutfile: ", hash_alg, ahash, level);
-	} else {
-		bomsh_log_printf(7, "Warning: not-existent outfile %s from depfile: %s\n", output_file, depend_file);
+	char **depends_array = cmd->depends_array;
+	if (!cmd->depends_outfile_exist) {
 		// if the outfile path from depend file does not exist, then try the outfile from argv
 		if (!cmd->output_file) {
 			cmd->output_file = get_outfile_in_argv(cmd->argv);
@@ -1255,14 +1296,12 @@ static void bomsh_record_files_from_depfile(bomsh_cmd_data_t *cmd, char *depend_
 				bomsh_log_string(7, "Warning: no output file found from argv\n");
 			}
 			// anyway, let's log the outfile from the depend file
-			bomsh_record_afile(cmd, output_file, "\noutfile: ", hash_alg, ahash, level);
+			bomsh_record_afile(cmd, cmd->depends_outfile, "\noutfile: ", hash_alg, ahash, level);
 		}
 	}
-	for (int i=0; i<num_depends; i++) {
+	for (int i=0; i < cmd->depends_num; i++) {
 		bomsh_record_afile(cmd, depends_array[i], "\ninfile: ", hash_alg, ahash, level);
 	}
-	free(depends_array);
-	free(depends_buf);
 }
 
 static void bomsh_record_out_infiles(bomsh_cmd_data_t *cmd, int hash_alg, char *ahash, int level)
@@ -1270,7 +1309,7 @@ static void bomsh_record_out_infiles(bomsh_cmd_data_t *cmd, int hash_alg, char *
 	// cmd->depend_file should have been verified to exist, when we are here, so no need to check permission again
 	if (cmd->depend_file) {
 		// if we have depend_file, then it must be gcc compilation
-		bomsh_record_files_from_depfile(cmd, cmd->depend_file, hash_alg, ahash, level);
+		bomsh_record_files_from_depfile(cmd, hash_alg, ahash, level);
 	} else {
 		bomsh_record_afile(cmd, cmd->output_file, "\noutfile: ", hash_alg, ahash, level);
 		if (cmd->input_files) {
@@ -1315,8 +1354,6 @@ static void bomsh_record_raw_info(bomsh_cmd_data_t *cmd)
 	if (!g_bomsh_global.raw_logfile) {
 		return;
 	}
-	//if (cmd->skip_record_raw_info || !cmd->output_file) {
-	//if (!cmd->output_file || strcmp(cmd->output_file, "/dev/null") == 0) {
 	if (!cmd->output_file && !cmd->depend_file) {
 		// if -MF option already exists in "gcc -c" cmd, then output_file is NULL, while depend_file is not.
 		return;
@@ -1378,7 +1415,6 @@ static void bomsh_record_raw_info2(bomsh_cmd_data_t *cmd)
 	if (!g_bomsh_global.raw_logfile) {
 		return;
 	}
-	//if (cmd->skip_record_raw_info || !cmd->input_files) {
 	if (!cmd->input_files) {
 		return;
 	}
@@ -1394,6 +1430,17 @@ static void bomsh_record_raw_info2(bomsh_cmd_data_t *cmd)
 	if (g_bomsh_config.hash_alg == 3) { // log sha256 to raw_logfile2 too
 		level = -2;
 		bomsh_record_raw_info2_infiles(cmd, 2, ahash, level);
+	}
+}
+
+// Record raw info for any command
+static void bomsh_record_raw_info_for_command(bomsh_cmd_data_t *cmd)
+{
+	bomsh_log_printf(8, "record raw info for generic cmd pid %d\n", cmd->pid);
+	if (cmd->input_sha1 || cmd->input_sha256) {
+		bomsh_record_raw_info2(cmd);
+	} else {
+		bomsh_record_raw_info(cmd);
 	}
 }
 
@@ -1684,7 +1731,22 @@ static void bomsh_process_gcc_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 	}
 	// when we are here, if cmd->depend_file is not NULL, then depend_file must exist;
 	// or if cmd->denpend_file is NULL, then cmd->input_files must not be NULL.
+	if (cmd->depend_file) {
+		bomsh_log_printf(5, "Start reading depend file %s\n", cmd->depend_file);
+		bomsh_cmd_read_depend_file(cmd);
+		bomsh_log_cmd_data(cmd, 24);
+		bomsh_log_printf(5, "After reading depend file %s\n", cmd->depend_file);
+	}
 	bomsh_record_raw_info(cmd);
+}
+
+// Allocate string pointer array of size 2, with first element of TOKEN string.
+static char ** alloc_2element_array(char *token)
+{
+	char **array = malloc( 2 * sizeof(char *) );
+	array[0] = strdup(token);
+	array[1] = NULL;
+	return array;
 }
 
 // get all hashes of input files and put them into cmd->input_shaN array
@@ -1807,9 +1869,7 @@ static void get_all_subfiles_in_ar_cmdline(bomsh_cmd_data_t *cmd)
 	}
 	cmd->output_file = token2;
 	if (num_tokens == 3) {  // should be "ar -s archive"
-		char **array = malloc( 2 * sizeof(char *) );
-		array[0] = strdup(token2);
-		array[1] = NULL;
+		char **array = alloc_2element_array(token2);
 		cmd->num_inputs = 1;
 		cmd->input_files = array;
 		get_hash_of_infiles(cmd);
@@ -1844,11 +1904,7 @@ static void bomsh_process_ar_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 	} else {
 		if (cmd->skip_record_raw_info) return;
 		bomsh_log_string(3, "\nrecord raw_info for ar command after EXECVE syscall\n");
-		if (cmd->input_sha1 || cmd->input_sha256) { // should be "ar -s archive" cmd
-			bomsh_record_raw_info2(cmd);
-		} else {
-			bomsh_record_raw_info(cmd);
-		}
+		bomsh_record_raw_info_for_command(cmd);
 	}
 }
 
@@ -1863,7 +1919,7 @@ static int is_strip_command(char *name)
 }
 
 // Parse cmd->argv, and get all files from the command line
-static void get_all_subfiles_in_strip_cmdline(bomsh_cmd_data_t *cmd, char **skip_token_list, int num_tokens)
+static void get_all_subfiles_in_strip_like_cmdline(bomsh_cmd_data_t *cmd, char **skip_token_list, int num_tokens)
 {
 	int array_size = 100;
 	int num_array = 0;
@@ -1874,7 +1930,7 @@ static void get_all_subfiles_in_strip_cmdline(bomsh_cmd_data_t *cmd, char **skip
 		char *token = *p; p++; // p points to next token already
 		if (bomsh_is_token_inlist(token, skip_token_list, num_tokens)) {
 			p++;  // move to next token
-			bomsh_log_printf(4, "found strip skip token: %s\n", token);
+			bomsh_log_printf(4, "found strip-like skip token: %s\n", token);
 			continue;
 		}
 		// need to handle -o option
@@ -1887,9 +1943,10 @@ static void get_all_subfiles_in_strip_cmdline(bomsh_cmd_data_t *cmd, char **skip
 			}
 		}
 		if (token[0] == '-') {
+			// should we reset num_array to 0 here?
 			continue;
 		}
-		bomsh_log_printf(4, "found strip infile: %s\n", token);
+		bomsh_log_printf(4, "found strip-like infile: %s\n", token);
 		array[num_array++] = strdup(token);
 		if (num_array >= array_size) {
 			array_size *= 2;
@@ -1904,11 +1961,20 @@ static void get_all_subfiles_in_strip_cmdline(bomsh_cmd_data_t *cmd, char **skip
 	}
 }
 
-static void bomsh_process_strip_command(bomsh_cmd_data_t *cmd, int pre_exec_mode, int eu_strip)
+/*
+ * Process a generic strip-like shell command like strip/eu-strip/dwz/rpmsign
+ * generic command format: dwz [OPTION...] [FILES]
+ *   strip --strip-debug -o drivers/firmware/efi/libstub/x86-stub.stub.o drivers/firmware/efi/libstub/x86-stub.o
+ *   dwz -mdebian/libssl1.1/usr/lib/debug/.dwz/x86_64-linux-gnu/libssl1.1.debug -- debian/libcrypto1.1-udeb/usr/lib/libcrypto.so.1.1 debian/libssl1.1/usr/lib/x86_64-linux-gnu/libssl.so.1.1
+ *   rpm --addsign|--resign [rpmsign-options] PACKAGE_FILE ..
+ *   rpmsign --addsign|--delsign [rpmsign-options] PACKAGE_FILE ..
+ *   which: strip=0, eu-strip=1, dwz=2, rpmsign=3
+ */
+static void bomsh_process_strip_like_command(bomsh_cmd_data_t *cmd, int pre_exec_mode, int which)
 {
 	if (!pre_exec_mode) {
 		if (!cmd->output_file) return;
-		bomsh_log_string(3, "\nrecord raw_info for strip command after EXECVE syscall\n");
+		bomsh_log_string(3, "\nrecord raw_info for strip-like command after EXECVE syscall\n");
 		if (strcmp(cmd->output_file, cmd->input_files[0])) {
 			// "-o FILE" option exists, and outfile is different from infile
 			bomsh_record_raw_info(cmd);
@@ -1917,17 +1983,31 @@ static void bomsh_process_strip_command(bomsh_cmd_data_t *cmd, int pre_exec_mode
 		}
 		return;
 	}
-	bomsh_log_string(3, "\npre-exec mode, get subfiles for strip command\n");
+	bomsh_log_string(3, "\npre-exec mode, get subfiles for strip-like command\n");
 	char **skip_token_list = NULL;
 	int num_skip_tokens = 0;
-	if (eu_strip) {
-		skip_token_list = (char **)eu_strip_skip_token_list;
-		num_skip_tokens = sizeof(eu_strip_skip_token_list)/sizeof(*eu_strip_skip_token_list);
-	} else {
-		skip_token_list = (char **)strip_skip_token_list;
-		num_skip_tokens = sizeof(strip_skip_token_list)/sizeof(*strip_skip_token_list);
+	switch (which) {
+		case 0: // strip
+			skip_token_list = (char **)strip_skip_token_list;
+			num_skip_tokens = sizeof(strip_skip_token_list)/sizeof(*strip_skip_token_list);
+			break;
+		case 1: // eu-strip
+			skip_token_list = (char **)eu_strip_skip_token_list;
+			num_skip_tokens = sizeof(eu_strip_skip_token_list)/sizeof(*eu_strip_skip_token_list);
+			break;
+		case 2: // dwz
+			skip_token_list = (char **)dwz_skip_token_list;
+			num_skip_tokens = sizeof(dwz_skip_token_list)/sizeof(*dwz_skip_token_list);
+			break;
+		case 3: // rpmsign
+			skip_token_list = (char **)rpmsign_skip_token_list;
+			num_skip_tokens = sizeof(rpmsign_skip_token_list)/sizeof(*rpmsign_skip_token_list);
+			break;
+		default:
+			bomsh_log_string(18, "Not supported program for process_strip_like_command\n");
+			break;
 	}
-	get_all_subfiles_in_strip_cmdline(cmd, skip_token_list, num_skip_tokens);
+	get_all_subfiles_in_strip_like_cmdline(cmd, skip_token_list, num_skip_tokens);
 	if (!cmd->output_file) {
 		bomsh_log_string(8, "Empty output/input file, do nothing\n");
 		return;
@@ -2277,16 +2357,6 @@ static void bomsh_process_cat_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 	}
 }
 
-static void bomsh_record_raw_info_patch_command(bomsh_cmd_data_t *cmd)
-{
-	bomsh_log_printf(8, "record raw info for patch cmd pid %d\n", cmd->pid);
-	if (cmd->input_sha1 || cmd->input_sha256) { // should always reach here
-		bomsh_record_raw_info2(cmd);
-	} else { // should never reach here
-		bomsh_record_raw_info(cmd);
-	}
-}
-
 static void bomsh_process_patch_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 {
 	if (pre_exec_mode) {
@@ -2302,9 +2372,7 @@ static void bomsh_process_patch_command(bomsh_cmd_data_t *cmd, int pre_exec_mode
 				bomsh_add_pipe_cmd(cmd, 0);
 			} else {
 				bomsh_log_printf(8, "non-pipe patch cmd with stdin input %s\n", cmd->stdin_file);
-				cmd->input_files2 = malloc(2 * sizeof(char *));
-				cmd->input_files2[0] = strdup(cmd->stdin_file);
-				cmd->input_files2[1] = NULL;
+				cmd->input_files2 = alloc_2element_array(cmd->stdin_file);
 			}
 		} else {
 			char *patch_file = get_input_patch_file_of_patch_command(cmd);
@@ -2313,9 +2381,7 @@ static void bomsh_process_patch_command(bomsh_cmd_data_t *cmd, int pre_exec_mode
 				cmd->skip_record_raw_info = 1;
 				return;
 			}
-			cmd->input_files2 = malloc(2 * sizeof(char *));
-			cmd->input_files2[0] = strdup(patch_file);
-			cmd->input_files2[1] = NULL;
+			cmd->input_files2 = alloc_2element_array(patch_file);
 		}
 		// Now patch files are known, will get infiles from the patch files
 		bomsh_prehook_patch_cmd(cmd);
@@ -2324,11 +2390,261 @@ static void bomsh_process_patch_command(bomsh_cmd_data_t *cmd, int pre_exec_mode
 		if (cmd->skip_record_raw_info) return;
 		bomsh_log_string(3, "\nrecord raw_info for patch command after EXECVE syscall\n");
 		if (cmd->stdin_file && strncmp(cmd->stdin_file, "pipe:[", 6) == 0) bomsh_remove_pipe_cmd(cmd, 0);
-		bomsh_record_raw_info_patch_command(cmd);
+		bomsh_record_raw_info_for_command(cmd);
 	}
 }
 
 /******** end of cat/patch command handling routines ********/
+
+/******** objcopy/chrpath, ... command handling routines ********/
+
+// cmdline format: objcopy [options] infile [outfile]
+static void get_all_subfiles_in_objcopy_cmdline(bomsh_cmd_data_t *cmd)
+{
+	char *last_token = NULL;
+	char *last2nd_token = NULL;
+	char **p = cmd->argv;
+	p++; // start from argv[1]
+	while (*p) {
+		last2nd_token = last_token; last_token = *p; p++;
+	}
+	if (last2nd_token && (last2nd_token[0] == '-' || strchr(last2nd_token, '='))) {
+		// the last token must be both input and output file
+		cmd->input_files = alloc_2element_array(last_token);
+		cmd->num_inputs = 1;
+		get_hash_of_infiles(cmd);
+		return;
+	}
+	char *infile = last2nd_token;
+	char *outfile = last_token;
+	if ( ! (outfile && infile && bomsh_is_regular_file(infile, cmd->pwd, cmd->root))) {
+		bomsh_log_string(18, "Warning: not valid objcopy command\n");
+		cmd->skip_record_raw_info = 1;
+		return;
+	}
+	if (strcmp(infile, outfile) == 0) {
+		// outfile is same as infile
+		cmd->input_files = alloc_2element_array(last_token);
+		cmd->num_inputs = 1;
+		get_hash_of_infiles(cmd);
+		return;
+	}
+	// outfile and infile must be different
+	cmd->output_file = outfile;
+	cmd->input_files = alloc_2element_array(infile);
+	cmd->num_inputs = 1;
+}
+
+static void bomsh_process_objcopy_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
+{
+	if (pre_exec_mode) {
+		bomsh_log_string(3, "\npre-exec mode, get subfiles for objcopy command\n");
+		get_all_subfiles_in_objcopy_cmdline(cmd);
+	} else {
+		if (cmd->skip_record_raw_info) return;
+		bomsh_log_string(3, "\nrecord raw_info for objcopy command after EXECVE syscall\n");
+		bomsh_record_raw_info_for_command(cmd);
+	}
+}
+
+// Parse cmd->argv, and get all files from the command line
+// chrpath [ -v | --version ] [ -d | --delete ] [ -r <path> | --replace <path> ] [ -c | --convert ] [ -l | --list ] [ -h | --help ] <program> [ <program> ... ]
+static void get_all_subfiles_in_chrpath_cmdline(bomsh_cmd_data_t *cmd)
+{
+	int array_size = 10;
+	int num_array = 0;
+	char **array = malloc(array_size * sizeof(char *));
+	char **p = cmd->argv;
+	p++; // start from argv[1]
+	while (*p) {
+		char *token = *p; p++; // p points to next token already
+		if (strcmp(token, "-r") == 0 || strcmp(token, "--replace") == 0) {
+			p++; // move to next token
+			continue;
+		}
+		if (token[0] == '-') {
+			num_array = 0; // discard all the tokens in the array
+			continue;
+		}
+		bomsh_log_printf(4, "found chrpath infile: %s\n", token);
+		array[num_array++] = token;
+		if (num_array >= array_size) {
+			array_size *= 2;
+			array = realloc(array, array_size * sizeof(char *));
+		}
+	}
+	if (!num_array) {
+		bomsh_log_string(18, "No infiles found for chrpath cmd\n");
+		cmd->skip_record_raw_info = 1;
+		free(array);
+		return;
+	}
+	for (int i=0; i<num_array; i++) {
+		array[i] = strdup(array[i]); // allocate memory
+	}
+	array[num_array] = NULL;
+	cmd->input_files = array;
+	cmd->num_inputs = num_array;
+	cmd->output_file = array[0]; // need to set it because record_raw_info checks output_file
+	// now get hash of all infiles for chrpath command
+	get_hash_of_infiles(cmd);
+}
+
+static void bomsh_process_chrpath_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
+{
+	if (pre_exec_mode) {
+		bomsh_log_string(3, "\npre-exec mode, get subfiles for chrpath command\n");
+		get_all_subfiles_in_chrpath_cmdline(cmd);
+	} else {
+		if (cmd->skip_record_raw_info) return;
+		bomsh_log_string(3, "\nrecord raw_info for chrpath command after EXECVE syscall\n");
+		bomsh_record_raw_info2(cmd);
+	}
+}
+
+// cmdline format: sepdebugcrcfix DEBUG_DIR FILEs
+static void get_all_subfiles_in_sepdebugcrcfix_cmdline(bomsh_cmd_data_t *cmd)
+{
+	int argc = 0;
+	char **p = cmd->argv;
+	while (*p) { // count number of args
+		p++; argc++;
+	}
+	if (argc < 2) {
+		return;
+	}
+	char **array = malloc( (argc - 1) * sizeof(char *) );
+	p = &(cmd->argv[2]); // start from argv[2]
+	int i;
+	for (i=0; i < argc-2; i++, p++) {
+		array[i] = strdup(*p);
+	}
+	array[i] = NULL;
+	cmd->num_inputs = i;
+	cmd->input_files = array;
+	get_hash_of_infiles(cmd);
+	cmd->output_file = array[0]; // need to set it because record_raw_info checks output_file
+}
+
+static void bomsh_process_sepdebugcrcfix_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
+{
+	if (pre_exec_mode) {
+		bomsh_log_string(3, "\npre-exec mode, get subfiles for sepdebugcrcfix command\n");
+		get_all_subfiles_in_sepdebugcrcfix_cmdline(cmd);
+	} else {
+		if (cmd->skip_record_raw_info) return;
+		bomsh_log_string(3, "\nrecord raw_info for sepdebugcrcfix command after EXECVE syscall\n");
+		bomsh_record_raw_info2(cmd);
+	}
+}
+
+static int is_samefile_converter_command(char *name)
+{
+	int num_tokens = sizeof(samefile_converter_list)/sizeof(*samefile_converter_list);
+	if (bomsh_is_token_inlist(name, (char **)samefile_converter_list, num_tokens)) {
+		return 1;
+	}
+	int len = strlen(name);
+	return strcmp(name + len - 7, "-ranlib") == 0;
+}
+
+// The shell command update single file, like objtool/sorttable/ranlib. the last token is the file to update.
+static void get_all_subfiles_in_samefile_converter_cmdline(bomsh_cmd_data_t *cmd)
+{
+	char *token = NULL;
+	char **p = cmd->argv;
+	p++; // start from argv[1]
+	while (*p) {
+		token = *p; p++; // p points to next token already
+	}
+	cmd->output_file = token;
+	char **array = alloc_2element_array(token);
+	cmd->num_inputs = 1;
+	cmd->input_files = array;
+	get_hash_of_infiles(cmd);
+}
+
+/*
+ *  Process the samefile converter command like strip/ranlib, etc.
+ *  For example, the below commands in Linux kernel build or rpm build.
+ *   ./tools/objtool/objtool orc generate --no-fp --retpoline kernel/fork.o
+ *   ./scripts/sortextable vmlinux
+ *   ./scripts/sorttable vmlinux
+ *   ./tools/bpf/resolve_btfids/resolve_btfids vmlinux
+ *   /usr/lib/rpm/debugedit -b /home/OpenOSC/rpmbuild/BUILD/openosc-1.0.5 -d /usr/src/debug/openosc-1.0.5-1.el8.x86_64 -i --build-id-seed=1.0.5-1.el8 -l /home/OpenOSC/rpmbuild/BUILD/openosc-1.0.5/debugsources.list /home/OpenOSC/rpmbuild/BUILDROOT/openosc-1.0.5-1.el8.x86_64/usr/lib64/libopenosc.so.0.0.0
+ *   chrpath -r $ORIGIN/.:$ORIGIN/../../lib work/x86_64-linux/curl-native/7.69.1-r0/recipe-sysroot-native/usr/lib/libcurl.so.4.6.0
+ */
+
+static void bomsh_process_samefile_converter_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
+{
+	if (pre_exec_mode) {
+		bomsh_log_string(3, "\npre-exec mode, get subfiles for samefile converter command\n");
+		get_all_subfiles_in_samefile_converter_cmdline(cmd);
+	} else {
+		if (cmd->skip_record_raw_info) return;
+		bomsh_log_string(3, "\nrecord raw_info for samefile converter command after EXECVE syscall\n");
+		bomsh_record_raw_info2(cmd);
+	}
+}
+
+// cmdline format: Usage: build setup system zoffset.h image
+// example: arch/x86/boot/tools/build arch/x86/boot/setup.bin arch/x86/boot/vmlinux.bin arch/x86/boot/zoffset.h arch/x86/boot/bzImage
+static void get_all_subfiles_in_bzimage_build_cmdline(bomsh_cmd_data_t *cmd)
+{
+	int argc = 0;
+	char **p = cmd->argv;
+	while (*p) { // count number of args
+		p++; argc++;
+	}
+	if (argc < 5) {
+		return;
+	}
+	cmd->output_file = cmd->argv[4];
+	char **array = malloc( (argc - 1) * sizeof(char *) );
+	p = &(cmd->argv[1]); // start from argv[1]
+	int i;
+	for (i=0; i < argc-2; i++, p++) {
+		array[i] = strdup(*p);
+	}
+	array[i] = NULL;
+	cmd->num_inputs = i;
+	cmd->input_files = array;
+}
+
+// Process the bzImage build command in Linux kernel build.
+static void bomsh_process_bzimage_build_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
+{
+	if (pre_exec_mode) {
+		bomsh_log_string(3, "\npre-exec mode, get subfiles for bzimage-build command\n");
+		get_all_subfiles_in_bzimage_build_cmdline(cmd);
+	} else {
+		if (cmd->skip_record_raw_info) return;
+		bomsh_log_string(3, "\nrecord raw_info for bzimage-build command after EXECVE syscall\n");
+		bomsh_record_raw_info(cmd);
+	}
+}
+
+static int is_rpmsign_command(bomsh_cmd_data_t *cmd, char *name)
+{
+	if (strcmp(name, "rpmsign") == 0) {
+		return 1;
+	}
+	if (strcmp(name, "rpm") != 0) {
+		return 0;
+	}
+	char **p = cmd->argv;
+	p++; // start from argv[1]
+	while (*p) {
+		char *token = *p; p++; // p points to next token already
+		if (strcmp(token, "--addsign") == 0 || strcmp(token, "--delsign") == 0
+				|| strcmp(token, "--resign") == 0) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/******** end of objcopy/chrpath, ... command handling routines ********/
 
 /******** top level command handling routines ********/
 
@@ -2337,20 +2653,35 @@ static void bomsh_process_patch_command(bomsh_cmd_data_t *cmd, int pre_exec_mode
 // if pre_exec_mode is 0, it means after  the EXECVE syscall
 static void bomsh_process_shell_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 {
+	// cmd->path can be relative, like "scripts/sign-file" or "./scripts/sorttable" during kernel build
 	char *prog = cmd->path;
 	char *name = bomsh_basename(prog);
 	if (is_cc_compiler(name)) {
 		bomsh_process_gcc_command(cmd, pre_exec_mode);
+	} else if (strcmp(name, "objcopy") == 0) {
+		bomsh_process_objcopy_command(cmd, pre_exec_mode);
 	} else if (is_ar_command(name)) {
 		bomsh_process_ar_command(cmd, pre_exec_mode);
-	} else if (is_eu_strip_command(name)) {
-		bomsh_process_strip_command(cmd, pre_exec_mode, 1);
 	} else if (is_strip_command(name)) {
-		bomsh_process_strip_command(cmd, pre_exec_mode, 0);
+		bomsh_process_strip_like_command(cmd, pre_exec_mode, 0);
+	} else if (is_eu_strip_command(name)) {
+		bomsh_process_strip_like_command(cmd, pre_exec_mode, 1);
 	} else if (strcmp(name, "cat") == 0) {
 		bomsh_process_cat_command(cmd, pre_exec_mode);
 	} else if (strcmp(name, "patch") == 0) {
 		bomsh_process_patch_command(cmd, pre_exec_mode);
+	} else if (is_samefile_converter_command(name)) {
+		bomsh_process_samefile_converter_command(cmd, pre_exec_mode);
+	} else if (strcmp(name, "dwz") == 0) {
+		bomsh_process_strip_like_command(cmd, pre_exec_mode, 2);
+	} else if (strcmp(name, "sepdebugcrcfix") == 0) {
+		bomsh_process_sepdebugcrcfix_command(cmd, pre_exec_mode);
+	} else if (strcmp(prog, "arch/x86/boot/tools/build") == 0) {
+		bomsh_process_bzimage_build_command(cmd, pre_exec_mode);
+	} else if (is_rpmsign_command(cmd, name)) {
+		bomsh_process_strip_like_command(cmd, pre_exec_mode, 3);
+	} else if (strcmp(name, "chrpath") == 0) {
+		bomsh_process_chrpath_command(cmd, pre_exec_mode);
 	} else {
 		bomsh_log_printf(15, "\nNot-supported shell command: %s\n", prog);
 	}
