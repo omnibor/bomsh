@@ -45,6 +45,37 @@ char * bomsh_read_file(const char *filepath, long *read_len)
         return buffer;
 }
 
+// this below function works for /proc/pid/cmdline file reading for file size
+// read all data from the file FILEPATH and malloc the required buffer.
+// returned buffer needs to be freed by the caller, also set the read_len
+char * bomsh_read_proc_file(const char *filepath, long *read_len)
+{
+	char * buffer = 0;
+	long length = 0;
+	FILE * f = fopen (filepath, "rb");
+
+	if (f) {
+		char buf[512]; size_t read_bytes = 0;
+		while ((read_bytes = fread(buf, 1, 512, f)) > 0) {
+			length += read_bytes;
+		}
+		if (read_len) {
+			*read_len = length;
+		}
+		fseek (f, 0, SEEK_SET);
+		// allocate 1-byte more for NULL-terminated buffer
+		buffer = malloc(length+1);
+		if (buffer) {
+			if (fread(buffer, 1, length, f) > 0) {
+				buffer[length] = 0;
+			}
+			buffer[length] = 0;
+		}
+		fclose (f);
+	}
+	return buffer;
+}
+
 // global variables
 struct bomsh_configs g_bomsh_config;
 struct bomsh_globals g_bomsh_global;
@@ -352,6 +383,7 @@ bomsh_log_configs(int level)
 	//bomsh_log_printf(level, "metadata to record: %d\n", g_bomsh_config.metadata_to_record);
 	bomsh_log_printf(level, "generate depfile: %d\n", g_bomsh_config.generate_depfile);
 	bomsh_log_printf(level, "handle conftest: %d\n", g_bomsh_config.handle_conftest);
+	bomsh_log_printf(level, "handle GNU AS cmd: %d\n", g_bomsh_config.handle_gnu_as_cmd);
 	bomsh_log_printf(level, "skip_checking_prog_access: %d\n", g_bomsh_config.skip_checking_prog_access);
 	bomsh_log_printf(level, "strict_prog_path: %d\n", g_bomsh_config.strict_prog_path);
 	bomsh_log_string(level, "---End of printing bomtrace configs.\n");
@@ -373,6 +405,7 @@ bomsh_print_configs(void)
 	//fprintf(stderr, "metadata to record: %d\n", g_bomsh_config.metadata_to_record);
 	fprintf(stderr, "generate depfile: %d\n", g_bomsh_config.generate_depfile);
 	fprintf(stderr, "handle conftest: %d\n", g_bomsh_config.handle_conftest);
+	fprintf(stderr, "handle GNU AS cmd: %d\n", g_bomsh_config.handle_gnu_as_cmd);
 	fprintf(stderr, "skip_checking_prog_access: %d\n", g_bomsh_config.skip_checking_prog_access);
 	fprintf(stderr, "strict_prog_path: %d\n", g_bomsh_config.strict_prog_path);
 }
@@ -402,11 +435,12 @@ bomsh_read_value_for_keys(char *line_start, char *value_equal, char *value_newli
 	char *hash_alg_str = NULL;
 	char *generate_depfile_str = NULL;
 	char *handle_conftest_str = NULL;
+	char *handle_gnu_as_cmd_str = NULL;
 	char *skip_checking_prog_access_str = NULL;
 	char *strict_prog_path_str = NULL;
 	static const char *bomsh_config_keys[] = {"hook_script_file", "hook_script_cmdopt", "shell_cmd_file",
 						"tmpdir", "logfile", "raw_logfile", "syscalls",
-						"hash_alg", "generate_depfile", "handle_conftest",
+						"hash_alg", "generate_depfile", "handle_conftest", "handle_gnu_as_cmd",
 						"skip_checking_prog_access", "strict_prog_path"};
 	char ** bomsh_config_fields[] = {
 		&g_bomsh_config.hook_script_file,
@@ -419,6 +453,7 @@ bomsh_read_value_for_keys(char *line_start, char *value_equal, char *value_newli
 		&hash_alg_str,
 		&generate_depfile_str,
 		&handle_conftest_str,
+		&handle_gnu_as_cmd_str,
 		&skip_checking_prog_access_str,
 		&strict_prog_path_str
 	};
@@ -448,16 +483,19 @@ bomsh_read_value_for_keys(char *line_start, char *value_equal, char *value_newli
 	}
 	if (hash_alg_str) {
 		g_bomsh_config.hash_alg = atoi(hash_alg_str);
-		//g_bomsh_config.hash_alg = atoi(hash_alg_str) & 0x3;
 		free(hash_alg_str);
 	}
 	if (generate_depfile_str) {
-		g_bomsh_config.generate_depfile = atoi(generate_depfile_str) & 0x3;
+		g_bomsh_config.generate_depfile = atoi(generate_depfile_str);
 		free(generate_depfile_str);
 	}
 	if (handle_conftest_str) {
 		g_bomsh_config.handle_conftest = atoi(handle_conftest_str);
 		free(handle_conftest_str);
+	}
+	if (handle_gnu_as_cmd_str) {
+		g_bomsh_config.handle_gnu_as_cmd = atoi(handle_gnu_as_cmd_str);
+		free(handle_gnu_as_cmd_str);
 	}
 	if (skip_checking_prog_access_str) {
 		if (strcmp(skip_checking_prog_access_str, "1") == 0) {

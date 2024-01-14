@@ -16,8 +16,12 @@ typedef struct bomsh_cmddata {
 	struct bomsh_cmddata *next;
 	struct tcb *tcp;
 	pid_t pid;
+	pid_t ppid; // parent pid, for GNU AS and LD cmd only
 	int refcount; // reference count for this struct, for delaying memory free until the last one
-	int skip_record_raw_info; // if non-zero, then skip recording raw info for this cmd
+
+	// if skip_record_raw_info is 1, then skip recording raw info for this cmd.
+	// if skip_record_raw_info is 2, then record raw info as information-only.
+	int skip_record_raw_info;
 
 	int num_inputs; // number of input files
 	char *pwd;  // current working directory
@@ -41,6 +45,8 @@ typedef struct bomsh_cmddata {
 	char *stdin_file; // the stdin for the patch command, which can be a pipe
 	char *stdout_file; // the stdout for the cat command, which can be a pipe
 	struct bomsh_cmddata *cat_cmd; // the associated cat command for piped patch command
+
+	struct bomsh_cmddata *ld_cmd; // the child ld command for gcc command
 } bomsh_cmd_data_t;
 
 // for the patch command, the input_files contains the list of files to apply the patch,
