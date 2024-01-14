@@ -37,6 +37,9 @@ struct bomsh_configs {
 	// these output files are ignored by default, since they are not very useful.
 	int handle_conftest;
 
+	// handle the GNU AS command, which is ignored by default.
+	int handle_gnu_as_cmd;
+
 	// by default, we check prog R_OK|X_OK permission before recording a command.
 	// the below flag will turn off/on this permission check
 	int skip_checking_prog_access;
@@ -84,5 +87,8 @@ extern void bomsh_init(int argc, char *argv[]);
 // read file content, and save file_size to read_len if read_len is not NULL.
 // read one-byte more than file size, and last byte is set to 0 for NULL-terminating string.
 extern char * bomsh_read_file(const char *filepath, long *read_len);
+
+// read /proc files like /proc/pid/stat, /proc/pid/cmdline, etc.
+extern char * bomsh_read_proc_file(const char *filepath, long *read_len);
 
 #endif /* !BOMSH_CONFIG_H */

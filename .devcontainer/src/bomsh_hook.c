@@ -31,7 +31,10 @@ gcc_skip_token_list[] = {"-MT", "-MF", "-x", "-I", "-B", "-D", "-L", "-isystem",
 static const char *
 linker_skip_tokens[] = {"-m", "-z", "-a", "-A", "-b", "-c", "-e", "-f", "-F", "-G", "-u", "-y", "-Y", "-soname", "--wrap",
 	"--architecture", "--format", "--mri-script", "--entry", "--auxiliary", "--filter", "--gpsize", "--oformat",
-	"--defsym", "--split-by-reloc", "-rpath", "-rpath-link", "--dynamic-linker", "-dynamic-linker"};
+	"--defsym", "--split-by-reloc", "-rpath", "-rpath-link", "--dynamic-linker", "-dynamic-linker", "-plugin"};
+
+static const char *
+gnu_as_skip_tokens[] = {"-G", "-I", "--MD", "--defsym", "--debug-prefix-map"};
 
 // strip, eu-strip, dwz, rpmsign are both same input/output file, for a list of multiple files
 static const char *
@@ -53,6 +56,7 @@ static void bomsh_token_init(void)
 {
 	qsort(gcc_skip_token_list, sizeof(gcc_skip_token_list)/sizeof(*gcc_skip_token_list), sizeof(char *), strcmp_comparator);
 	qsort(linker_skip_tokens, sizeof(linker_skip_tokens)/sizeof(*linker_skip_tokens), sizeof(char *), strcmp_comparator);
+	qsort(gnu_as_skip_tokens, sizeof(gnu_as_skip_tokens)/sizeof(*gnu_as_skip_tokens), sizeof(char *), strcmp_comparator);
 	qsort(strip_skip_token_list, sizeof(strip_skip_token_list)/sizeof(*strip_skip_token_list), sizeof(char *), strcmp_comparator);
 	qsort(eu_strip_skip_token_list, sizeof(eu_strip_skip_token_list)/sizeof(*eu_strip_skip_token_list), sizeof(char *), strcmp_comparator);
 	qsort(dwz_skip_token_list, sizeof(dwz_skip_token_list)/sizeof(*dwz_skip_token_list), sizeof(char *), strcmp_comparator);
@@ -60,13 +64,13 @@ static void bomsh_token_init(void)
 	qsort(samefile_converter_list, sizeof(samefile_converter_list)/sizeof(*samefile_converter_list), sizeof(char *), strcmp_comparator);
 }
 
+#if 0
 static int bomsh_is_gcc_skip_token(char *token)
 {
 	int num_tokens = sizeof(gcc_skip_token_list)/sizeof(*gcc_skip_token_list);
 	return bsearch(&token, gcc_skip_token_list, num_tokens, sizeof(char *), strcmp_comparator) != NULL;
 }
 
-#if 0
 static int bomsh_is_linker_skip_token(char *token)
 {
 	int num_tokens = sizeof(linker_skip_tokens)/sizeof(*linker_skip_tokens);
@@ -341,6 +345,9 @@ static void bomsh_free_cmd(bomsh_cmd_data_t *cmd)
 	if (cmd->cat_cmd) {
 		bomsh_free_cmd(cmd->cat_cmd);
 	}
+	if (cmd->ld_cmd) {
+		bomsh_free_cmd(cmd->ld_cmd);
+	}
 	// no need to free output_file, since output_file is not allocated.
 	if (cmd->pwd) {
 		free(cmd->pwd);
@@ -406,6 +413,9 @@ static void bomsh_log_cmd_data(bomsh_cmd_data_t *cmd, int level)
 {
 	if (bomsh_verbose < level) return;
 	bomsh_log_printf(level, "\nStart of cmd_data, pid: %d pwd: %s root: %s path: %s", cmd->pid, cmd->pwd, cmd->root, cmd->path);
+	if (cmd->ppid) {
+		bomsh_log_printf(level, "\nparent PID: %d", cmd->ppid);
+	}
 	if (cmd->depend_file) {
 		bomsh_log_printf(level, "\ndepend_file: %s", cmd->depend_file);
 	}
@@ -436,6 +446,10 @@ static void bomsh_log_cmd_data(bomsh_cmd_data_t *cmd, int level)
 	if (cmd->cat_cmd) {
 		bomsh_log_string(level, "--Extra info: the associated cat cmd data:");
 		bomsh_log_cmd_data(cmd->cat_cmd, level);
+	}
+	if (cmd->ld_cmd) {
+		bomsh_log_string(level, "--Extra info: the child ld cmd data:");
+		bomsh_log_cmd_data(cmd->ld_cmd, level);
 	}
 }
 
@@ -481,9 +495,8 @@ static bomsh_cmd_data_t *bomsh_remove_cmd(pid_t pid)
 	return NULL;
 }
 
-#if 0
 // Find a node for pid
-bomsh_cmd_data_t *bomsh_get_cmd(pid_t pid)
+static bomsh_cmd_data_t *bomsh_get_cmd(pid_t pid)
 {
 	int index = pid % BOMSH_CMDS_SIZE;
 	bomsh_cmd_data_t *cmd = bomsh_cmds[index];
@@ -495,7 +508,6 @@ bomsh_cmd_data_t *bomsh_get_cmd(pid_t pid)
 	}
 	return cmd;
 }
-#endif
 
 /******** end of shell command add/remove/log routines ********/
 
@@ -680,6 +692,43 @@ static char * bomsh_get_stdout_file(struct tcb *tcp)
 		return NULL;
 	}
 	return strdup(bomsh_stdout_file);
+}
+
+// get /proc/pid/stat content for a traced process.
+static char * bomsh_get_pid_stat(pid_t pid)
+{
+	char stat_file[32] = "";
+	sprintf(stat_file, "/proc/%d/stat", pid);
+	return bomsh_read_proc_file(stat_file, NULL);
+}
+
+// get parent PID for a traced process.
+// /proc/pid/stat is space separated, and 4th field is ppid string
+static pid_t bomsh_get_ppid(pid_t pid)
+{
+	char ppid[32];
+
+	char *stat = bomsh_get_pid_stat(pid);
+	if (!stat) return 0;
+
+	char *p = stat;
+	char *prev = p;
+	int space_num = 0;
+	while (*p) {
+		if (*p == ' ') {
+			space_num++;
+			if (space_num == 4) { // found 4th string
+				*p = 0;
+				strcpy(ppid, prev);
+				free(stat);
+				return atoi(ppid);
+			}
+			prev = p + 1; // prev points to start of string
+		}
+		p++;
+	}
+	free(stat);
+	return 0;
 }
 
 // Get the real path, or absolute path including /root/pwd/afile
@@ -970,17 +1019,14 @@ static int bomsh_is_token_inlist(char *prog, char **prog_list, int num_progs)
 	return bsearch(&prog, prog_list, num_progs, sizeof(char *), strcmp_comparator) != NULL;
 }
 
-#if 0
 // sorted list of linker names
 static const char *g_cc_linker_names[] = {"gold", "ld", "ld.bfd", "ld.gold", "ld.lld"};
 
-static int is_cc_linker(char *prog)
+static int is_cc_linker(char *name)
 {
-	char *name = bomsh_basename(prog);
 	int num_tokens = sizeof(g_cc_linker_names)/sizeof(*g_cc_linker_names);
 	return bsearch(&name, g_cc_linker_names, num_tokens, sizeof(char *), strcmp_comparator) != NULL;
 }
-#endif
 
 static int is_shared_library(char *afile)
 {
@@ -1273,16 +1319,28 @@ static void bomsh_record_infiles_array(bomsh_cmd_data_t *cmd, char **array, int 
 	bomsh_record_files_array(cmd, array, "\ninfile: ", hash_alg, ahash, level);
 }
 
-static void bomsh_record_dynlibs(bomsh_cmd_data_t *cmd, char **array, int hash_alg, char *ahash, int level)
+static void bomsh_record_dynlibs(bomsh_cmd_data_t *cmd, int hash_alg, char *ahash, int level)
 {
-	bomsh_record_files_array(cmd, array, "\ndynlib: ", hash_alg, ahash, level);
+	if (cmd->ld_cmd) {
+		bomsh_cmd_data_t *ld_cmd = cmd->ld_cmd;
+		bomsh_log_printf(8, "GCC cmd pid %d will use LD cmd pid %d dynlibs instead\n", cmd->pid, ld_cmd->pid);
+		if (ld_cmd->dynlib_files) { // use ld_cmd's dynlibs instead
+			bomsh_record_files_array(ld_cmd, ld_cmd->dynlib_files, "\ndynlib: ", hash_alg, ahash, level);
+			return;
+		}
+	}
+	if (cmd->dynlib_files) {
+		bomsh_record_files_array(cmd, cmd->dynlib_files, "\ndynlib: ", hash_alg, ahash, level);
+	}
 }
 
 // record both outfile and infiles from the dependency file
 static void bomsh_record_files_from_depfile(bomsh_cmd_data_t *cmd, int hash_alg, char *ahash, int level)
 {
 	char **depends_array = cmd->depends_array;
-	if (!cmd->depends_outfile_exist) {
+	if (cmd->depends_outfile_exist) {
+		bomsh_record_afile(cmd, cmd->depends_outfile, "\noutfile: ", hash_alg, ahash, level);
+	} else {
 		// if the outfile path from depend file does not exist, then try the outfile from argv
 		if (!cmd->output_file) {
 			cmd->output_file = get_outfile_in_argv(cmd->argv);
@@ -1312,6 +1370,14 @@ static void bomsh_record_out_infiles(bomsh_cmd_data_t *cmd, int hash_alg, char *
 		bomsh_record_files_from_depfile(cmd, hash_alg, ahash, level);
 	} else {
 		bomsh_record_afile(cmd, cmd->output_file, "\noutfile: ", hash_alg, ahash, level);
+		if (cmd->ld_cmd) {
+			bomsh_cmd_data_t *ld_cmd = cmd->ld_cmd;
+			bomsh_log_printf(8, "GCC cmd pid %d will use LD cmd pid %d inputs instead\n", cmd->pid, ld_cmd->pid);
+			if (ld_cmd->input_files) { // use ld_cmd's inputs instead
+				bomsh_record_infiles_array(ld_cmd, ld_cmd->input_files, hash_alg, ahash, level);
+				return;
+			}
+		}
 		if (cmd->input_files) {
 			bomsh_record_infiles_array(cmd, cmd->input_files, hash_alg, ahash, level);
 		}
@@ -1340,8 +1406,9 @@ static void bomsh_record_cmdline(bomsh_cmd_data_t *cmd, int level)
 static void bomsh_record_raw_info_hashalg(bomsh_cmd_data_t *cmd, int hash_alg, char *ahash, int level)
 {
 	bomsh_record_out_infiles(cmd, hash_alg, ahash, level);
-	if (cmd->dynlib_files) {
-		bomsh_record_dynlibs(cmd, cmd->dynlib_files, hash_alg, ahash, level);
+	bomsh_record_dynlibs(cmd, hash_alg, ahash, level);
+	if (cmd->skip_record_raw_info == 2) {
+		bomsh_log_string(level, "\nignore_this_record: information only");
 	}
 	bomsh_record_cmdline(cmd, level);
 	bomsh_log_printf(level, "\n==== End of raw info for PID %d process\n\n", cmd->pid);
@@ -1475,7 +1542,8 @@ static void log_gcc_subfiles(int level, char **libs, int num_libs, const char *l
 }
 
 // Parse cmd->argv, and get all files from the command line
-static void bomsh_get_gcc_subfiles(bomsh_cmd_data_t *cmd)
+// handle both gcc and ld commands
+static void bomsh_get_gcc_subfiles(bomsh_cmd_data_t *cmd, char **skip_token_list, int num_tokens)
 {
 	char *output_file = NULL;
 
@@ -1561,9 +1629,7 @@ static void bomsh_get_gcc_subfiles(bomsh_cmd_data_t *cmd)
 			}
 			continue;
 		}
-		// C linker ld has a few more options that come with next token
-		//if (bomsh_is_gcc_skip_token(token) || ((is_cc_linker(cmd->path) && bomsh_is_linker_skip_token(token)))) {
-		if (bomsh_is_gcc_skip_token(token)) {
+		if (bomsh_is_token_inlist(token, skip_token_list, num_tokens)) {
 			p++; // move to next token
 			continue;
 		}
@@ -1643,6 +1709,26 @@ static void bomsh_get_gcc_subfiles(bomsh_cmd_data_t *cmd)
 	if (library_names) free(library_names);
 }
 
+static void bomsh_try_get_gcc_subfiles(bomsh_cmd_data_t *cmd)
+{
+	if (cmd->input_files) {
+		// must have already run bomsh_get_gcc_subfiles().
+		return;
+	}
+	int num_skip_tokens = sizeof(gcc_skip_token_list)/sizeof(*gcc_skip_token_list);
+	bomsh_get_gcc_subfiles(cmd, (char **)gcc_skip_token_list, num_skip_tokens);
+}
+
+static void bomsh_try_get_ld_subfiles(bomsh_cmd_data_t *cmd)
+{
+	if (cmd->input_files) {
+		// must have already run bomsh_get_gcc_subfiles().
+		return;
+	}
+	int num_skip_tokens = sizeof(linker_skip_tokens)/sizeof(*linker_skip_tokens);
+	bomsh_get_gcc_subfiles(cmd, (char **)linker_skip_tokens, num_skip_tokens);
+}
+
 static void bomsh_process_gcc_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 {
 	if (pre_exec_mode) {
@@ -1673,7 +1759,7 @@ static void bomsh_process_gcc_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 				cmd->skip_record_raw_info = 1;
 				return;
 			}
-			if (!cmd->input_files) bomsh_get_gcc_subfiles(cmd);
+			bomsh_try_get_gcc_subfiles(cmd);
 			if (!cmd->num_inputs || (cmd->num_inputs == 1 && strncmp(bomsh_basename(cmd->input_files[0]), "conftest", strlen("conftest")) == 0)) {
 				// infiles are usually conftest.c/conftest.cpp
 				bomsh_log_string(3, "\nconftest infile, will skip recording raw info\n");
@@ -1683,8 +1769,7 @@ static void bomsh_process_gcc_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 		}
 
 		if (gcc_is_compile_only(cmd->argv)) {
-			if (!cmd->input_files) bomsh_get_gcc_subfiles(cmd);
-			//if (!cmd->input_files || (cmd->num_inputs == 1 && strcmp(cmd->input_files[0], "/dev/null") == 0)) {
+			bomsh_try_get_gcc_subfiles(cmd);
 			if (!cmd->num_inputs || (cmd->num_inputs == 1 && strcmp(cmd->input_files[0], "/dev/null") == 0)) {
 				bomsh_log_string(3, "\nThere is no input file, or input is /dev/null, skip recording raw info\n");
 				cmd->skip_record_raw_info = 1;
@@ -1723,10 +1808,7 @@ static void bomsh_process_gcc_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 			free(cmd->depend_file);
 			cmd->depend_file = NULL;
 		}
-		if (!cmd->input_files) {
-			// if cmd->input_files is not NULL, then we must have run the below function
-			bomsh_get_gcc_subfiles(cmd);
-		}
+		bomsh_try_get_gcc_subfiles(cmd);
 		bomsh_log_cmd_data(cmd, 4);
 	}
 	// when we are here, if cmd->depend_file is not NULL, then depend_file must exist;
@@ -1907,6 +1989,143 @@ static void bomsh_process_ar_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 		bomsh_record_raw_info_for_command(cmd);
 	}
 }
+
+/******** GNU assembler/linker as/ld command handling routines ********/
+
+// Parse cmd->argv, and get all files from the command line
+static void bomsh_get_gnu_as_subfiles(bomsh_cmd_data_t *cmd, char **skip_token_list, int num_tokens)
+{
+	char *output_file = NULL;
+	int subfiles_size = 100;
+	int num_subfiles = 0;
+	char **subfiles = malloc(subfiles_size * sizeof(char *));
+
+	char **p = cmd->argv;
+	p++; // start with argv[1]
+	while (*p) {
+		char *token = *p; p++; // p points to next token already
+
+		// well, we still need to handle this -o option, otherwise, the outfile will be added to infiles
+		if (strncmp(token, "-o", 2) == 0) {
+			int len = strlen(token);
+			if (len > 2) {
+				output_file = token + 2;
+			} else {
+				// p already points to next token, which is output file
+				output_file = *p;
+				p++; // move to next token
+			}
+			if (output_file && strcmp(output_file, "/dev/null") == 0) {
+				bomsh_log_string(3, "NULL outfile, no need to process GNU AS command\n");
+				cmd->skip_record_raw_info = 1;
+				free(subfiles);
+				return;
+			}
+			bomsh_log_printf(4, "found output file %s\n", output_file);
+			continue;
+		}
+
+		if (bomsh_is_token_inlist(token, skip_token_list, num_tokens)) {
+			p++; // move to next token
+			continue;
+		}
+		if (token[0] == '-') {
+			continue;
+		}
+		bomsh_log_printf(4, "found one GNU AS subfile: %s\n", token);
+		// auto-grow the buffer to hold more subfiles
+		if (num_subfiles >= subfiles_size) {
+			subfiles_size *= 2;
+			subfiles = realloc(subfiles, subfiles_size * sizeof(char *));
+		}
+		subfiles[num_subfiles++] = token;
+	}
+
+	int num_infiles = 0;
+	// it is sufficient, since #infiles <= #subfiles
+	char **infiles = malloc((num_subfiles + 1) * sizeof(char *));
+	log_gcc_subfiles(4, subfiles, num_subfiles, "\nList of subfiles:");
+	bomsh_log_string(4, "\nChecking GNU AS subfiles\n");
+	for (int i=0; i<num_subfiles; i++) {
+		if (!bomsh_is_regular_file(subfiles[i], cmd->pwd, cmd->root)) {
+			bomsh_log_printf(4, "not regular file or not-existent subfile: %s\n", subfiles[i]);
+			continue;
+		}
+		infiles[num_infiles++] = strdup(subfiles[i]);
+	}
+	log_gcc_subfiles(4, infiles, num_infiles, "\nList of infiles:");
+
+	// Save the results in cmd_data struct
+	infiles[num_infiles] = NULL;
+	cmd->num_inputs = num_infiles;
+	cmd->input_files = infiles;
+	if (output_file) cmd->output_file = output_file;
+	free(subfiles);
+}
+
+static void bomsh_process_as_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
+{
+	if (pre_exec_mode) {
+		bomsh_log_string(3, "\npre-exec mode, get subfiles for GNU AS command\n");
+		cmd->ppid = bomsh_get_ppid(cmd->pid);
+		bomsh_cmd_data_t *parent_cmd = bomsh_get_cmd(cmd->ppid);
+		if (parent_cmd && is_cc_compiler( bomsh_basename(parent_cmd->path) )) {
+			// invoked by GCC
+			bomsh_log_printf(8, "Skip recording raw info, GNU AS command parent PID: %d prog: %s\n", cmd->ppid, parent_cmd->path);
+			cmd->skip_record_raw_info = 1;
+			return;
+		}
+		int num_skip_tokens = sizeof(gnu_as_skip_tokens)/sizeof(*gnu_as_skip_tokens);
+		bomsh_get_gnu_as_subfiles(cmd, (char **)gnu_as_skip_tokens, num_skip_tokens);
+		return;
+	} else {
+		if (cmd->skip_record_raw_info == 1) return;
+		bomsh_log_string(3, "\nrecord raw_info for GNU AS command after EXECVE syscall\n");
+		bomsh_record_raw_info(cmd);
+	}
+}
+
+static void bomsh_link_ld_with_gcc_cmd(bomsh_cmd_data_t *cmd, bomsh_cmd_data_t *gcc_cmd)
+{
+	bomsh_log_printf(8, "\nLinking the child ld pid %d and parent cc pid %d\n", cmd->pid, gcc_cmd->pid);
+	gcc_cmd->ld_cmd = cmd; // link this ld cmd to its parent GCC CMD
+	cmd->refcount ++; // delay the memory free of this ld cmd
+	bomsh_log_printf(8, "\nCmd memory refcount++ to %d for ld cmd pid %d\n", cmd->refcount, cmd->pid);
+	cmd->skip_record_raw_info = 2; // info only for this ld cmd
+}
+
+static void bomsh_process_ld_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
+{
+	if (pre_exec_mode) {
+		bomsh_log_string(3, "\npre-exec mode, get subfiles for LD command\n");
+		cmd->ppid = bomsh_get_ppid(cmd->pid);
+		bomsh_cmd_data_t *parent_cmd = bomsh_get_cmd(cmd->ppid);
+		if (parent_cmd) {
+			bomsh_log_printf(8, "ld command's parent PID: %d prog: %s\n", cmd->ppid, parent_cmd->path);
+		}
+		if (parent_cmd && is_cc_compiler(bomsh_basename(parent_cmd->path))) {
+			bomsh_link_ld_with_gcc_cmd(cmd, parent_cmd);
+		} else {
+			pid_t grand_parent_pid = bomsh_get_ppid(cmd->ppid);
+			bomsh_cmd_data_t *grand_parent_cmd = bomsh_get_cmd(grand_parent_pid);
+			if (grand_parent_cmd) {
+				char *path = grand_parent_cmd->path;
+				bomsh_log_printf(8, "ld command's grand parent PID: %d prog: %s\n", grand_parent_pid, path);
+				if (is_cc_compiler(bomsh_basename(path))) {
+					bomsh_link_ld_with_gcc_cmd(cmd, grand_parent_cmd);
+				}
+			}
+		}
+		bomsh_try_get_ld_subfiles(cmd);
+		return;
+	} else {
+		if (cmd->skip_record_raw_info == 1) return;
+		bomsh_log_string(3, "\nrecord raw_info for LD command after EXECVE syscall\n");
+		bomsh_record_raw_info(cmd);
+	}
+}
+
+/******** end of GNU assembler/linker as/ld command handling routines ********/
 
 static int is_eu_strip_command(char *name)
 {
@@ -2656,8 +2875,14 @@ static void bomsh_process_shell_command(bomsh_cmd_data_t *cmd, int pre_exec_mode
 	// cmd->path can be relative, like "scripts/sign-file" or "./scripts/sorttable" during kernel build
 	char *prog = cmd->path;
 	char *name = bomsh_basename(prog);
+	bomsh_log_printf(8, "\n*** Processing pre_exec: %d PID %d shell command: %s\n", pre_exec_mode, cmd->pid, prog);
+
 	if (is_cc_compiler(name)) {
 		bomsh_process_gcc_command(cmd, pre_exec_mode);
+	} else if (is_cc_linker(name)) {
+		bomsh_process_ld_command(cmd, pre_exec_mode);
+	} else if (g_bomsh_config.handle_gnu_as_cmd && strcmp(name, "as") == 0) {
+		bomsh_process_as_command(cmd, pre_exec_mode);
 	} else if (strcmp(name, "objcopy") == 0) {
 		bomsh_process_objcopy_command(cmd, pre_exec_mode);
 	} else if (is_ar_command(name)) {
