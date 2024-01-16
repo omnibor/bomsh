@@ -985,6 +985,17 @@ static int bomsh_run_child_prog(char **args, char *root, char *pwd)
 
 /******** gcc dependency file processing routines ********/
 
+// check if a string ends with a specific suffix.
+// the sep character is usually '-' or '.'
+static int bomsh_endswith(char *name, const char *suffix, char sep)
+{
+	char *p = strrchr(name, sep);
+	if (p) {
+		name = p + 1;
+	}
+	return strcmp(name, suffix) == 0;
+}
+
 /*
  * Check if it is gcc/cc installed at non-standard location.
  * like /usr/bin/x86_64-mageia-linux-gnu-gcc on Mageia
@@ -1010,7 +1021,6 @@ static int is_special_cc_compiler(char *prog)
 static int is_cc_compiler(char *prog)
 {
 	return is_special_cc_compiler(prog);
-	//return strcmp(prog, "/usr/bin/gcc") == 0;
 }
 
 // check if a token is in the watched list.
@@ -1024,8 +1034,7 @@ static const char *g_cc_linker_names[] = {"gold", "ld", "ld.bfd", "ld.gold", "ld
 
 static int is_cc_linker(char *name)
 {
-	int num_tokens = sizeof(g_cc_linker_names)/sizeof(*g_cc_linker_names);
-	return bsearch(&name, g_cc_linker_names, num_tokens, sizeof(char *), strcmp_comparator) != NULL;
+	return bomsh_path_endswith(name, g_cc_linker_names, sizeof(g_cc_linker_names)/sizeof(*g_cc_linker_names));
 }
 
 static int is_shared_library(char *afile)
@@ -1155,7 +1164,8 @@ static int bomsh_read_depend_file(char *depend_file, char ***depends, char **dep
 		p++;
 	}
 	bomsh_log_printf(22, "\nDone parsing depend_str, num_depends: %d\n", num_depends);
-	char **depend_array = (char **)malloc((num_depends + 1) * sizeof(char *));
+	// adding one more entry for piggy object handling, which adds one more input file
+	char **depend_array = (char **)malloc((num_depends + 2) * sizeof(char *));
 	memcpy(depend_array, bomsh_depend_array, num_depends * sizeof(char *));
 	depend_array[num_depends] = NULL;
 	*depends = depend_array;
@@ -1650,8 +1660,8 @@ static void bomsh_get_gcc_subfiles(bomsh_cmd_data_t *cmd, char **skip_token_list
 	// it is sufficient, since #dyn_libs < #subfiles + #libnames
 	char **dyn_libs = malloc((num_subfiles + num_libnames + 1) * sizeof(char *));
 	int num_infiles = 0;
-	// it is sufficient, since #infiles <= #subfiles + #libnames
-	char **infiles = malloc((num_subfiles + num_libnames + 1) * sizeof(char *));
+	// it is sufficient, since #infiles <= #subfiles + #libnames, adding one more for piggy object handling
+	char **infiles = malloc((num_subfiles + num_libnames + 2) * sizeof(char *));
 	int i;
 	log_gcc_subfiles(4, subfiles, num_subfiles, "\nList of subfiles:");
 	// save dynamic libraries and add other subfiles to infiles
@@ -1727,6 +1737,112 @@ static void bomsh_try_get_ld_subfiles(bomsh_cmd_data_t *cmd)
 	}
 	int num_skip_tokens = sizeof(linker_skip_tokens)/sizeof(*linker_skip_tokens);
 	bomsh_get_gcc_subfiles(cmd, (char **)linker_skip_tokens, num_skip_tokens);
+}
+
+/*
+ * Read the piggy.S file and return the included binary file vmlinux.bin
+ *
+[root@87e96394b5b5 linux]# cat ./arch/x86/boot/compressed/piggy.S
+.section ".rodata..compressed","a",@progbits
+.globl z_input_len
+z_input_len = 12656291
+.globl z_output_len
+z_output_len = 43225848
+.globl input_data, input_data_end
+input_data:
+.incbin "arch/x86/boot/compressed/vmlinux.bin.gz"
+input_data_end:
+.section ".rodata","a",@progbits
+.globl input_len
+input_len:
+	.long 12656291
+.globl output_len
+output_len:
+	.long 43225848
+[root@87e96394b5b5 linux]# cat ./arch/arm/boot/compressed/piggy.S
+	.section .piggydata, "a"
+	.globl	input_data
+input_data:
+	.incbin	"arch/arm/boot/compressed/piggy_data"
+	.globl	input_data_end
+input_data_end:
+[root@87e96394b5b5 linux]#
+ *
+ * Note, it can be either space character or tab character after ".incbin"
+ */
+static char * bomsh_read_piggy_S_file(bomsh_cmd_data_t *cmd, char *piggy_S_file)
+{
+	char buf[PATH_MAX];
+	char *afile = get_real_path2(cmd, piggy_S_file, buf);
+	char *content = bomsh_read_file(afile, NULL);
+	char *p = content;
+	char *inc_bin_str = NULL;
+	while (*p) {
+		char *token = p; p++;
+		if (strncmp(token, ".incbin", strlen(".incbin")) == 0) {
+			char *start = strchr(token + strlen(".incbin"), '"');
+			if (!start) break;
+			char *end = strchr(start + 1, '"');
+			if (!end) break;
+			*end = 0;
+			if (strcmp(end - 3, ".gz") == 0 || strcmp(end - 3, ".xz") == 0) {
+				// remove the .gz to get the real vmlinux_bin file
+				*(end - 3) = 0;
+			}
+			inc_bin_str = strdup(start + 1);
+			bomsh_log_printf(8, "\nFound vmlinux_bin: %s from piggy_S file: %s\n", inc_bin_str, piggy_S_file);
+			break;
+		}
+	}
+	free(content);
+	return inc_bin_str;
+}
+
+// find the piggy.S file from the list of input files
+static char * find_piggy_S_file(char *output_file, char **input_files)
+{
+	// output_file can be NULL, although input_files must not be NULL when reaching here
+	if (!output_file) {
+		return NULL;
+	}
+	char *outfile = bomsh_basename(output_file);
+	//if (strcmp(outfile, "piggy.o") && strcmp(outfile, "piggy.gzip.o")) {
+	if (strcmp(outfile, "piggy.o")) {
+		return NULL;
+	}
+	char **p = input_files;
+	while (*p) {
+		char *token = *p; p++;
+		char *name = bomsh_basename(token);
+		//if (strcmp(name, "piggy.S") == 0 || strcmp(name, "piggy.gzip.S") == 0) {
+		if (strcmp(name, "piggy.S") == 0) {
+			return token;
+		}
+	}
+	return NULL;
+}
+
+static void handle_linux_kernel_piggy_object(bomsh_cmd_data_t *cmd)
+{
+	if (cmd->depend_file) {
+		char *piggy_S_file = find_piggy_S_file(cmd->depends_outfile, cmd->depends_array);
+		if (!piggy_S_file) return;
+		bomsh_log_printf(8, "From depends_array input files, found piggy.S file: %s\n", piggy_S_file);
+		char *vmlinux_bin = bomsh_read_piggy_S_file(cmd, piggy_S_file);
+		if (vmlinux_bin) {
+			bomsh_log_printf(8, "Found vmlinux.bin file: %s\n", vmlinux_bin);
+			cmd->depends_array[cmd->depends_num++] = vmlinux_bin;
+		}
+	} else {
+		char *piggy_S_file = find_piggy_S_file(cmd->output_file, cmd->input_files);
+		if (!piggy_S_file) return;
+		bomsh_log_printf(8, "From argv input files, found piggy.S file: %s\n", piggy_S_file);
+		char *vmlinux_bin = bomsh_read_piggy_S_file(cmd, piggy_S_file);
+		if (vmlinux_bin) {
+			bomsh_log_printf(8, "Found vmlinux.bin file: %s\n", vmlinux_bin);
+			cmd->input_files[cmd->num_inputs++] = vmlinux_bin;
+		}
+	}
 }
 
 static void bomsh_process_gcc_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
@@ -1819,6 +1935,8 @@ static void bomsh_process_gcc_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 		bomsh_log_cmd_data(cmd, 24);
 		bomsh_log_printf(5, "After reading depend file %s\n", cmd->depend_file);
 	}
+	// Check if it is special piggy object from Linux kernel build
+	handle_linux_kernel_piggy_object(cmd);
 	bomsh_record_raw_info(cmd);
 }
 
@@ -2883,7 +3001,7 @@ static void bomsh_process_shell_command(bomsh_cmd_data_t *cmd, int pre_exec_mode
 		bomsh_process_ld_command(cmd, pre_exec_mode);
 	} else if (g_bomsh_config.handle_gnu_as_cmd && strcmp(name, "as") == 0) {
 		bomsh_process_as_command(cmd, pre_exec_mode);
-	} else if (strcmp(name, "objcopy") == 0) {
+	} else if (bomsh_endswith(name, "objcopy", '-')) {
 		bomsh_process_objcopy_command(cmd, pre_exec_mode);
 	} else if (is_ar_command(name)) {
 		bomsh_process_ar_command(cmd, pre_exec_mode);
