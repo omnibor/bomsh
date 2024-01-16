@@ -174,7 +174,7 @@ static const char *bomsh_special_progs[] = {"gcc", "cc", "g++", "clang", "clang+
 static const char *bomsh_special_pre_exec_progs[] = {"strip", "objcopy", "ranlib", "ar"} ;
 
 // check if a path ends with a specific suffix, progs array must be sorted
-static int bomsh_path_endswith(const char *path, const char **progs, int num_progs)
+int bomsh_path_endswith(const char *path, const char **progs, int num_progs)
 {
 	char *string = strrchr(path, '-');
 	if (!string) {

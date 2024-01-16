@@ -91,4 +91,7 @@ extern char * bomsh_read_file(const char *filepath, long *read_len);
 // read /proc files like /proc/pid/stat, /proc/pid/cmdline, etc.
 extern char * bomsh_read_proc_file(const char *filepath, long *read_len);
 
+// check if a path ends with a specific suffix, progs array must be sorted
+int bomsh_path_endswith(const char *path, const char **progs, int num_progs);
+
 #endif /* !BOMSH_CONFIG_H */

@@ -531,6 +531,19 @@ def update_hash_tree_node_hashtree(db, ahash, outfile, infiles, argv_str, pid=''
     return afile_db["hash_tree"]
 
 
+def any_infile_is_same_as_outfile(outfile_checksum, infiles):
+    """
+    Is there any input file which has the same checksum as the outfile?
+
+    :param outfile_checksum: the checksum of the outfile
+    :param infiles: the list of (checksum, file_path) for input files
+    """
+    for infile in infiles:
+        if infile[0] == outfile_checksum:
+            return True
+    return False
+
+
 def update_hash_tree_db_and_gitbom(db, record):
     """
     Update the hash tree DB and the OmniBOR doc for an output file.
@@ -573,9 +586,9 @@ def update_hash_tree_db_and_gitbom(db, record):
         if not ahash:
             continue
         update_hash_tree_node_filepath(db, ahash, afile)
-    if len(infiles) == 1 and checksum == infiles[0][0]:
-        # input and output file have the exact same checksum, skip it
-        verbose("Warning: unary transform of same checksum, skip updating hash tree DB.")
+    if any_infile_is_same_as_outfile(checksum, infiles):
+        # There is at least one input file which has the the exact same checksum as outfile, skip it
+        verbose("Warning: transform of same checksum, skip updating hash tree DB.")
         return
     verbose("Updating hash tree DB for outfile " + outfile)
     argv_str = record["build_cmd"]
