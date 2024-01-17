@@ -19,6 +19,9 @@ typedef struct bomsh_cmddata {
 	pid_t ppid; // parent pid, for GNU AS and LD cmd only
 	int refcount; // reference count for this struct, for delaying memory free until the last one
 
+	// if flags is 1, then output_file is allocated memory and needs to be freed.
+	int flags;
+
 	// if skip_record_raw_info is 1, then skip recording raw info for this cmd.
 	// if skip_record_raw_info is 2, then record raw info as information-only.
 	int skip_record_raw_info;
