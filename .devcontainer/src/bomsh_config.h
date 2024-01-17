@@ -40,6 +40,9 @@ struct bomsh_configs {
 	// handle the GNU AS command, which is ignored by default.
 	int handle_gnu_as_cmd;
 
+	// handle the dpkg-deb and rpmbuild command, which is ignored by default.
+	int handle_pkg_build_cmd;
+
 	// by default, we check prog R_OK|X_OK permission before recording a command.
 	// the below flag will turn off/on this permission check
 	int skip_checking_prog_access;

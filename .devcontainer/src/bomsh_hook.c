@@ -348,7 +348,11 @@ static void bomsh_free_cmd(bomsh_cmd_data_t *cmd)
 	if (cmd->ld_cmd) {
 		bomsh_free_cmd(cmd->ld_cmd);
 	}
-	// no need to free output_file, since output_file is not allocated.
+	// Usually there is no need to free output_file, since output_file is not allocated.
+	// but for some commands like dpkg_deb, output_file is allocated memory thus needs to be freed
+	if (cmd->flags == 1 && cmd->output_file) {
+		free(cmd->output_file);
+	}
 	if (cmd->pwd) {
 		free(cmd->pwd);
 	}
@@ -2983,6 +2987,160 @@ static int is_rpmsign_command(bomsh_cmd_data_t *cmd, char *name)
 
 /******** end of objcopy/chrpath, ... command handling routines ********/
 
+/******** dpkg-deb command handling routines ********/
+
+#include <dirent.h>
+
+// find all regular files in a directory ADIR.
+// FILELIST must be allocated with some initial size of LIST_SIZE, and
+// NUM_FILES must keep track of the number of found files.
+static void find_all_files_in_dir(char *adir, char ***filelist, int *list_size, int *num_files)
+{
+	char path[1000];
+	struct dirent *dp;
+	DIR *dir = opendir(adir);
+	while ((dp = readdir(dir)) != NULL) {
+		if (strcmp(dp->d_name, ".") != 0 && strcmp(dp->d_name, "..") != 0) {
+			sprintf(path, "%s/%s", adir, dp->d_name);
+			if(dp->d_type == DT_DIR) { // a directory, recursively find files
+				find_all_files_in_dir(path, filelist, list_size, num_files);
+			} else if (dp->d_type == DT_REG) { // a regular file, save it to file list
+				char **afiles = *filelist;
+				afiles[*num_files] = strdup(path);
+				(*num_files) ++;
+				if (*num_files >= *list_size) { // auto grow memory if necessary
+					(*list_size) *= 2;
+					*filelist = realloc(*filelist, (*list_size) * sizeof(char *));
+				}
+			} // other entries, like symbolic files are ignored
+		}
+	}
+	closedir(dir);
+}
+
+// read the control file and extract (name, version, arch) info
+static void read_name_ver_arch_from_deb_control(char *control_file, char **name, char **version, char **arch)
+{
+	char *content = bomsh_read_file(control_file, NULL);
+	bomsh_log_printf(22, "\nReading DEBIAN control_file: %s the whole control_str:\n%s\n", control_file, content);
+	if (!content) return;
+
+	char delim[] = "\n";
+	char *p = NULL;
+	char *ptr = strtok(content, delim);
+	while(ptr != NULL)
+	{
+		if (strncmp(ptr, "Package:", strlen("Package:")) == 0) {
+			p = strrchr(ptr, ' ');
+			if (p && name) {
+				*name = strdup(p+1);
+			}
+		} else if (strncmp(ptr, "Version:", strlen("Version:")) == 0) {
+			p = strrchr(ptr, ' ');
+			if (p && version) {
+				*version = strdup(p+1);
+			}
+		} else if (strncmp(ptr, "Architecture:", strlen("Architecture:")) == 0) {
+			p = strrchr(ptr, ' ');
+			if (p && arch) {
+				*arch = strdup(p+1);
+			}
+		}
+		ptr = strtok(NULL, delim);
+	}
+	free(content);
+}
+
+// cmdline format: dpkg-deb -b binary-directory [archive|directory]
+// example: dpkg-deb --build debian/openosc ..
+// Only the simple "dpkg-deb --build debian/openosc" or "dpkg-deb -b debian/openosc .." format is supported.
+static void get_all_subfiles_in_dpkg_deb_cmdline(bomsh_cmd_data_t *cmd)
+{
+	int found_build_opt = 0;
+	int new_token_num = 0;
+	char *debdir = NULL; // the debian directory which contains all the input files
+	char *output = NULL; // either the output archive file or the output directory
+	char **p = cmd->argv; p++; // start from argv[1]
+	while (*p) { // Parse argv to find the build option and the debian-dir
+		char *token = *p; p++;
+		if (strcmp(token, "-b") == 0 || strcmp(token, "--build") == 0) {
+			found_build_opt = 1;
+		} else if (token[0] != '-') {
+			new_token_num++;
+			if (new_token_num == 1) {
+				debdir = token;
+			} else if (new_token_num == 2) {
+				output = token;
+			}
+		}
+	}
+	if (!found_build_opt || !debdir) { // not dpkg-deb build command, do nothing
+		return;
+	}
+
+	char buf[PATH_MAX];
+	// the debian control file is located at the fixed location inside debdir
+	strcpy(buf, debdir);
+	strcat(buf, "/DEBIAN/control");
+	if (!bomsh_check_permission(buf, cmd->pwd, cmd->root, F_OK)) {
+		bomsh_log_printf(8, " For dpkg-deb, not-existent debian control file: %s\n", buf);
+		return;
+	}
+	if (!output) { // this is "dpkg-deb --build debian/openosc" cmd
+		// the ouput archive is debdir.deb
+		strcpy(buf, debdir);
+		strcat(buf, ".deb");
+		// should we check existence of output_file? No, since it does not exist yet in pre-exec mode
+		cmd->output_file = strdup(buf);
+	} else { // this is "dpkg-deb -b debian/openosc .." cmd
+		if (bomsh_is_regular_file(output, cmd->pwd, cmd->root)) { // this is a file, then it will be the output archive
+			cmd->output_file = strdup(output);
+		} else { // this is a dir, then it will be dir/name_version_arch.deb output archive
+			char buf2[PATH_MAX];
+			char *control_file = get_real_path2(cmd, buf, buf2);
+			char *name = NULL;
+			char *version = NULL;
+			char *arch = NULL;
+			read_name_ver_arch_from_deb_control(control_file, &name, &version, &arch);
+			if (!(name && version && arch)) {
+				// not well-formated control file, ignore it
+				bomsh_log_printf(7, "Warning: failed to read (name, version, arch) from control file: %s\n", buf);
+				return;
+			}
+			// output_file = os.path.join(output_file, name + "_" + version + "_" + arch + ".deb")
+			sprintf(buf, "%s/%s_%s_%s.deb", output, name, version, arch);
+			cmd->output_file = strdup(buf);
+			free(name); free(version); free(arch);
+		}
+	}
+
+	// Find all the input files from debian directory
+	int array_num = 0;
+	int array_size = 100;
+	char **array = malloc( array_size * sizeof(char *) );
+	char *adir = get_real_path2(cmd, debdir, buf);
+	find_all_files_in_dir(adir, &array, &array_size, &array_num);
+	cmd->num_inputs = array_num;
+	array[array_num] = NULL;
+	cmd->input_files = array;
+	cmd->flags = 1; // to indicate that output_file is allocated and needs to be freed
+}
+
+// Process the debian package build command
+static void bomsh_process_dpkg_deb_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
+{
+	if (pre_exec_mode) {
+		bomsh_log_string(3, "\npre-exec mode, get subfiles for dpkg_deb command\n");
+		get_all_subfiles_in_dpkg_deb_cmdline(cmd);
+	} else {
+		if (cmd->skip_record_raw_info == 1) return;
+		bomsh_log_string(3, "\nrecord raw_info for dpkg_deb command after EXECVE syscall\n");
+		bomsh_record_raw_info(cmd);
+	}
+}
+
+/******** end of dpkg-deb command handling routines ********/
+
 /******** top level command handling routines ********/
 
 // main routine to handle all recorded shell commands.
@@ -3019,6 +3177,8 @@ static void bomsh_process_shell_command(bomsh_cmd_data_t *cmd, int pre_exec_mode
 		bomsh_process_strip_like_command(cmd, pre_exec_mode, 2);
 	} else if (strcmp(name, "sepdebugcrcfix") == 0) {
 		bomsh_process_sepdebugcrcfix_command(cmd, pre_exec_mode);
+	} else if (g_bomsh_config.handle_pkg_build_cmd && strcmp(name, "dpkg-deb") == 0) {
+		bomsh_process_dpkg_deb_command(cmd, pre_exec_mode);
 	} else if (strcmp(prog, "arch/x86/boot/tools/build") == 0) {
 		bomsh_process_bzimage_build_command(cmd, pre_exec_mode);
 	} else if (is_rpmsign_command(cmd, name)) {
