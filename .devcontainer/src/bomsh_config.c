@@ -178,7 +178,7 @@ int bomsh_path_endswith(const char *path, const char **progs, int num_progs)
 {
 	char *string = strrchr(path, '-');
 	if (!string) {
-		return 0;
+		string = (char *)(path - 1);
 	}
 	return bomsh_is_program_inlist(string + 1, (char **)progs, num_progs);
 }

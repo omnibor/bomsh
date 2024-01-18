@@ -257,6 +257,21 @@ def save_gitbom_doc(gitbom_doc_file, destdir, checksum=''):
     os.system(cmd)
 
 
+def remove_adjacent_duplicates(lines):
+    """
+    Remove adjacent duplicate lines.
+    :param lines: a sorted list of lines, there should be no empty string in the list
+    returns a new list, with duplicate lines removed
+    """
+    new_lines = []
+    prev_line = ''
+    for line in lines:
+        if line != prev_line:
+            new_lines.append(line)
+            prev_line = line
+    return new_lines
+
+
 def create_gitbom_doc_text(infiles, db):
     """
     Create the OmniBOR doc text contents
@@ -277,6 +292,8 @@ def create_gitbom_doc_text(infiles, db):
             verbose("Info: non-leaf blob " + ahash + " has prune attribute", LEVEL_2)
         lines.append(line)
     lines.sort()
+    if not args.keep_duplicate_lines_in_omnibor_doc:
+        lines = remove_adjacent_duplicates(lines)
     return '\n'.join(lines) + '\n'
 
 
@@ -1012,6 +1029,9 @@ def rtd_parse_options():
     parser.add_argument("--embed_bom_section",
                     action = "store_true",
                     help = "embed the .bom ELF section or archive entry")
+    parser.add_argument("--keep_duplicate_lines_in_omnibor_doc",
+                    action = "store_true",
+                    help = "even if there are duplicate lines in omnibor_doc, keep them")
     parser.add_argument("-v", "--verbose",
                     action = "count",
                     default = 0,
