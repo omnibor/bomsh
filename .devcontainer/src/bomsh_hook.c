@@ -1465,7 +1465,11 @@ static void bomsh_record_raw_info2_infile(bomsh_cmd_data_t *cmd, char *outfile, 
 		return;
 	}
 	bomsh_record_afile2(cmd, outfile, "\noutfile: ", hash_alg, ahash, level);
-	bomsh_record_afile2(cmd, outfile, "\ninfile: ", hash_alg, in_hash, level);
+	if (in_hash[0]) {
+		// patch cmd may have /dev/null, then infile does not exist yet during pre-exec mode.
+		// for this patch cmd case, in_hash is empty string, and we can skip it.
+		bomsh_record_afile2(cmd, outfile, "\ninfile: ", hash_alg, in_hash, level);
+	}
 	if (extra_infiles) {
 		bomsh_record_files_array(cmd, extra_infiles, "\ninfile: ", hash_alg, ahash, level);
 	}
@@ -1993,6 +1997,18 @@ static void get_hash_of_infiles(bomsh_cmd_data_t *cmd)
 		char buf[PATH_MAX];
 		char *afile = cmd->input_files[i];
 		char *path = get_real_path2(cmd, afile, buf);
+		if( access( path, F_OK) != 0 ) {
+			// use empty "" hash string for non-existent infile, which is not yet created at pre-exec time
+			if (hash_alg & 2) {
+				sha256[i] = sha256_array + i * (GITOID_LENGTH_SHA256 * 2 + 1);
+				sha256[i][0] = 0;
+			}
+			if (hash_alg != 2) {
+				sha1[i] = sha1_array + i * (GITOID_LENGTH_SHA1 * 2 + 1);
+				sha1[i][0] = 0;
+			}
+			continue;
+		}
 		if (hash_alg & 2) {
 			sha256[i] = sha256_array + i * (GITOID_LENGTH_SHA256 * 2 + 1);
 			sha256[i][GITOID_LENGTH_SHA256 * 2] = 0;
@@ -2360,7 +2376,7 @@ static void bomsh_process_strip_like_command(bomsh_cmd_data_t *cmd, int pre_exec
 
 /******** cat/patch command handling routines ********/
 
-#define BOMSH_PIPE_CMDS_SIZE 10
+#define BOMSH_PIPE_CMDS_SIZE 20
 
 // list of cmds with active pipes
 static bomsh_cmd_data_t *bomsh_pipe_cmds[2][BOMSH_PIPE_CMDS_SIZE];
@@ -2417,11 +2433,12 @@ static bomsh_cmd_data_t *bomsh_find_match_pipe_cmd(bomsh_cmd_data_t *cmd, int in
 }
 
 // is it the start of a patch line that contains the file name to patch?
-static int is_leading_token_for_patch_file_line(char *p)
+static int is_leading_token_for_patch_file_line(char *p, char *patch_str)
 {
-	return (*p == '-' && *(p+1) == '-' && *(p+2) == '-' && *(p+3) == ' ') ||
-		(*p == '+' && *(p+1) == '+' && *(p+2) == '+' && *(p+3) == ' ') ||
-		(*p == '*' && *(p+1) == '*' && *(p+2) == '*' && *(p+3) == ' ');
+	return (*(p-1) == '\n' || p == patch_str) &&
+		((*p == '-' && *(p+1) == '-' && *(p+2) == '-') ||
+		 (*p == '+' && *(p+1) == '+' && *(p+2) == '+') ||
+		 (*p == '*' && *(p+1) == '*' && *(p+2) == '*')) && *(p+3) == ' ';
 }
 
 // read patch file and return the list of files to patch.
@@ -2441,32 +2458,22 @@ static int bomsh_read_patch_file(bomsh_cmd_data_t *cmd, char *patch_file, int st
 	// record the start position and length of each file
 	char *afiles[200]; int alens[200];
 	while (*p) {
-		if (is_leading_token_for_patch_file_line(p)) {
+		if (is_leading_token_for_patch_file_line(p, patch_str)) {
 			p += 4;
 			char *q = p;
 			int strips = strip_num;
-			char *space = NULL;
-			while (*q != '\t' && *q != '\n') { // find the ending position
-				if (*q == ' ') space = q;
+			while (*q != '\t' && *q != '\n' && *q != ' ') { // find the ending position
 				if (*q == '/') {
 					strips --;
 					if (!strips) p = q + 1; // found the start of the file
 				}
 				q++;
 			}
-			int len = (int)(q - p);
-			if (space) { // if there is space character, then this is invalid file
-				if (bomsh_verbose > 10) {
-					memcpy(buf, p, len); buf[len] = 0;
-					bomsh_log_printf(10, "found invalid file %s\n", buf);
-				}
-				p = q; continue;
-			} else if (bomsh_verbose > 10) {
-				memcpy(buf, p, len); buf[len] = 0;
-				bomsh_log_printf(10, "found valid file %s\n", buf);
+			if (q == p) { // empty file path
+				p++; continue;
 			}
 			afiles[num_files] = p;  // start position of the file
-			alens[num_files] = len; // the string length of the file
+			alens[num_files] = (int)(q - p); // the string length of the file
 			num_files ++;
 			if (num_files >= 200) {
 				bomsh_log_printf(8, "Warning: reached maximum of 200 files to patch in patch file: %s\n", patch_file);
@@ -2512,6 +2519,18 @@ static int bomsh_read_patch_file(bomsh_cmd_data_t *cmd, char *patch_file, int st
 			}
 		}
 		memcpy(buf, cfile, clen); buf[clen] = 0;
+#if 0
+		// if afile is /dev/null, then bfile does not exist yet before applying the patch
+		if (!bomsh_check_permission(buf, cmd->pwd, cmd->root, F_OK)) {
+			bomsh_log_printf(3, "Warning: the %d-th file to patch does not exist: %s\n", i, buf);
+			// free all allocated strings
+			for (int j=0; j<i; j++) {
+				free(bfiles[j]);
+			}
+			free(bfiles);
+			return 0;
+		}
+#endif
 		bfiles[i] = strdup(buf);
 		bomsh_log_printf(8, "selected file to patch: %s\n", buf);
 	}
