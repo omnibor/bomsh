@@ -1292,6 +1292,10 @@ static char * extract_depend_file_from_cc_argv(char **argv)
  */
 static void bomsh_get_hash(char *afile, int hash_alg, char *ahash)
 {
+	if (g_bomsh_config.hash_alg == 100) { // use empty hash for this special hash_alg of 100
+		ahash[0] = 0;
+		return;
+	}
 	if (hash_alg == 2) {
 		bomsh_get_omnibor_sha256_hash(afile, ahash);
 	} else {
@@ -1302,6 +1306,10 @@ static void bomsh_get_hash(char *afile, int hash_alg, char *ahash)
 // get the hash for afile, which is usually relative path
 static void bomsh_cmd_get_hash(bomsh_cmd_data_t *cmd, char *afile, int hash_alg, char *ahash)
 {
+	if (g_bomsh_config.hash_alg == 100) { // use empty hash for this special hash_alg of 100
+		ahash[0] = 0;
+		return;
+	}
 	char path[PATH_MAX];
 	char *bfile = get_real_path2(cmd, afile, path);
 	bomsh_get_hash(bfile, hash_alg, ahash);
@@ -1880,6 +1888,7 @@ static void handle_linux_kernel_piggy_object(bomsh_cmd_data_t *cmd)
 		if (vmlinux_bin) {
 			bomsh_log_printf(8, "Found vmlinux.bin file: %s\n", vmlinux_bin);
 			cmd->depends_array[cmd->depends_num++] = vmlinux_bin;
+			cmd->depends_array[cmd->depends_num] = NULL;
 		}
 	} else {
 		char *piggy_S_file = find_piggy_S_file(cmd->output_file, cmd->input_files);
@@ -1889,6 +1898,7 @@ static void handle_linux_kernel_piggy_object(bomsh_cmd_data_t *cmd)
 		if (vmlinux_bin) {
 			bomsh_log_printf(8, "Found vmlinux.bin file: %s\n", vmlinux_bin);
 			cmd->input_files[cmd->num_inputs++] = vmlinux_bin;
+			cmd->input_files[cmd->num_inputs] = NULL;
 		}
 	}
 }
@@ -2099,7 +2109,12 @@ static void get_hash_of_infiles(bomsh_cmd_data_t *cmd)
 		if (hash_alg != 2) {
 			sha1[i] = sha1_array + i * (GITOID_LENGTH_SHA1 * 2 + 1);
 			sha1[i][GITOID_LENGTH_SHA1 * 2] = 0;
-			bomsh_get_omnibor_sha1_hash(path, sha1[i]);
+			if (g_bomsh_config.hash_alg == 100) { // use empty hash for this special hash_alg of 100
+				// Note 100 & 2 = 0, so it won't affect the above sha256 array
+				sha1[i][0] = 0;
+			} else {
+				bomsh_get_omnibor_sha1_hash(path, sha1[i]);
+			}
 		}
 	}
 }
