@@ -140,7 +140,7 @@ static void bomsh_modify_param_buf(char *param_buf, char *new_addr)
 static void dump_new_param_buf(char *param_buf, int buf_size)
 {
 	if (!g_bomsh_global.logfile) { return ; }
-	int level = 5;
+	int level = 9;
 	bomsh_log_printf(level, "\nDump new param buf at %p size: %d\n", param_buf, buf_size);
 	char **params = (char **)param_buf;
 	while (*params) {
@@ -164,6 +164,7 @@ static void dump_new_param_buf(char *param_buf, int buf_size)
 // modify/instrument argv of existing execve syscall, to obtain gcc dependency
 static void bomsh_execve_instrument_for_dependency(bomsh_cmd_data_t * cmd)
 {
+	int level = 9;
 	struct tcb *tcp = cmd->tcp;
 	int buf_size = 0;
 	char *new_param_buf = bomsh_create_param_buf(cmd, &buf_size);
@@ -179,7 +180,7 @@ static void bomsh_execve_instrument_for_dependency(bomsh_cmd_data_t * cmd)
 	stack_addr -= 8192 + new_buf_size;
 	//stack_addr -= PATH_MAX + new_buf_size; // PATH_MAX is 4096, is usually sufficient
 	//stack_addr -= 128 + PATH_MAX;  // 128 is insufficient for red zone
-	bomsh_log_printf(4, "stack_addr: %p new_param_buf: %p buf_size: %d new_size: %d\n", stack_addr, new_param_buf, buf_size, new_buf_size);
+	bomsh_log_printf(level, "stack_addr: %p new_param_buf: %p buf_size: %d new_size: %d\n", stack_addr, new_param_buf, buf_size, new_buf_size);
 
 	//bomsh_log_string(4, "will now write new_param_buf to tracee stack\n");
 	// before writing to tracee memory, modify array to point to correct stack address in tracee process
@@ -189,17 +190,17 @@ static void bomsh_execve_instrument_for_dependency(bomsh_cmd_data_t * cmd)
 	// writing new_param_buf content to tracee process's stack memory
 	unsigned int nwrite = upoken(tcp, (kernel_ulong_t)stack_addr, new_buf_size, new_param_buf);
 	if (nwrite) {
-		bomsh_log_printf(4, "Succeeded to write upoken for stack nwrite: %d\n", nwrite);
+		bomsh_log_printf(level, "Succeeded to write upoken for stack nwrite: %d\n", nwrite);
 	} else {
-		bomsh_log_string(4, "Failed to write upoken for stack\n");
+		bomsh_log_string(level, "Failed to write upoken for stack\n");
 	}
 	if (bomsh_verbose > 10) {
 		// read back to make sure correct content is written to tracee memory
 		char *read_buf = malloc(new_buf_size);
 		if (umoven(tcp, (kernel_ulong_t)stack_addr, new_buf_size, read_buf)) {
-			bomsh_log_string(4, "Failed to read-back umoven for stack\n");
+			bomsh_log_string(level, "Failed to read-back umoven for stack\n");
 		} else {
-			bomsh_log_string(4, "Succeeded to read-back umoven for stack\n");
+			bomsh_log_string(level, "Succeeded to read-back umoven for stack\n");
 		}
 		// if insufficient to skip the stack red zone, then reading back does not work
 		dump_new_param_buf(read_buf, buf_size);
@@ -213,7 +214,7 @@ static void bomsh_execve_instrument_for_dependency(bomsh_cmd_data_t * cmd)
 	if (bomsh_verbose > 10) {
 		// read back to make sure correct value is written to tracee memory
 		char *myword5 = (char *)ptrace(PTRACE_PEEKUSER, tcp->pid, wordsize*RSI, NULL);
-		bomsh_log_printf(4, "\n=====execve stack_addr changed RSI register value: %p expected: %p\n", myword5, stack_addr);
+		bomsh_log_printf(level, "\n=====execve stack_addr changed RSI register value: %p expected: %p\n", myword5, stack_addr);
 	}
 	free(new_param_buf);
 }
@@ -417,6 +418,13 @@ static void bomsh_log_cmd_data(bomsh_cmd_data_t *cmd, int level)
 {
 	if (bomsh_verbose < level) return;
 	bomsh_log_printf(level, "\nStart of cmd_data, pid: %d pwd: %s root: %s path: %s", cmd->pid, cmd->pwd, cmd->root, cmd->path);
+	bomsh_log_string_array(level, cmd->argv, (char *)" ", (char *)"\nargv cmdline:", NULL);
+	if (cmd->stdin_file) {
+		bomsh_log_printf(level, "\nstdin_file: %s", cmd->stdin_file);
+	}
+	if (cmd->stdout_file) {
+		bomsh_log_printf(level, "\nstdout_file: %s", cmd->stdout_file);
+	}
 	if (cmd->ppid) {
 		bomsh_log_printf(level, "\nparent PID: %d", cmd->ppid);
 	}
@@ -428,13 +436,6 @@ static void bomsh_log_cmd_data(bomsh_cmd_data_t *cmd, int level)
 		bomsh_log_printf(level, "\ndepends_outfile: %s", cmd->depends_outfile);
 		bomsh_log_printf(level, "\ndepends_outfile_exist: %d", cmd->depends_outfile_exist);
 	}
-	if (cmd->stdin_file) {
-		bomsh_log_printf(level, "\nstdin_file: %s", cmd->stdin_file);
-	}
-	if (cmd->stdout_file) {
-		bomsh_log_printf(level, "\nstdout_file: %s", cmd->stdout_file);
-	}
-	bomsh_log_string_array(level, cmd->argv, (char *)" ", (char *)"\nargv cmdline:", NULL);
 	bomsh_log_printf(level, "\nrefcount: %d", cmd->refcount);
 	bomsh_log_printf(level, "\nskip record raw info: %d", cmd->skip_record_raw_info);
 	if (cmd->output_file) {
@@ -864,6 +865,10 @@ static void bomsh_prehook_program(bomsh_cmd_data_t *cmd);
 // return value is ignored in Bomtrace3
 int bomsh_record_command(struct tcb *tcp, const unsigned int index)
 {
+	if (g_bomsh_config.trace_execve_cmd_only == 1) {
+		bomsh_log_printf(2, "\n====Tracing only, record_command pid %d before EXECVE syscall", tcp->pid);
+		return 0;
+	}
 	char *path = copy_path(tcp, tcp->u_arg[index + 0]);
         if (!path) {
                 return 0;
@@ -1000,6 +1005,18 @@ static int bomsh_endswith(char *name, const char *suffix, char sep)
 	return strcmp(name, suffix) == 0;
 }
 
+// check if a string is all decimal digits
+static int is_all_digits(char *p)
+{
+	while (*p) {
+		if (*p < '0' || *p > '9') {
+			return 0;
+		}
+		p++;
+	}
+	return 1;
+}
+
 /*
  * Check if it is gcc/cc installed at non-standard location.
  * like /usr/bin/x86_64-mageia-linux-gnu-gcc on Mageia
@@ -1017,7 +1034,7 @@ static int is_special_cc_compiler(char *prog)
 			 (prog[len-7] == 'c' && prog[len-6] == 'l' && prog[len-5] == 'a' && prog[len-4] == 'n')))
 		// || (strncmp(prog + len - 7, "clang++", 7) == 0)
 		|| (strncmp(prog + len - 5, "clang", 5) == 0)
-		|| (strncmp(prog, "clang", 5) == 0);
+		|| (strncmp(prog, "clang-", 6) == 0 && is_all_digits(prog + 6));
 		//|| (strncmp(bomsh_basename(prog), "clang", 5) == 0);
 	//return strncmp(prog + len - 3, "gcc") == 0;
 }
@@ -1050,7 +1067,7 @@ static int is_shared_library(char *afile)
 // Get the output file in argv
 static char * get_outfile_in_argv(char **argv)
 {
-	char **p = argv;
+	char **p = argv; p++; // start from argv[1]
 	while (*p) {
 		char *token = *p; p++; // p points to next token already
 		if (strncmp(token, "-o", 2) == 0) {
@@ -1068,7 +1085,7 @@ static char * get_outfile_in_argv(char **argv)
 // Is there a token in argv which is exactly the given TOKEN
 static int is_token_in_argv(char **argv, const char *token)
 {
-	char **p = argv;
+	char **p = argv; p++; // start from argv[1]
 	while (*p) {
 		if (strcmp(*p, token) == 0) {
 			return 1;
@@ -1081,7 +1098,7 @@ static int is_token_in_argv(char **argv, const char *token)
 // Is there a token in argv which starts with a specific PREFIX
 static int is_token_prefix_in_argv(char **argv, const char *prefix)
 {
-	char **p = argv;
+	char **p = argv; p++; // start from argv[1]
 	int len = strlen(prefix);
 	while (*p) {
 		if (strncmp(*p, prefix, len) == 0) {
@@ -1092,6 +1109,13 @@ static int is_token_prefix_in_argv(char **argv, const char *prefix)
 	return 0;
 }
 
+// whether gcc generates dependency rule, that is, with some -M/-MM/-Mx option
+static int gcc_generates_dependency_rule(char **argv)
+{
+	return is_token_prefix_in_argv(argv, "-M");
+}
+
+#if 0
 // Whether the gcc command compiles from C/C++ source files to intermediate .o/.s/.E only
 static int gcc_is_compile_only(char **argv)
 {
@@ -1103,6 +1127,7 @@ static int gcc_is_compile_only(char **argv)
 	}
 	return 0;
 }
+#endif
 
 // read depend_file and put the list of depend files in the depends array.
 // depend_buf contains the contents of depend_file, with NULL-terminated file paths.
@@ -1239,7 +1264,7 @@ static void bomsh_invoke_subprocess_for_dependency(bomsh_cmd_data_t *cmd)
 // find the depend_file from gcc argv string array
 static char * extract_depend_file_from_cc_argv(char **argv)
 {
-	char **p = argv;
+	char **p = argv; p++; // start from argv[1]
 	while (*p) {
 		char *token = *p;
 		if (strncmp(token, "-Wp,-MD,", 8) == 0) {
@@ -1382,6 +1407,14 @@ static void bomsh_record_out_infiles(bomsh_cmd_data_t *cmd, int hash_alg, char *
 	if (cmd->depend_file) {
 		// if we have depend_file, then it must be gcc compilation
 		bomsh_record_files_from_depfile(cmd, hash_alg, ahash, level);
+		if (cmd->ld_cmd) {
+			bomsh_cmd_data_t *ld_cmd = cmd->ld_cmd;
+			bomsh_log_printf(8, "GCC cmd pid %d will add LD cmd pid %d inputs as extra inputs\n", cmd->pid, ld_cmd->pid);
+			if (ld_cmd->input_files) { // record ld_cmd's inputs too
+				bomsh_record_infiles_array(ld_cmd, ld_cmd->input_files, hash_alg, ahash, level);
+				return;
+			}
+		}
 	} else {
 		bomsh_record_afile(cmd, cmd->output_file, "\noutfile: ", hash_alg, ahash, level);
 		if (cmd->ld_cmd) {
@@ -1435,8 +1468,14 @@ static void bomsh_record_raw_info(bomsh_cmd_data_t *cmd)
 	if (!g_bomsh_global.raw_logfile) {
 		return;
 	}
-	if (!cmd->output_file && !cmd->depend_file) {
+	//if (!cmd->output_file && !cmd->depend_file) {
+	if (!cmd->output_file) { // even with "-MF" option, we still get outfile from argv first
 		// if -MF option already exists in "gcc -c" cmd, then output_file is NULL, while depend_file is not.
+		return;
+	}
+	//if (cmd->output_file && !bomsh_check_permission(cmd->output_file, cmd->pwd, cmd->root, F_OK)) {
+	if (!bomsh_check_permission(cmd->output_file, cmd->pwd, cmd->root, F_OK)) {
+		bomsh_log_printf(8, "\nWarning: not-existent output file to record raw info: %s\n", cmd->output_file);
 		return;
 	}
 	// a buffer used for both SHA1 and SHA256 computation
@@ -1564,6 +1603,7 @@ static void log_gcc_subfiles(int level, char **libs, int num_libs, const char *l
 static void bomsh_get_gcc_subfiles(bomsh_cmd_data_t *cmd, char **skip_token_list, int num_tokens)
 {
 	char *output_file = NULL;
+	int level = 7;
 
 	char *system_library_paths[] = {(char *)"/usr/lib64", NULL};
 	int num_libpaths = 0;
@@ -1603,7 +1643,7 @@ static void bomsh_get_gcc_subfiles(bomsh_cmd_data_t *cmd, char **skip_token_list
 				return;
 			}
 #endif
-			bomsh_log_printf(4, "found output file %s\n", output_file);
+			bomsh_log_printf(level, "found output file %s\n", output_file);
 			continue;
 		}
 #endif
@@ -1617,10 +1657,10 @@ static void bomsh_get_gcc_subfiles(bomsh_cmd_data_t *cmd, char **skip_token_list
 			}
 			int len = strlen(token);
 			if (len > 2) {
-				bomsh_log_printf(4, "found library path %s\n", token + 2);
+				bomsh_log_printf(level, "found library path %s\n", token + 2);
 				library_paths[num_libpaths++] = token + 2;
 			} else {
-				bomsh_log_printf(4, "found library path %s\n", *p);
+				bomsh_log_printf(level, "found library path %s\n", *p);
 				// p already points to next token, which is output file
 				library_paths[num_libpaths++] = *p;
 				p++; // move to next token
@@ -1637,10 +1677,10 @@ static void bomsh_get_gcc_subfiles(bomsh_cmd_data_t *cmd, char **skip_token_list
 			}
 			int len = strlen(token);
 			if (len > 2) {
-				bomsh_log_printf(4, "found library name %s\n", token + 2);
+				bomsh_log_printf(level, "found library name %s\n", token + 2);
 				library_names[num_libnames++] = token + 2;
 			} else {
-				bomsh_log_printf(4, "found library name %s\n", *p);
+				bomsh_log_printf(level, "found library name %s\n", *p);
 				// p already points to next token, which is output file
 				library_names[num_libnames++] = *p;
 				p++; // move to next token
@@ -1654,7 +1694,7 @@ static void bomsh_get_gcc_subfiles(bomsh_cmd_data_t *cmd, char **skip_token_list
 		if (token[0] == '-') {
 			continue;
 		}
-		bomsh_log_printf(4, "found one gcc subfile: %s\n", token);
+		bomsh_log_printf(level, "found one gcc subfile: %s\n", token);
 		// auto-grow the buffer to hold more subfiles
 		if (num_subfiles >= subfiles_size) {
 			subfiles_size *= 2;
@@ -1671,12 +1711,12 @@ static void bomsh_get_gcc_subfiles(bomsh_cmd_data_t *cmd, char **skip_token_list
 	// it is sufficient, since #infiles <= #subfiles + #libnames, adding one more for piggy object handling
 	char **infiles = malloc((num_subfiles + num_libnames + 2) * sizeof(char *));
 	int i;
-	log_gcc_subfiles(4, subfiles, num_subfiles, "\nList of subfiles:");
+	log_gcc_subfiles(level, subfiles, num_subfiles, "\nList of subfiles:");
 	// save dynamic libraries and add other subfiles to infiles
-	bomsh_log_string(4, "\nChecking gcc subfiles\n");
+	bomsh_log_string(level, "\nChecking gcc subfiles\n");
 	for (i=0; i<num_subfiles; i++) {
 		if (!bomsh_is_regular_file(subfiles[i], cmd->pwd, cmd->root)) {
-			bomsh_log_printf(4, "not regular file or not-existent subfile: %s\n", subfiles[i]);
+			bomsh_log_printf(level, "not regular file or not-existent subfile: %s\n", subfiles[i]);
 			continue;
 		}
 		if (is_shared_library(subfiles[i])) {
@@ -1687,29 +1727,29 @@ static void bomsh_get_gcc_subfiles(bomsh_cmd_data_t *cmd, char **skip_token_list
 	}
 
 	// save dynamic libraries and add static libraries to infiles
-	log_gcc_subfiles(4, library_paths, num_libpaths, "\nList of library paths:");
-	log_gcc_subfiles(4, library_names, num_libnames, "\nList of library names:");
+	log_gcc_subfiles(level, library_paths, num_libpaths, "\nList of library paths:");
+	log_gcc_subfiles(level, library_names, num_libnames, "\nList of library names:");
 	for (i=0; i<num_libnames; i++) {
 		char *libfile = NULL;
 		if ((libfile = find_lib_in_libpaths(cmd, library_names[i], library_paths, num_libpaths, (char *)".so"))) {
-			bomsh_log_printf(4, "\nAdding dynamic library %s\n", libfile);
+			bomsh_log_printf(level, "\nAdding dynamic library %s\n", libfile);
 			dyn_libs[num_dyn_libs++] = libfile;
 		} else if ((libfile = find_lib_in_libpaths(cmd, library_names[i], library_paths, num_libpaths, (char *)".a"))) {
 			// this is static library
-			bomsh_log_printf(4, "\nAdding static library %s\n", libfile);
+			bomsh_log_printf(level, "\nAdding static library %s\n", libfile);
 			infiles[num_infiles++] = libfile;
 		} else if ((libfile = find_lib_in_libpaths(cmd, library_names[i], system_library_paths, 1, (char *)".so"))) {
 			// try the system library search at the end
-			bomsh_log_printf(4, "\nAdding system dynamic library %s\n", libfile);
+			bomsh_log_printf(level, "\nAdding system dynamic library %s\n", libfile);
 			dyn_libs[num_dyn_libs++] = libfile;
 		} else if ((libfile = find_lib_in_libpaths(cmd, library_names[i], system_library_paths, 1, (char *)".a"))) {
 			// try the system library search at the end
-			bomsh_log_printf(4, "\nAdding system static library %s\n", libfile);
+			bomsh_log_printf(level, "\nAdding system static library %s\n", libfile);
 			dyn_libs[num_dyn_libs++] = libfile;
 		}
 	}
-	log_gcc_subfiles(4, infiles, num_infiles, "\nList of infiles:");
-	log_gcc_subfiles(4, dyn_libs, num_dyn_libs, "\nList of dyn_libs:");
+	log_gcc_subfiles(level, infiles, num_infiles, "\nList of infiles:");
+	log_gcc_subfiles(level, dyn_libs, num_dyn_libs, "\nList of dyn_libs:");
 
 	// Save the results in cmd_data struct
 	infiles[num_infiles] = NULL;
@@ -1855,22 +1895,55 @@ static void handle_linux_kernel_piggy_object(bomsh_cmd_data_t *cmd)
 
 static void bomsh_process_gcc_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 {
+	int level = 6;
 	if (pre_exec_mode) {
+		bomsh_log_printf(13, "\n== BEFORE EXEC we will now start handling CC command pid %d\n", cmd->pid);
+		bomsh_log_cmd_data(cmd, 13);
+
+		// "clang -cc1" and "clang -cc1as" commands are not handled, since they are invoked by clang parent process
+		if (is_token_in_argv(cmd->argv, "-cc1") || is_token_in_argv(cmd->argv, "-cc1as")) {
+			bomsh_log_string(21, "\nclang -cc1 or -cc1as commands are not handled\n");
+			cmd->skip_record_raw_info = 1;
+			return;
+		}
+		// always get outfile first, make it easier for later handling
+		cmd->output_file = get_outfile_in_argv(cmd->argv);
+		bomsh_log_printf(level, "gcc cmdline found output file %s\n", cmd->output_file);
+		if (!cmd->output_file) {
+			bomsh_log_string(21, "\ngcc/clang commands without -o option are not handled\n");
+			cmd->skip_record_raw_info = 1;
+			return;
+		}
+#if 0
+		// commands with -pipe but without -o option are not handled
+		if (is_token_in_argv(cmd->argv, "-pipe") && !cmd->output_file) {
+			bomsh_log_string(21, "\ngcc/clang commands with -pipe option but without -o option are not handled\n");
+			cmd->skip_record_raw_info = 1;
+			return;
+		}
+#endif
 		if (is_token_in_argv(cmd->argv, "-MF") ||
 				is_token_prefix_in_argv(cmd->argv, "-Wp,-MD,") ||
 				is_token_prefix_in_argv(cmd->argv, "-Wp,-MMD,")) {
 			cmd->depend_file = extract_depend_file_from_cc_argv(cmd->argv);
-			bomsh_log_string(3, "pre-exec mode, found cc command with depend-file\n");
-			return;
+			bomsh_log_string(level, "pre-exec mode, found cc command with depend-file\n");
+			if (cmd->depend_file) {
+				if (strcmp(cmd->depend_file, "/dev/null")) { // not /dev/null file, valid depend_file
+					return; // will read the depend_file and record depenency after EXECVE syscall
+				} else {
+					free(cmd->depend_file);
+					cmd->depend_file = NULL;
+				}
+			}
 		}
 
 		// handle the -o option first, so that we can skip some undesired outfile earlier
-		cmd->output_file = get_outfile_in_argv(cmd->argv);
+		//cmd->output_file = get_outfile_in_argv(cmd->argv);
+		// the -o option has been handled earlier, so no need to do it here
 		if (cmd->output_file) {
-			bomsh_log_printf(4, "cmdline found output file %s\n", cmd->output_file);
 			if (strcmp(cmd->output_file, "/dev/null") == 0) {
 				// no need to do anything if output is /dev/null
-				bomsh_log_string(3, "\nThe output file is /dev/null, skip recording raw info\n");
+				bomsh_log_string(level, "\nThe output file is /dev/null, skip recording raw info\n");
 				cmd->skip_record_raw_info = 1;
 				return;
 			}
@@ -1879,38 +1952,45 @@ static void bomsh_process_gcc_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 		if (!g_bomsh_config.handle_conftest) {
 			// outfiles are usually conftest/conftest.o/conftest2.o
 	       		if (cmd->output_file && strncmp(bomsh_basename(cmd->output_file), "conftest", strlen("conftest")) == 0) {
-				bomsh_log_string(3, "\nconftest outfile, will skip recording raw info\n");
+				bomsh_log_string(level, "\nconftest outfile, will skip recording raw info\n");
 				cmd->skip_record_raw_info = 1;
 				return;
 			}
 			bomsh_try_get_gcc_subfiles(cmd);
 			if (!cmd->num_inputs || (cmd->num_inputs == 1 && strncmp(bomsh_basename(cmd->input_files[0]), "conftest", strlen("conftest")) == 0)) {
 				// infiles are usually conftest.c/conftest.cpp
-				bomsh_log_string(3, "\nconftest infile, will skip recording raw info\n");
+				bomsh_log_string(level, "\nconftest infile, will skip recording raw info\n");
 				cmd->skip_record_raw_info = 1;
 				return;
 			}
 		}
 
-		if (gcc_is_compile_only(cmd->argv)) {
+		//if (gcc_is_compile_only(cmd->argv) && !gcc_generates_dependency_rule(cmd->argv)) { // must not have -M option
+		if (!gcc_generates_dependency_rule(cmd->argv)) { // must not have -M option
 			bomsh_try_get_gcc_subfiles(cmd);
 			if (!cmd->num_inputs || (cmd->num_inputs == 1 && strcmp(cmd->input_files[0], "/dev/null") == 0)) {
-				bomsh_log_string(3, "\nThere is no input file, or input is /dev/null, skip recording raw info\n");
+				bomsh_log_string(level, "\nThere is no input file, or input is /dev/null, skip recording raw info\n");
 				cmd->skip_record_raw_info = 1;
 				return;
 			}
+			// Let's try adding extra option to collect dependency list
 			if (g_bomsh_config.generate_depfile == 0) {
 				// Add "-MD -MF depfile" option to existing argv to generate dependency file by default
-				bomsh_log_string(3, "\npre-exec mode, instrument gcc command for dependency\n");
+				bomsh_log_string(level, "\npre-exec mode, instrument gcc command for dependency\n");
 				bomsh_execve_instrument_for_dependency(cmd);
 			} else if (g_bomsh_config.generate_depfile == 1) {
 				// Invoke a child process to generate dependency file
-				bomsh_log_string(3, "\npre-exec mode, run child-process gcc for dependency\n");
+				bomsh_log_string(level, "\npre-exec mode, run child-process gcc for dependency\n");
 				bomsh_invoke_subprocess_for_dependency(cmd);
 			}
 		}
+		bomsh_log_printf(14, "\n== BEFORE EXEC we are now done handling CC command pid %d\n", cmd->pid);
+		bomsh_log_cmd_data(cmd, 14);
 		return;
 	}
+
+	bomsh_log_printf(14, "\n==  AFTER EXEC we will now start handling CC command pid %d\n", cmd->pid);
+	bomsh_log_cmd_data(cmd, 14);
 
 	// non-pre-exec mode, invoked after the execve syscall
 	if (cmd->skip_record_raw_info) return;
@@ -1927,25 +2007,27 @@ static void bomsh_process_gcc_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 	}
 #endif
 	if (!cmd->depend_file || !bomsh_check_permission(cmd->depend_file, cmd->pwd, cmd->root, R_OK)) {
-		bomsh_log_string(3, "\nAfter EXECVE syscall, no depfile or depfile does not exist, so let's get subfiles in gcc cmd\n");
+		bomsh_log_string(level, "\nAfter EXECVE syscall, no depfile or depfile does not exist, so let's get subfiles in gcc cmd\n");
 		if (cmd->depend_file) {
 			free(cmd->depend_file);
 			cmd->depend_file = NULL;
 		}
 		bomsh_try_get_gcc_subfiles(cmd);
-		bomsh_log_cmd_data(cmd, 4);
+		bomsh_log_cmd_data(cmd, 7);
 	}
 	// when we are here, if cmd->depend_file is not NULL, then depend_file must exist;
 	// or if cmd->denpend_file is NULL, then cmd->input_files must not be NULL.
 	if (cmd->depend_file) {
-		bomsh_log_printf(5, "Start reading depend file %s\n", cmd->depend_file);
+		bomsh_log_printf(level, "Start reading depend file %s\n", cmd->depend_file);
 		bomsh_cmd_read_depend_file(cmd);
 		bomsh_log_cmd_data(cmd, 24);
-		bomsh_log_printf(5, "After reading depend file %s\n", cmd->depend_file);
+		bomsh_log_printf(level, "After reading depend file %s\n", cmd->depend_file);
 	}
 	// Check if it is special piggy object from Linux kernel build
 	handle_linux_kernel_piggy_object(cmd);
 	bomsh_record_raw_info(cmd);
+	bomsh_log_printf(14, "\n==  AFTER EXEC we are now done handling CC command pid %d\n", cmd->pid);
+	bomsh_log_cmd_data(cmd, 14);
 }
 
 // Allocate string pointer array of size 2, with first element of TOKEN string.
@@ -2236,6 +2318,23 @@ static void bomsh_process_ld_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 {
 	if (pre_exec_mode) {
 		bomsh_log_string(3, "\npre-exec mode, get subfiles for LD command\n");
+		bomsh_try_get_ld_subfiles(cmd);
+		if (!g_bomsh_config.handle_conftest) {
+			// outfiles are usually conftest/conftest.o/conftest2.o
+			if (cmd->output_file && strncmp(bomsh_basename(cmd->output_file), "conftest", strlen("conftest")) == 0) {
+				bomsh_log_string(3, "\nconftest outfile, will skip recording raw info\n");
+				cmd->skip_record_raw_info = 1;
+				return;
+			}
+			if (!cmd->num_inputs || (cmd->num_inputs == 1 && strncmp(bomsh_basename(cmd->input_files[0]), "conftest", strlen("conftest")) == 0)) {
+				// infiles are usually conftest.c/conftest.cpp
+				bomsh_log_string(3, "\nconftest infile, will skip recording raw info\n");
+				cmd->skip_record_raw_info = 1;
+				return;
+			}
+		}
+
+		// try finding its parent gcc/clang command
 		cmd->ppid = bomsh_get_ppid(cmd->pid);
 		bomsh_cmd_data_t *parent_cmd = bomsh_get_cmd(cmd->ppid);
 		if (parent_cmd) {
@@ -2254,7 +2353,7 @@ static void bomsh_process_ld_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 				}
 			}
 		}
-		bomsh_try_get_ld_subfiles(cmd);
+
 		return;
 	} else {
 		if (cmd->skip_record_raw_info == 1) return;
@@ -2433,12 +2532,56 @@ static bomsh_cmd_data_t *bomsh_find_match_pipe_cmd(bomsh_cmd_data_t *cmd, int in
 }
 
 // is it the start of a patch line that contains the file name to patch?
-static int is_leading_token_for_patch_file_line(char *p, char *patch_str)
+static int is_leading_token_for_patch_file_line(char *p)
 {
-	return (*(p-1) == '\n' || p == patch_str) &&
-		((*p == '-' && *(p+1) == '-' && *(p+2) == '-') ||
+	return ((*p == '-' && *(p+1) == '-' && *(p+2) == '-') ||
 		 (*p == '+' && *(p+1) == '+' && *(p+2) == '+') ||
 		 (*p == '*' && *(p+1) == '*' && *(p+2) == '*')) && *(p+3) == ' ';
+}
+
+// the line for old/new file has the format of:
+// --- path/to/file date timestamp timezone
+// +++ path/to/file
+//
+// that is, either 5 tokens or 2 tokens, the field separater can be space or tab character
+// *** abc.txt    2023-05-07 05:53:03.507745185 +0000
+// --- /dev/null	2023-03-12 07:26:45.840592285 +0000
+//
+// --- hostname/hostname.1.rh	2013-11-03 15:24:23.000000000 +0100
+// +++ abc2.txt
+
+// parse the line and return the file path, and its length.
+static char * parse_patch_file_line(char *line, int *length, int strip_num)
+{
+	char *ptr = line + 4;
+	char *p = ptr;
+	int strips = strip_num;
+	while (*p) {
+		if (*p == '\t' || *p == ' ') {
+			if (length) *length = (int)(p - ptr);
+			p++;
+			while (*p) {
+				// the rest must be date/timestamp/timezone, check it
+				if (*p != '-' && *p != '+' && *p != '.' && *p != ':' && *p != ' ' && *p != '\t' && (*p < '0' || *p > '9')) {
+					bomsh_log_printf(10, "found invalid character '%c' in date/timestamp for line: %s\n", *p, ptr);
+					return NULL;
+				}
+				p++;
+			}
+			bomsh_log_printf(10, "found valid file to patch: %s\n", ptr);
+			return ptr;
+		} else if (*p == ',') { // if there is comma character, then this is invalid file
+			// *** 2768,2771 ****
+			// --- 2768,2773 ----
+			bomsh_log_printf(10, "found comma in invalid file: %s\n", ptr);
+			return NULL;
+		} else if (*p == '/') {
+			strips --;
+			if (!strips) ptr = p + 1; // found the start of the file
+		}
+		p++;
+	}
+	return NULL;
 }
 
 // read patch file and return the list of files to patch.
@@ -2452,36 +2595,28 @@ static int bomsh_read_patch_file(bomsh_cmd_data_t *cmd, char *patch_file, int st
 		return 0;
 	}
 
-	char *p = patch_str;
-	char buf[1024]; // should be enough to hold file to patch
 	int num_files = 0;
 	// record the start position and length of each file
 	char *afiles[200]; int alens[200];
-	while (*p) {
-		if (is_leading_token_for_patch_file_line(p, patch_str)) {
-			p += 4;
-			char *q = p;
-			int strips = strip_num;
-			while (*q != '\t' && *q != '\n' && *q != ' ') { // find the ending position
-				if (*q == '/') {
-					strips --;
-					if (!strips) p = q + 1; // found the start of the file
+
+	char delim[] = "\n";
+	char *ptr = strtok(patch_str, delim);
+	while(ptr != NULL)
+	{
+		if (is_leading_token_for_patch_file_line(ptr)) {
+			int length = 0;
+			char *afile = parse_patch_file_line(ptr, &length, strip_num);
+			if (afile) {
+				afiles[num_files] = afile;  // start position of the file
+				alens[num_files] = length; // the string length of the file
+				num_files ++;
+				if (num_files >= 200) {
+					bomsh_log_printf(8, "Warning: reached maximum of 200 files to patch in patch file: %s\n", patch_file);
+					break;
 				}
-				q++;
 			}
-			if (q == p) { // empty file path
-				p++; continue;
-			}
-			afiles[num_files] = p;  // start position of the file
-			alens[num_files] = (int)(q - p); // the string length of the file
-			num_files ++;
-			if (num_files >= 200) {
-				bomsh_log_printf(8, "Warning: reached maximum of 200 files to patch in patch file: %s\n", patch_file);
-				break;
-			}
-			p = q;
 		}
-		p++;
+		ptr = strtok(NULL, delim);
 	}
 	bomsh_log_printf(8, "find %d files from the patch_str\n", num_files);
 	if (!num_files || num_files % 2 != 0) {
@@ -2490,6 +2625,7 @@ static int bomsh_read_patch_file(bomsh_cmd_data_t *cmd, char *patch_file, int st
 	}
 	int num_files2 = num_files/2;
 
+	char buf[1024]; // should be enough to hold file to patch
 	char **bfiles = malloc( (num_files2 + 1) * sizeof(char *) );
 	char *cfile; int clen;
 	// select the files to patch from two candidates
@@ -3167,6 +3303,11 @@ static void bomsh_process_dpkg_deb_command(bomsh_cmd_data_t *cmd, int pre_exec_m
 // if pre_exec_mode is 0, it means after  the EXECVE syscall
 static void bomsh_process_shell_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 {
+	if (g_bomsh_config.trace_execve_cmd_only == 2) {
+		bomsh_log_printf(2, "\n*** Tracing only, pre_exec: %d PID %d shell command: %s\n", pre_exec_mode, cmd->pid, cmd->path);
+		return;
+	}
+
 	// cmd->path can be relative, like "scripts/sign-file" or "./scripts/sorttable" during kernel build
 	char *prog = cmd->path;
 	char *name = bomsh_basename(prog);
@@ -3222,6 +3363,10 @@ static void bomsh_prehook_program(bomsh_cmd_data_t *cmd)
 // invoked after the execve syscall and after it
 void bomsh_hook_program(int pid)
 {
+	if (g_bomsh_config.trace_execve_cmd_only == 1) {
+		bomsh_log_printf(2, "\n====Tracing only, hook_program   pid %d after  EXECVE syscall", pid);
+		return;
+	}
 	bomsh_log_printf(3, "\n====hook_program pid %d after EXECVE syscall", pid);
 	bomsh_cmd_data_t *cmd = bomsh_remove_cmd(pid);
 	if (!cmd) {
