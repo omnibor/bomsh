@@ -78,7 +78,7 @@ def verbose(string, level=1, logfile=None):
     :param level: Unsigned Integer, listing the verbose level
     :param logfile: file to write, if not provided, g_logfile is used
     """
-    if args.verbose >= level:
+    if args.verbose > level:
         afile = g_logfile
         if logfile:
             afile = logfile
@@ -382,16 +382,19 @@ def update_gitbom_dir(bomdir, infiles, checksum, outfile):
     if not os.path.isfile(outfile) or get_git_file_hash(outfile) != checksum:
         verbose("Warning: outfile with checksum " + checksum + " does not exist, skip embedding OmniBOR for outfile " + outfile)
         return
+    if not args.embed_o_file and outfile[-2:] == ".o":  # not embed intermediate *.o files by default
+        verbose("Warning: outfile " + outfile + " is intermediate .o file, skipping embedding .bom section")
+        return
     if not is_elf_file(outfile):  # archive file must also contain valid ELF files.
         verbose("Warning: outfile " + outfile + " is not ELF file, skipping embedding .bom section")
         return
     # Try to embed the .bom ELF section or archive entry
     gitbom_doc = os.path.join(g_object_bomdir, gitbom_doc_hash[:2], gitbom_doc_hash[2:])
     with_bom_file = os.path.join(g_with_bom_dir, checksum + "-with_bom-" + gitbom_doc_hash + "-" + os.path.basename(outfile))
-    if is_archive_file(outfile):
+    if args.embed_archive_file and is_archive_file(outfile):
         verbose("Create archive with_bom file: " + with_bom_file)
         embed_gitbom_hash_archive_entry(outfile, gitbom_doc, with_bom_file)
-    else:
+    elif outfile[-2:] != ".a":
         verbose("Create ELF with_bom file: " + with_bom_file)
         embed_gitbom_hash_elf_section(outfile, gitbom_doc, with_bom_file)
 
@@ -1028,7 +1031,13 @@ def rtd_parse_options():
                     help = "do not generate OmniBOR docs")
     parser.add_argument("--embed_bom_section",
                     action = "store_true",
-                    help = "embed the .bom ELF section or archive entry")
+                    help = "embed the .bom ELF section for ELF files")
+    parser.add_argument("--embed_o_file",
+                    action = "store_true",
+                    help = "embed .bom ELF section for intermediate *.o files")
+    parser.add_argument("--embed_archive_file",
+                    action = "store_true",
+                    help = "embed .bom entry for archive files")
     parser.add_argument("--keep_duplicate_lines_in_omnibor_doc",
                     action = "store_true",
                     help = "even if there are duplicate lines in omnibor_doc, keep them")

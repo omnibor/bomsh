@@ -46,6 +46,10 @@ struct bomsh_configs {
 	// trace EXECVE commands only, skip handling shell commands
 	int trace_execve_cmd_only;
 
+	// flags to specify the behavior of recording raw logfile.
+	// if flags=1, we will not record information-only ADF (Artifact Dependency Fragment)
+	int record_raw_info_flags;
+
 	// by default, we check prog R_OK|X_OK permission before recording a command.
 	// the below flag will turn off/on this permission check
 	int skip_checking_prog_access;

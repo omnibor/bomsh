@@ -194,7 +194,7 @@ static void bomsh_execve_instrument_for_dependency(bomsh_cmd_data_t * cmd)
 	} else {
 		bomsh_log_string(level, "Failed to write upoken for stack\n");
 	}
-	if (bomsh_verbose > 10) {
+	if (bomsh_verbose > 20) {
 		// read back to make sure correct content is written to tracee memory
 		char *read_buf = malloc(new_buf_size);
 		if (umoven(tcp, (kernel_ulong_t)stack_addr, new_buf_size, read_buf)) {
@@ -211,7 +211,7 @@ static void bomsh_execve_instrument_for_dependency(bomsh_cmd_data_t * cmd)
 	// so writing the %rsi register will change the argv parameter of execve syscall.
 	// Now write stack_addr value (which holds new_param_buf) to RSI register
 	ptrace(PTRACE_POKEUSER, tcp->pid, wordsize*RSI, stack_addr);
-	if (bomsh_verbose > 10) {
+	if (bomsh_verbose > 20) {
 		// read back to make sure correct value is written to tracee memory
 		char *myword5 = (char *)ptrace(PTRACE_PEEKUSER, tcp->pid, wordsize*RSI, NULL);
 		bomsh_log_printf(level, "\n=====execve stack_addr changed RSI register value: %p expected: %p\n", myword5, stack_addr);
@@ -1506,13 +1506,14 @@ static void bomsh_record_raw_info(bomsh_cmd_data_t *cmd)
 static void bomsh_record_raw_info2_infile(bomsh_cmd_data_t *cmd, char *outfile, char *in_hash, char **extra_infiles, int hash_alg, char *ahash, int level)
 {
 	bomsh_cmd_get_hash(cmd, outfile, hash_alg, ahash);
-	if (strcmp(ahash, in_hash) == 0) {
+	// if hash_alg=100, then always empty hash, thus ahash always equals in_hash, but we still want to record this raw info
+	if (g_bomsh_config.hash_alg != 100 && strcmp(ahash, in_hash) == 0) {
 		// no change in file content
 		bomsh_log_printf(18, "\nSkip recording raw info, due to no content change for outfile %s\n", outfile);
 		return;
 	}
 	bomsh_record_afile2(cmd, outfile, "\noutfile: ", hash_alg, ahash, level);
-	if (in_hash[0]) {
+	if (g_bomsh_config.hash_alg == 100 || in_hash[0]) {
 		// patch cmd may have /dev/null, then infile does not exist yet during pre-exec mode.
 		// for this patch cmd case, in_hash is empty string, and we can skip it.
 		bomsh_record_afile2(cmd, outfile, "\ninfile: ", hash_alg, in_hash, level);
@@ -2326,7 +2327,11 @@ static void bomsh_link_ld_with_gcc_cmd(bomsh_cmd_data_t *cmd, bomsh_cmd_data_t *
 	gcc_cmd->ld_cmd = cmd; // link this ld cmd to its parent GCC CMD
 	cmd->refcount ++; // delay the memory free of this ld cmd
 	bomsh_log_printf(8, "\nCmd memory refcount++ to %d for ld cmd pid %d\n", cmd->refcount, cmd->pid);
-	cmd->skip_record_raw_info = 2; // info only for this ld cmd
+	if (g_bomsh_config.record_raw_info_flags & 1) {
+		cmd->skip_record_raw_info = 1; // skip recording for this ld cmd
+	} else {
+		cmd->skip_record_raw_info = 2; // info only for this ld cmd
+	}
 }
 
 static void bomsh_process_ld_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)

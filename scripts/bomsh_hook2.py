@@ -3114,7 +3114,7 @@ def rtd_parse_options():
                     help = "not create ADG (Artifact Dependency Graph) documents, as well as symlinks")
     parser.add_argument("--read_bomid_from_file_for_adg",
                     action = "store_true",
-                    help = "record bom-id from ELF file when creating ADG doc")
+                    help = "read bom-id from ELF file when creating ADG doc")
     parser.add_argument("--create_no_adg_for_pkgs",
                     action = "store_true",
                     help = "not create ADG docs for .deb/.rpm package")
