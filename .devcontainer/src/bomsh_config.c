@@ -386,6 +386,7 @@ bomsh_log_configs(int level)
 	bomsh_log_printf(level, "handle GNU AS cmd: %d\n", g_bomsh_config.handle_gnu_as_cmd);
 	bomsh_log_printf(level, "handle pkg build cmd: %d\n", g_bomsh_config.handle_pkg_build_cmd);
 	bomsh_log_printf(level, "trace execve cmd only: %d\n", g_bomsh_config.trace_execve_cmd_only);
+	bomsh_log_printf(level, "record raw info flags: 0x%x\n", g_bomsh_config.record_raw_info_flags);
 	bomsh_log_printf(level, "skip_checking_prog_access: %d\n", g_bomsh_config.skip_checking_prog_access);
 	bomsh_log_printf(level, "strict_prog_path: %d\n", g_bomsh_config.strict_prog_path);
 	bomsh_log_string(level, "---End of printing bomtrace configs.\n");
@@ -410,6 +411,7 @@ bomsh_print_configs(void)
 	fprintf(stderr, "handle GNU AS cmd: %d\n", g_bomsh_config.handle_gnu_as_cmd);
 	fprintf(stderr, "handle pkg build cmd: %d\n", g_bomsh_config.handle_pkg_build_cmd);
 	fprintf(stderr, "trace execve cmd only: %d\n", g_bomsh_config.trace_execve_cmd_only);
+	fprintf(stderr, "record raw info flags: 0x%x\n", g_bomsh_config.record_raw_info_flags);
 	fprintf(stderr, "skip_checking_prog_access: %d\n", g_bomsh_config.skip_checking_prog_access);
 	fprintf(stderr, "strict_prog_path: %d\n", g_bomsh_config.strict_prog_path);
 }
@@ -442,12 +444,14 @@ bomsh_read_value_for_keys(char *line_start, char *value_equal, char *value_newli
 	char *handle_gnu_as_cmd_str = NULL;
 	char *handle_pkg_build_cmd_str = NULL;
 	char *trace_execve_cmd_only_str = NULL;
+	char *record_raw_info_flags_str = NULL;
 	char *skip_checking_prog_access_str = NULL;
 	char *strict_prog_path_str = NULL;
 	static const char *bomsh_config_keys[] = {"hook_script_file", "hook_script_cmdopt", "shell_cmd_file",
 						"tmpdir", "logfile", "raw_logfile", "syscalls",
 						"hash_alg", "generate_depfile", "handle_conftest",
-						"handle_gnu_as_cmd", "handle_pkg_build_cmd", "trace_execve_cmd_only",
+						"handle_gnu_as_cmd", "handle_pkg_build_cmd",
+						"trace_execve_cmd_only", "record_raw_info_flags",
 						"skip_checking_prog_access", "strict_prog_path"};
 	char ** bomsh_config_fields[] = {
 		&g_bomsh_config.hook_script_file,
@@ -463,6 +467,7 @@ bomsh_read_value_for_keys(char *line_start, char *value_equal, char *value_newli
 		&handle_gnu_as_cmd_str,
 		&handle_pkg_build_cmd_str,
 		&trace_execve_cmd_only_str,
+		&record_raw_info_flags_str,
 		&skip_checking_prog_access_str,
 		&strict_prog_path_str
 	};
@@ -513,6 +518,10 @@ bomsh_read_value_for_keys(char *line_start, char *value_equal, char *value_newli
 	if (trace_execve_cmd_only_str) {
 		g_bomsh_config.trace_execve_cmd_only = atoi(trace_execve_cmd_only_str);
 		free(trace_execve_cmd_only_str);
+	}
+	if (record_raw_info_flags_str) {
+		g_bomsh_config.record_raw_info_flags = atoi(record_raw_info_flags_str);
+		free(record_raw_info_flags_str);
 	}
 	if (skip_checking_prog_access_str) {
 		if (strcmp(skip_checking_prog_access_str, "1") == 0) {
