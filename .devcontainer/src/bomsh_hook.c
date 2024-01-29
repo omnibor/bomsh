@@ -171,8 +171,8 @@ static void bomsh_execve_instrument_for_dependency(bomsh_cmd_data_t * cmd)
 	const unsigned int wordsize = current_wordsize;
 	// on x86_64, RSP register has the stack address
 	char *stack_addr = (char *) ptrace(PTRACE_PEEKUSER, tcp->pid, wordsize*RSP, 0);
-	int new_buf_size = buf_size;
-	//int new_buf_size = (buf_size/wordsize + 1) * wordsize; // do we need address alignment?
+	//int new_buf_size = buf_size;
+	int new_buf_size = (buf_size/wordsize + 1) * wordsize; // do we need address alignment?
 	dump_new_param_buf(new_param_buf, buf_size);
 
 	/* Move further of red zone and make sure we have space for the file name */
@@ -466,9 +466,16 @@ bomsh_add_cmd(struct tcb *tcp, char *pwd, char *root, char *path, char **argv_ar
 {
 	bomsh_cmd_data_t *cmd = bomsh_new_cmd(tcp, pwd, root, path, argv_array);
 	int index = tcp->pid % BOMSH_CMDS_SIZE;
-	if (bomsh_cmds[index]) {  // insert the node at the head of the linked list
-		cmd->next = bomsh_cmds[index]->next;
+	bomsh_cmd_data_t *cmd2 = bomsh_cmds[index];
+	if (cmd2 && cmd2->pid == tcp->pid) {
+		// the head of the list has same PID as me, the old cmd should be a unsuccessful one,
+		// like non-existent program path /usr/local/bin/as, but only /usr/bin/as exists.
+		cmd->next = cmd2->next;
+		bomsh_free_cmd(cmd2);
+	} else {
+		cmd->next = cmd2;
 	}
+	// insert the node at the head of the linked list
 	bomsh_cmds[index] = cmd;
 	//bomsh_log_printf(4, "\nADD bomsh_cmd_num: %d\n", bomsh_cmd_num++);
 	return cmd;
@@ -1115,7 +1122,6 @@ static int gcc_generates_dependency_rule(char **argv)
 	return is_token_prefix_in_argv(argv, "-M");
 }
 
-#if 0
 // Whether the gcc command compiles from C/C++ source files to intermediate .o/.s/.E only
 static int gcc_is_compile_only(char **argv)
 {
@@ -1127,7 +1133,6 @@ static int gcc_is_compile_only(char **argv)
 	}
 	return 0;
 }
-#endif
 
 // read depend_file and put the list of depend files in the depends array.
 // depend_buf contains the contents of depend_file, with NULL-terminated file paths.
@@ -1150,7 +1155,7 @@ static int bomsh_read_depend_file(char *depend_file, char ***depends, char **dep
 	}
 	p++;
 	char *prev = NULL;
-	static char *bomsh_depend_array[2000]; // 2000 should be large enough
+	static char *bomsh_depend_array[4000]; // 4000 should be large enough
 	char **arr = bomsh_depend_array;
 	int num_depends = 0;
 	while (*p) {
@@ -1180,8 +1185,8 @@ static int bomsh_read_depend_file(char *depend_file, char ***depends, char **dep
 				*p = 0;
 				bomsh_log_printf(22, "found a new depend: %s\n", prev);
 				prev = NULL;
-				if (num_depends >= 2000) {
-					bomsh_log_string(3, "Warning: reached maximum of 2000 depend files\n");
+				if (num_depends >= 4000) {
+					bomsh_log_string(3, "Warning: reached maximum of 4000 depend files\n");
 					break;
 				}
 		        }
@@ -1976,8 +1981,8 @@ static void bomsh_process_gcc_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 			}
 		}
 
-		//if (gcc_is_compile_only(cmd->argv) && !gcc_generates_dependency_rule(cmd->argv)) { // must not have -M option
-		if (!gcc_generates_dependency_rule(cmd->argv)) { // must not have -M option
+		// we should not do generating depfile for gcc linking command
+		if (gcc_is_compile_only(cmd->argv) && !gcc_generates_dependency_rule(cmd->argv)) { // must not have -M option
 			bomsh_try_get_gcc_subfiles(cmd);
 			if (!cmd->num_inputs || (cmd->num_inputs == 1 && strcmp(cmd->input_files[0], "/dev/null") == 0)) {
 				bomsh_log_string(level, "\nThere is no input file, or input is /dev/null, skip recording raw info\n");
@@ -2576,10 +2581,13 @@ static char * parse_patch_file_line(char *line, int *length, int strip_num)
 	char *ptr = line + 4;
 	char *p = ptr;
 	int strips = strip_num;
-	while (*p) {
-		if (*p == '\t' || *p == ' ') {
-			if (length) *length = (int)(p - ptr);
-			p++;
+	bomsh_log_printf(10, "\nparse patch file line: %s\n", line);
+	while (1) {
+		char c = *p;
+		if (c == '\t' || c == ' ' || !c) {
+			if (p == ptr) return NULL; // empty file
+			int len = (int)(p - ptr);
+			if (length) *length = len;
 			while (*p) {
 				// the rest must be date/timestamp/timezone, check it
 				if (*p != '-' && *p != '+' && *p != '.' && *p != ':' && *p != ' ' && *p != '\t' && (*p < '0' || *p > '9')) {
@@ -2588,16 +2596,19 @@ static char * parse_patch_file_line(char *line, int *length, int strip_num)
 				}
 				p++;
 			}
-			bomsh_log_printf(10, "found valid file to patch: %s\n", ptr);
+			bomsh_log_printf(10, "found valid file with length %d to patch: %s\n", len, ptr);
 			return ptr;
-		} else if (*p == ',') { // if there is comma character, then this is invalid file
+		} else if (c == ',') { // if there is comma character, then this is invalid file
 			// *** 2768,2771 ****
 			// --- 2768,2773 ----
 			bomsh_log_printf(10, "found comma in invalid file: %s\n", ptr);
 			return NULL;
-		} else if (*p == '/') {
+		} else if (c == '/') {
 			strips --;
-			if (!strips) ptr = p + 1; // found the start of the file
+			if (!strips) {
+				ptr = p + 1; // found the start of the file
+				bomsh_log_printf(10, "found start of the file: %s\n", ptr);
+			}
 		}
 		p++;
 	}
@@ -2638,7 +2649,7 @@ static int bomsh_read_patch_file(bomsh_cmd_data_t *cmd, char *patch_file, int st
 		}
 		ptr = strtok(NULL, delim);
 	}
-	bomsh_log_printf(8, "find %d files from the patch_str\n", num_files);
+	bomsh_log_printf(8, "\nfind %d files from the patch_str\n", num_files);
 	if (!num_files || num_files % 2 != 0) {
 		bomsh_log_printf(8, "\nWarning: odd number %d of files found in patch file: %s\n", num_files, patch_file);
 		return 0;
@@ -2924,7 +2935,8 @@ static void get_all_subfiles_in_objcopy_cmdline(bomsh_cmd_data_t *cmd)
 	while (*p) {
 		last2nd_token = last_token; last_token = *p; p++;
 	}
-	if (last2nd_token && (last2nd_token[0] == '-' || strchr(last2nd_token, '='))) {
+	if (last2nd_token && (last2nd_token[0] == '-' || strchr(last2nd_token, '=') ||
+				!bomsh_is_regular_file(last2nd_token, cmd->pwd, cmd->root))) {
 		// the last token must be both input and output file
 		cmd->input_files = alloc_2element_array(last_token);
 		cmd->num_inputs = 1;
@@ -2933,7 +2945,9 @@ static void get_all_subfiles_in_objcopy_cmdline(bomsh_cmd_data_t *cmd)
 	}
 	char *infile = last2nd_token;
 	char *outfile = last_token;
-	if ( ! (outfile && infile && bomsh_is_regular_file(infile, cmd->pwd, cmd->root))) {
+	// if infile is not NULL, then it must be regular file since we have checked it earlier
+	//if ( ! (outfile && infile && bomsh_is_regular_file(infile, cmd->pwd, cmd->root))) {
+	if ( ! (outfile && infile) ) {
 		bomsh_log_string(18, "Warning: not valid objcopy command\n");
 		cmd->skip_record_raw_info = 1;
 		return;
