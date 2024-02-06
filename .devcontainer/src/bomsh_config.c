@@ -171,6 +171,7 @@ static int bomsh_is_program_inlist(char *prog, char **prog_list, int num_progs)
 
 // special programs that are usually named with some prefix
 static const char *bomsh_special_progs[] = {"gcc", "cc", "g++", "clang", "clang++", "strip", "objcopy", "ld", "ld.gold", "ld.bfd", "ar", "ranlib"} ;
+//static const char *bomsh_special_progs[] = {"gcc", "cc", "g++", "clang", "clang++", "strip", "objcopy", "ld", "ld.gold", "ld.bfd", "ar", "as", "ranlib"} ;
 static const char *bomsh_special_pre_exec_progs[] = {"strip", "objcopy", "ranlib", "ar"} ;
 
 // check if a path ends with a specific suffix, progs array must be sorted
@@ -382,6 +383,8 @@ bomsh_log_configs(int level)
 	bomsh_log_printf(level, "hash algorithm: %d\n", g_bomsh_config.hash_alg);
 	//bomsh_log_printf(level, "metadata to record: %d\n", g_bomsh_config.metadata_to_record);
 	bomsh_log_printf(level, "generate depfile: %d\n", g_bomsh_config.generate_depfile);
+	bomsh_log_printf(level, "depfile stack offset: %d\n", g_bomsh_config.depfile_stack_offset);
+	bomsh_log_printf(level, "handle CGO cc cmd: %d\n", g_bomsh_config.handle_cgo_cc_cmd);
 	bomsh_log_printf(level, "handle conftest: %d\n", g_bomsh_config.handle_conftest);
 	bomsh_log_printf(level, "handle GNU AS cmd: %d\n", g_bomsh_config.handle_gnu_as_cmd);
 	bomsh_log_printf(level, "handle pkg build cmd: %d\n", g_bomsh_config.handle_pkg_build_cmd);
@@ -407,6 +410,8 @@ bomsh_print_configs(void)
 	fprintf(stderr, "hash algorithm: %d\n", g_bomsh_config.hash_alg);
 	//fprintf(stderr, "metadata to record: %d\n", g_bomsh_config.metadata_to_record);
 	fprintf(stderr, "generate depfile: %d\n", g_bomsh_config.generate_depfile);
+	fprintf(stderr, "depfile stack offset: %d\n", g_bomsh_config.depfile_stack_offset);
+	fprintf(stderr, "handle CGO cc cmd: %d\n", g_bomsh_config.handle_cgo_cc_cmd);
 	fprintf(stderr, "handle conftest: %d\n", g_bomsh_config.handle_conftest);
 	fprintf(stderr, "handle GNU AS cmd: %d\n", g_bomsh_config.handle_gnu_as_cmd);
 	fprintf(stderr, "handle pkg build cmd: %d\n", g_bomsh_config.handle_pkg_build_cmd);
@@ -440,6 +445,8 @@ bomsh_read_value_for_keys(char *line_start, char *value_equal, char *value_newli
 {
 	char *hash_alg_str = NULL;
 	char *generate_depfile_str = NULL;
+	char *depfile_stack_offset_str = NULL;
+	char *handle_cgo_cc_cmd_str = NULL;
 	char *handle_conftest_str = NULL;
 	char *handle_gnu_as_cmd_str = NULL;
 	char *handle_pkg_build_cmd_str = NULL;
@@ -449,8 +456,8 @@ bomsh_read_value_for_keys(char *line_start, char *value_equal, char *value_newli
 	char *strict_prog_path_str = NULL;
 	static const char *bomsh_config_keys[] = {"hook_script_file", "hook_script_cmdopt", "shell_cmd_file",
 						"tmpdir", "logfile", "raw_logfile", "syscalls",
-						"hash_alg", "generate_depfile", "handle_conftest",
-						"handle_gnu_as_cmd", "handle_pkg_build_cmd",
+						"hash_alg", "generate_depfile", "depfile_stack_offset", "handle_cgo_cc_cmd",
+						"handle_conftest", "handle_gnu_as_cmd", "handle_pkg_build_cmd",
 						"trace_execve_cmd_only", "record_raw_info_flags",
 						"skip_checking_prog_access", "strict_prog_path"};
 	char ** bomsh_config_fields[] = {
@@ -463,6 +470,8 @@ bomsh_read_value_for_keys(char *line_start, char *value_equal, char *value_newli
 		&g_bomsh_config.syscalls,
 		&hash_alg_str,
 		&generate_depfile_str,
+		&depfile_stack_offset_str,
+		&handle_cgo_cc_cmd_str,
 		&handle_conftest_str,
 		&handle_gnu_as_cmd_str,
 		&handle_pkg_build_cmd_str,
@@ -502,6 +511,14 @@ bomsh_read_value_for_keys(char *line_start, char *value_equal, char *value_newli
 	if (generate_depfile_str) {
 		g_bomsh_config.generate_depfile = atoi(generate_depfile_str);
 		free(generate_depfile_str);
+	}
+	if (depfile_stack_offset_str) {
+		g_bomsh_config.depfile_stack_offset = atoi(depfile_stack_offset_str);
+		free(depfile_stack_offset_str);
+	}
+	if (handle_cgo_cc_cmd_str) {
+		g_bomsh_config.handle_cgo_cc_cmd = atoi(handle_cgo_cc_cmd_str);
+		free(handle_cgo_cc_cmd_str);
 	}
 	if (handle_conftest_str) {
 		g_bomsh_config.handle_conftest = atoi(handle_conftest_str);
@@ -688,11 +705,15 @@ void bomsh_init(int argc, char *argv[])
 	}
 	bomsh_log_printf(0, "successful with logfiles, verbose level: %d\n", bomsh_verbose);
 	bomsh_log_configs(8);
+	if (g_bomsh_global.logfile) fflush(g_bomsh_global.logfile);
 
 	argv += optind;
 	argc -= optind;
 	if (argc <= 0) {
 		error_msg_and_help("must have PROG [ARGS]");
+	}
+	if (!g_bomsh_config.depfile_stack_offset) {
+		g_bomsh_config.depfile_stack_offset = 4096;
 	}
 	if (!g_bomsh_config.strict_prog_path) {
 		bomsh_watched_program_names = create_watched_program_names(bomsh_watched_programs, bomsh_num_watched_programs);

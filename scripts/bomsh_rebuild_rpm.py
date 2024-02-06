@@ -125,7 +125,8 @@ def fix_broken_symlinks(bomsher_outdir):
 g_bomsh_dockerfile_str = '''
 
 # Set up mock build environment
-RUN dnf install -y epel-release ; dnf install -y git wget mock rpm-build python3-pyyaml ; \\
+RUN     \\
+    dnf install -y git wget mock rpm-build python3-pyyaml which automake autoconf ; \\
     dnf group install -y "Development Tools" ; \\
     dnf clean all ;
 
@@ -180,6 +181,10 @@ def create_dockerfile(work_dir):
     else:
         from_str = 'FROM almalinux:9'
     bomsh_dockerfile_str = g_bomsh_dockerfile_str
+    if "fedora" not in from_str:
+        bomsh_dockerfile_str = bomsh_dockerfile_str.replace("RUN     ", "RUN     dnf install -y epel-release ; ")
+    if "almalinux" in from_str:
+        bomsh_dockerfile_str = bomsh_dockerfile_str.replace("RUN     ", "RUN     dnf install -y almalinux-release ; ")
     if args.chroot_cfg and "mageia" in args.chroot_cfg:  # special handling for mageia platform due to file permission check with multiple levels of symlinks
         tokens = g_bomsh_dockerfile_str.splitlines()
         # insert one line to do sed replacement of bomtrace.conf file to change bomtrace config
