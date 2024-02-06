@@ -20,17 +20,21 @@ typedef struct bomsh_cmddata {
 	int refcount; // reference count for this struct, for delaying memory free until the last one
 
 	// if flags is 1, then output_file is allocated memory and needs to be freed.
+	// if flags is 2, then this cmd is instrumented for gcc dependency
+	// if flags is 4, then this is cc cmd invoked by CGO tool
 	int flags;
 
 	// if skip_record_raw_info is 1, then skip recording raw info for this cmd.
 	// if skip_record_raw_info is 2, then record raw info as information-only.
 	int skip_record_raw_info;
 
+	int num_argv; // number of string pointers in argv array
 	int num_inputs; // number of input files
 	char *pwd;  // current working directory
 	char *root;  // root dir for chroot environment
 	char *path;  // path of program binary
 	char **argv;  // argv array, last array element is NULL pointer
+	char **tracee_argv;  // tracee_argv array with tracee process memory address, last element is NULL pointer
 	char *output_file; // the output file of this command
 	char **input_files; // the input files of this command, array of pointers, last is NULL
 	char **input_files2; // the unchanged input files of this command, array of pointers, last is NULL
@@ -61,7 +65,7 @@ typedef struct bomsh_cmddata {
 extern int bomsh_record_command(struct tcb *tcp, const unsigned int index);
 
 // run the analysis and record raw info after EXECVE syscall
-extern void bomsh_hook_program(int pid);
+extern void bomsh_hook_program(int pid, int status);
 
 // initialize function
 extern void bomsh_hook_init(void);

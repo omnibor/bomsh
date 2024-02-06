@@ -33,6 +33,13 @@ struct bomsh_configs {
 	// 0 generates depfile with instrumentation, 1 generates with subprocess, and 2 not generating depfile
 	int generate_depfile;
 
+	// number of offset bytes to stack top for instrumentation, default is 4096
+	int depfile_stack_offset;
+
+	// C compiling command invoked by CGO tool is ignored by default.
+	// 0 means not handling, 1 means handling such commands, 2 means recording for info-only
+	int handle_cgo_cc_cmd;
+
 	// conftest/conftest.o/libconftest.a are output files during ./configure
 	// these output files are ignored by default, since they are not very useful.
 	int handle_conftest;
@@ -47,7 +54,7 @@ struct bomsh_configs {
 	int trace_execve_cmd_only;
 
 	// flags to specify the behavior of recording raw logfile.
-	// if flags=1, we will not record information-only ADF (Artifact Dependency Fragment)
+	// if flags=1, we will record information-only ADF (Artifact Dependency Fragment)
 	int record_raw_info_flags;
 
 	// by default, we check prog R_OK|X_OK permission before recording a command.

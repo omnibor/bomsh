@@ -44,7 +44,7 @@ index a9224543b..c09d2d1d7 100644
  	printpath(tcp, tcp->u_arg[index + 0]);
  	tprint_arg_next();
 diff --git a/src/strace.c b/src/strace.c
-index 780e51e91..4067b11e2 100644
+index 780e51e91..77f179331 100644
 --- a/src/strace.c
 +++ b/src/strace.c
 @@ -43,6 +43,8 @@
@@ -61,7 +61,7 @@ index 780e51e91..4067b11e2 100644
  
  	case TE_EXITED:
 +		/* Run the hook program to do analysis */
-+		bomsh_hook_program(current_tcp->pid);
++		bomsh_hook_program(current_tcp->pid, status);
  		print_exited(current_tcp, current_tcp->pid, status);
  		droptcb(current_tcp);
  		return true;

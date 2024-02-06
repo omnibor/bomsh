@@ -24,6 +24,7 @@ static int strcmp_comparator(const void *p, const void *q)
 static const char *
 gcc_skip_token_list[] = {"-MT", "-MF", "-x", "-I", "-B", "-D", "-L", "-isystem", "-iquote", "-idirafter", "-iprefix",
 	"-isysroot", "-iwithprefix", "-iwithprefixbefore", "-imultilib", "-include",
+	"-dumpdir", "-dumpbase", "-dumpbase-ext",
 	"--param", "-main-file-name", "-internal-externc-isystem", "-internal-isystem",
 	"-fdebug-compilation-dir", "-ferror-limit", "-fmessage-length",
 	"-mrelocation-model", "-mthread-model", "-resource-dir", "-target-cpu"};
@@ -83,12 +84,7 @@ static int bomsh_is_linker_skip_token(char *token)
 // create a new memory buffer to hold the argv pointer array and all argument strings
 static char *bomsh_create_param_buf(bomsh_cmd_data_t *cmd, int *buf_size)
 {
-	int cmdline_size = 0;
-        int argc = 0; char **p = cmd->argv;
-	while (*p) {
-		cmdline_size += strlen(*p) + 1;
-		argc++; p++;
-	}
+	int argc = cmd->num_argv;
 	char buf[PATH_MAX];
 	int len = 0;
 	if (cmd->root[1]) {
@@ -99,21 +95,16 @@ static char *bomsh_create_param_buf(bomsh_cmd_data_t *cmd, int *buf_size)
 	}
 	buf[3] = buf[7] = '\0';
 	// there are 3 extra parameters for the argv array
-	argc += 3;
-	int array_size = (argc + 1) * sizeof(char *);
-	int size = array_size + cmdline_size + len + 1;
+	int array_size = (argc + 4) * sizeof(char *);
+	int size = array_size + len + 1;
 	char *new_param_buf = (char *)malloc(size);
 	char **new_array = (char **)new_param_buf;
-	// copy all the parameter strings to new param buffer
-	char *q = new_param_buf + array_size;
-        p = cmd->argv;
-	while (*p) {
-		int plen = strlen(*p) + 1;
-		memcpy(q, *p, plen);
-		*new_array = q; new_array ++; // initialize the array pointer to correct value
-		q += plen; p++;
-	}
+	new_array += argc;
+	// the first argc pointers should be tracee process' memory address,
+	// which is not known yet, so use 0x90 as place-holder
+	memset(new_param_buf, 0x90, size);
 	// initialize the 3 extra argv parameters
+	char *q = new_param_buf + array_size;
 	memcpy(q, buf, len + 1);
 	new_array[0] = q;
 	new_array[1] = q + 4;
@@ -126,10 +117,14 @@ static char *bomsh_create_param_buf(bomsh_cmd_data_t *cmd, int *buf_size)
 	return new_param_buf;
 }
 
-// modify the array pointers with new starting address
-static void bomsh_modify_param_buf(char *param_buf, char *new_addr)
+// modify the array pointers with new starting address and tracee_argv
+static void bomsh_modify_param_buf(bomsh_cmd_data_t *cmd, char *param_buf, char *new_addr)
 {
 	char **params = (char **)param_buf;
+	for (int i=0; i < cmd->num_argv; i++) {
+		params[i] = cmd->tracee_argv[i];
+	}
+	params += cmd->num_argv; // it now points to the first arg of "-MD -MF depfile.d"
 	ptrdiff_t diff = new_addr - param_buf;
 	while (*params) {
 		*params += diff;  // adjust with the same diff
@@ -147,12 +142,14 @@ static void dump_new_param_buf(char *param_buf, int buf_size)
 		bomsh_log_printf(level, "%p ", *params);
 		params++;
 	}
+	bomsh_log_string(level, " ARGV: ");
 	params ++ ;
 	char *p = (char *)params;
 	char *end = param_buf + buf_size;
+	// should just contain the string "-MD -MF depfile.d"
 	while (p < end) {
-		bomsh_log_string(level, p);
 		bomsh_log_string(level, " ");
+		bomsh_log_string(level, p);
 		p += strlen(p) + 1;
 	}
 	bomsh_log_string(level, "\nDone dumping param buf\n");
@@ -171,20 +168,26 @@ static void bomsh_execve_instrument_for_dependency(bomsh_cmd_data_t * cmd)
 	const unsigned int wordsize = current_wordsize;
 	// on x86_64, RSP register has the stack address
 	char *stack_addr = (char *) ptrace(PTRACE_PEEKUSER, tcp->pid, wordsize*RSP, 0);
+	bomsh_log_printf(level, "PID %d original stack_addr: %p\n", cmd->pid, stack_addr);
 	//int new_buf_size = buf_size;
 	int new_buf_size = (buf_size/wordsize + 1) * wordsize; // do we need address alignment?
 	dump_new_param_buf(new_param_buf, buf_size);
 
-	/* Move further of red zone and make sure we have space for the file name */
+	/* Move further of 128 bytes red zone and make sure we have space for the new_param_buf */
 	// 8192 is two memory pages, which should be sufficient for red zone
-	stack_addr -= 8192 + new_buf_size;
+	//int adjustment = 4096;
+	int adjustment = g_bomsh_config.depfile_stack_offset;
+	stack_addr -= (adjustment + new_buf_size);
 	//stack_addr -= PATH_MAX + new_buf_size; // PATH_MAX is 4096, is usually sufficient
-	//stack_addr -= 128 + PATH_MAX;  // 128 is insufficient for red zone
-	bomsh_log_printf(level, "stack_addr: %p new_param_buf: %p buf_size: %d new_size: %d\n", stack_addr, new_param_buf, buf_size, new_buf_size);
+	// 128 is insufficient for red zone, even 2048/2560 is insufficient, 4096 seems good for below behavior:
+	// the upoken write is still successful, but the read-back has different content than write-out.
+	// not sure why, but this does not impact the depfile generation, even if adjustment is 0 byte.
+	bomsh_log_printf(level, "stack_addr: %p adjust: %d new_param_buf: %p buf_size: %d new_size: %d\n",
+			stack_addr, adjustment, new_param_buf, buf_size, new_buf_size);
 
 	//bomsh_log_string(4, "will now write new_param_buf to tracee stack\n");
 	// before writing to tracee memory, modify array to point to correct stack address in tracee process
-	bomsh_modify_param_buf(new_param_buf, stack_addr);
+	bomsh_modify_param_buf(cmd, new_param_buf, stack_addr);
 	dump_new_param_buf(new_param_buf, buf_size);
 
 	// writing new_param_buf content to tracee process's stack memory
@@ -351,7 +354,7 @@ static void bomsh_free_cmd(bomsh_cmd_data_t *cmd)
 	}
 	// Usually there is no need to free output_file, since output_file is not allocated.
 	// but for some commands like dpkg_deb, output_file is allocated memory thus needs to be freed
-	if (cmd->flags == 1 && cmd->output_file) {
+	if (cmd->flags & 1 && cmd->output_file) {
 		free(cmd->output_file);
 	}
 	if (cmd->pwd) {
@@ -367,6 +370,9 @@ static void bomsh_free_cmd(bomsh_cmd_data_t *cmd)
 	bomsh_free_string_array(cmd->input_files2);
 	bomsh_free_string_array(cmd->dynlib_files);
 	bomsh_free_string_array(cmd->argv);
+	if (cmd->tracee_argv) {
+		free(cmd->tracee_argv); // a single allocated buffer to store tracee memory addresses
+	}
 	if (cmd->input_sha1) {
 		free(cmd->input_sha1[0]); // all the hashes are in a single allocated buffer
 		free(cmd->input_sha1);
@@ -419,6 +425,15 @@ static void bomsh_log_cmd_data(bomsh_cmd_data_t *cmd, int level)
 	if (bomsh_verbose < level) return;
 	bomsh_log_printf(level, "\nStart of cmd_data, pid: %d pwd: %s root: %s path: %s", cmd->pid, cmd->pwd, cmd->root, cmd->path);
 	bomsh_log_string_array(level, cmd->argv, (char *)" ", (char *)"\nargv cmdline:", NULL);
+	if (cmd->tracee_argv) {
+		char **p = cmd->tracee_argv;
+		bomsh_log_string(level, "\ntracee_argv:");
+		while (*p) {
+			bomsh_log_printf(level, " %p", *p);
+			p++;
+		}
+	}
+	bomsh_log_printf(level, "\nnum_argv: %d", cmd->num_argv);
 	if (cmd->stdin_file) {
 		bomsh_log_printf(level, "\nstdin_file: %s", cmd->stdin_file);
 	}
@@ -580,8 +595,10 @@ copy_single_str(struct tcb *const tcp, kernel_ulong_t addr)
 
 // Copy the array of char * pointers of argv in tracee process.
 // the new argv array in tracer's process is allocated and needs to be freed after use.
+// if tracee_argv is not NULL, the tracee's argv array will be put there.
+// tracee_argv is allocated memory and needs to be freed after use.
 static char **
-copy_argv_array(struct tcb *const tcp, kernel_ulong_t addr)
+copy_argv_array(struct tcb *const tcp, kernel_ulong_t addr, int *num_argv, char ***tracee_argv)
 {
 	if (!addr) {
 		return NULL;
@@ -592,7 +609,15 @@ copy_argv_array(struct tcb *const tcp, kernel_ulong_t addr)
 	unsigned int n = 0;
 
 	unsigned int argc = get_argc(tcp, addr);
+	if (num_argv) {
+		*num_argv = argc;
+	}
 	char **array = (char **)xmalloc( (argc+1) * sizeof(char *));
+	char **orig_array = NULL;
+	if (tracee_argv) {
+		orig_array = (char **)xmalloc( (argc+1) * sizeof(char *));
+		*tracee_argv = orig_array;
+	}
 
 	for (;; prev_addr = addr, addr += wordsize, ++n) {
 		union {
@@ -614,7 +639,11 @@ copy_argv_array(struct tcb *const tcp, kernel_ulong_t addr)
 			break;
 
 		array[n] = copy_single_str(tcp, word);
+		if (orig_array) {
+			orig_array[n] = (char *)word;
+		}
 	}
+	if (orig_array) orig_array[argc] = NULL;
         array[argc] = NULL;
 	return array;
 }
@@ -712,6 +741,22 @@ static char * bomsh_get_pid_stat(pid_t pid)
 	char stat_file[32] = "";
 	sprintf(stat_file, "/proc/%d/stat", pid);
 	return bomsh_read_proc_file(stat_file, NULL);
+}
+
+// print /proc/pid/maps content for a traced process.
+static void bomsh_dump_pid_memory_maps(pid_t pid)
+{
+	char stat_file[32] = "";
+	sprintf(stat_file, "/proc/%d/maps", pid);
+	char *content = bomsh_read_proc_file(stat_file, NULL);
+	if (!content) {
+		bomsh_log_printf(8, "\nproc file does not exist: %s\n", stat_file);
+		return;
+	}
+	bomsh_log_printf(8, "\nHere is the content of process memory maps file %s:\n", stat_file);
+	bomsh_log_string(8, content);
+	bomsh_log_string(8, "\nEnd of process memory maps file content\n");
+	free(content);
 }
 
 // get parent PID for a traced process.
@@ -927,8 +972,22 @@ int bomsh_record_command(struct tcb *tcp, const unsigned int index)
 		return 0;
 	}
 	// Add this shell command to global bomsh_cmds struct, for later hook analysis
-	char **argv_array = copy_argv_array(tcp, tcp->u_arg[index + 1]);
+	int num_argv = 0;
+	char **tracee_argv = NULL;
+	char ***p_tracee_argv = NULL;
+	if (!g_bomsh_config.generate_depfile) {
+		// trace_argv is only needed for depfile instrumentation, which is 0 mode
+		p_tracee_argv = &tracee_argv;
+	}
+	char **argv_array = copy_argv_array(tcp, tcp->u_arg[index + 1], &num_argv, p_tracee_argv);
 	bomsh_cmd_data_t *cmd = bomsh_add_cmd(tcp, pwd, rootdir, path, argv_array);
+	cmd->num_argv = num_argv;
+	cmd->tracee_argv = tracee_argv;
+	if (bomsh_verbose > 40) { // collect more info for debugging
+		cmd->stdin_file = bomsh_get_stdin_file(tcp);
+		cmd->stdout_file = bomsh_get_stdout_file(tcp);
+		cmd->ppid = bomsh_get_ppid(tcp->pid);
+	}
 	// run hook program in pre-exec mode
 	bomsh_prehook_program(cmd);
 	return 1;
@@ -1122,6 +1181,7 @@ static int gcc_generates_dependency_rule(char **argv)
 	return is_token_prefix_in_argv(argv, "-M");
 }
 
+#if 0
 // Whether the gcc command compiles from C/C++ source files to intermediate .o/.s/.E only
 static int gcc_is_compile_only(char **argv)
 {
@@ -1133,6 +1193,7 @@ static int gcc_is_compile_only(char **argv)
 	}
 	return 0;
 }
+#endif
 
 // read depend_file and put the list of depend files in the depends array.
 // depend_buf contains the contents of depend_file, with NULL-terminated file paths.
@@ -1963,6 +2024,20 @@ static void bomsh_process_gcc_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 				cmd->skip_record_raw_info = 1;
 				return;
 			}
+			// CC cmd invoked by CGO is handled only if the config value is 1
+			// We observed that the outfile path always contains "tmp/go-build" substring.
+			if (g_bomsh_config.handle_cgo_cc_cmd != 1 && strstr(cmd->output_file, "tmp/go-build")) {
+                                // GCO CC command is not handled, because special CGO stack manipulation issue
+				cmd->flags |= 4; // indicate this cmd is CGO invoked gcc/clang cmd, and we don't generate depfile for it
+                                if (!g_bomsh_config.handle_cgo_cc_cmd) { // do not handle at all
+					bomsh_log_printf(level, "\nThe output file %s is CGO go-build outfile, skip recording raw info\n", cmd->output_file);
+					cmd->skip_record_raw_info = 1;
+				} else { // info-only
+					bomsh_log_printf(level, "\nThe output file %s is CGO go-build outfile, recording raw info as info-only\n", cmd->output_file);
+					cmd->skip_record_raw_info = 2;
+				}
+                                return;
+                        }
 		}
 
 		if (!g_bomsh_config.handle_conftest) {
@@ -1982,7 +2057,8 @@ static void bomsh_process_gcc_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 		}
 
 		// we should not do generating depfile for gcc linking command
-		if (gcc_is_compile_only(cmd->argv) && !gcc_generates_dependency_rule(cmd->argv)) { // must not have -M option
+		//if (gcc_is_compile_only(cmd->argv) && !gcc_generates_dependency_rule(cmd->argv)) { // must not have -M option
+		if (!gcc_generates_dependency_rule(cmd->argv)) { // must not have -M option
 			bomsh_try_get_gcc_subfiles(cmd);
 			if (!cmd->num_inputs || (cmd->num_inputs == 1 && strcmp(cmd->input_files[0], "/dev/null") == 0)) {
 				bomsh_log_string(level, "\nThere is no input file, or input is /dev/null, skip recording raw info\n");
@@ -1994,6 +2070,7 @@ static void bomsh_process_gcc_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 				// Add "-MD -MF depfile" option to existing argv to generate dependency file by default
 				bomsh_log_string(level, "\npre-exec mode, instrument gcc command for dependency\n");
 				bomsh_execve_instrument_for_dependency(cmd);
+				cmd->flags |= 2; // indicate this cmd is instrumented for gcc dependency
 			} else if (g_bomsh_config.generate_depfile == 1) {
 				// Invoke a child process to generate dependency file
 				bomsh_log_string(level, "\npre-exec mode, run child-process gcc for dependency\n");
@@ -2009,7 +2086,7 @@ static void bomsh_process_gcc_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 	bomsh_log_cmd_data(cmd, 14);
 
 	// non-pre-exec mode, invoked after the execve syscall
-	if (cmd->skip_record_raw_info) return;
+	if (cmd->skip_record_raw_info == 1) return;
 #if 0
 	if (cmd->depend_file) {  // some debugging code for dependency file parsing
 		char buf[500]; static int mydep_count = 0;
@@ -2038,6 +2115,14 @@ static void bomsh_process_gcc_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 		bomsh_cmd_read_depend_file(cmd);
 		bomsh_log_cmd_data(cmd, 24);
 		bomsh_log_printf(level, "After reading depend file %s\n", cmd->depend_file);
+	}
+	// check if ld_cmd has outfile but gcc cmd does not. This is the case for the default a.out file.
+	if (!cmd->output_file && cmd->ld_cmd) {
+		bomsh_cmd_data_t *ld_cmd = cmd->ld_cmd;
+		if (ld_cmd->output_file) {
+			cmd->output_file = strdup(ld_cmd->output_file);
+			cmd->flags |= 1; // to indicate that output_file is allocated and needs to be freed
+		}
 	}
 	// Check if it is special piggy object from Linux kernel build
 	handle_linux_kernel_piggy_object(cmd);
@@ -2332,10 +2417,16 @@ static void bomsh_link_ld_with_gcc_cmd(bomsh_cmd_data_t *cmd, bomsh_cmd_data_t *
 	gcc_cmd->ld_cmd = cmd; // link this ld cmd to its parent GCC CMD
 	cmd->refcount ++; // delay the memory free of this ld cmd
 	bomsh_log_printf(8, "\nCmd memory refcount++ to %d for ld cmd pid %d\n", cmd->refcount, cmd->pid);
-	if (g_bomsh_config.record_raw_info_flags & 1) {
-		cmd->skip_record_raw_info = 1; // skip recording for this ld cmd
+	if (g_bomsh_config.record_raw_info_flags & 1) { // this flag means info-only ADG is recorded
+		// do we really need to check this flag? yes, this is useful to get rid of some noise for CGO.
+		if (gcc_cmd->flags & 0x4 && !g_bomsh_config.handle_cgo_cc_cmd) {
+			// gcc cmd is invoked by CGO, no need to record this ld cmd
+			cmd->skip_record_raw_info = 1; // skip recording for this ld cmd
+		} else {
+			cmd->skip_record_raw_info = 2; // info only for this ld cmd
+		}
 	} else {
-		cmd->skip_record_raw_info = 2; // info only for this ld cmd
+		cmd->skip_record_raw_info = 1; // skip recording for this ld cmd
 	}
 }
 
@@ -2797,7 +2888,10 @@ static char * get_input_patch_file_of_patch_command(bomsh_cmd_data_t *cmd)
 	if (input_patch) {
 		return input_patch;
 	} else { // must be form: patch [options] [originalfile [patchfile]]
-		return token; // last token is the patchfile
+		if (token && token[0] != '-') {
+			return token; // last token is the patchfile
+		}
+		return NULL;
 	}
 }
 
@@ -3035,16 +3129,12 @@ static void bomsh_process_chrpath_command(bomsh_cmd_data_t *cmd, int pre_exec_mo
 // cmdline format: sepdebugcrcfix DEBUG_DIR FILEs
 static void get_all_subfiles_in_sepdebugcrcfix_cmdline(bomsh_cmd_data_t *cmd)
 {
-	int argc = 0;
-	char **p = cmd->argv;
-	while (*p) { // count number of args
-		p++; argc++;
-	}
+	int argc = cmd->num_argv;
 	if (argc < 2) {
 		return;
 	}
 	char **array = malloc( (argc - 1) * sizeof(char *) );
-	p = &(cmd->argv[2]); // start from argv[2]
+	char **p = &(cmd->argv[2]); // start from argv[2]
 	int i;
 	for (i=0; i < argc-2; i++, p++) {
 		array[i] = strdup(*p);
@@ -3121,17 +3211,13 @@ static void bomsh_process_samefile_converter_command(bomsh_cmd_data_t *cmd, int 
 // example: arch/x86/boot/tools/build arch/x86/boot/setup.bin arch/x86/boot/vmlinux.bin arch/x86/boot/zoffset.h arch/x86/boot/bzImage
 static void get_all_subfiles_in_bzimage_build_cmdline(bomsh_cmd_data_t *cmd)
 {
-	int argc = 0;
-	char **p = cmd->argv;
-	while (*p) { // count number of args
-		p++; argc++;
-	}
+	int argc = cmd->num_argv;
 	if (argc < 5) {
 		return;
 	}
 	cmd->output_file = cmd->argv[4];
 	char **array = malloc( (argc - 1) * sizeof(char *) );
-	p = &(cmd->argv[1]); // start from argv[1]
+	char **p = &(cmd->argv[1]); // start from argv[1]
 	int i;
 	for (i=0; i < argc-2; i++, p++) {
 		array[i] = strdup(*p);
@@ -3351,8 +3437,12 @@ static void bomsh_process_shell_command(bomsh_cmd_data_t *cmd, int pre_exec_mode
 		bomsh_process_gcc_command(cmd, pre_exec_mode);
 	} else if (is_cc_linker(name)) {
 		bomsh_process_ld_command(cmd, pre_exec_mode);
-	} else if (g_bomsh_config.handle_gnu_as_cmd && strcmp(name, "as") == 0) {
-		bomsh_process_as_command(cmd, pre_exec_mode);
+	} else if (strcmp(name, "as") == 0) {
+		if (g_bomsh_config.handle_gnu_as_cmd) {
+			bomsh_process_as_command(cmd, pre_exec_mode);
+		} else {
+			bomsh_log_printf(15, "\nNot-supported shell command: %s\n", prog);
+		}
 	} else if (bomsh_endswith(name, "objcopy", '-')) {
 		bomsh_process_objcopy_command(cmd, pre_exec_mode);
 	} else if (is_ar_command(name)) {
@@ -3371,8 +3461,12 @@ static void bomsh_process_shell_command(bomsh_cmd_data_t *cmd, int pre_exec_mode
 		bomsh_process_strip_like_command(cmd, pre_exec_mode, 2);
 	} else if (strcmp(name, "sepdebugcrcfix") == 0) {
 		bomsh_process_sepdebugcrcfix_command(cmd, pre_exec_mode);
-	} else if (g_bomsh_config.handle_pkg_build_cmd && strcmp(name, "dpkg-deb") == 0) {
-		bomsh_process_dpkg_deb_command(cmd, pre_exec_mode);
+	} else if (strcmp(name, "dpkg-deb") == 0) {
+		if (g_bomsh_config.handle_pkg_build_cmd) {
+			bomsh_process_dpkg_deb_command(cmd, pre_exec_mode);
+		} else {
+			bomsh_log_printf(15, "\nNot-supported shell command: %s\n", prog);
+		}
 	} else if (strcmp(prog, "arch/x86/boot/tools/build") == 0) {
 		bomsh_process_bzimage_build_command(cmd, pre_exec_mode);
 	} else if (is_rpmsign_command(cmd, name)) {
@@ -3389,23 +3483,27 @@ static void bomsh_prehook_program(bomsh_cmd_data_t *cmd)
 {
 	bomsh_log_printf(4, "\n---start prehook pid %d befor EXECVE syscall", cmd->pid);
 	bomsh_log_cmd_data(cmd, 6);
+	if (bomsh_verbose > 50) bomsh_dump_pid_memory_maps(cmd->pid);
 	bomsh_process_shell_command(cmd, 1);
 	bomsh_log_cmd_data(cmd, 5);
 	bomsh_log_printf(4, "\n----done prehook pid %d befor execve syscall\n", cmd->pid);
 }
 
 // invoked after the execve syscall and after it
-void bomsh_hook_program(int pid)
+void bomsh_hook_program(int pid, int status)
 {
 	if (g_bomsh_config.trace_execve_cmd_only == 1) {
-		bomsh_log_printf(2, "\n====Tracing only, hook_program   pid %d after  EXECVE syscall", pid);
+		bomsh_log_printf(2, "\n====Tracing only, hook_program   pid %d after  EXECVE syscall status: %d", pid, status);
 		return;
 	}
-	bomsh_log_printf(3, "\n====hook_program pid %d after EXECVE syscall", pid);
+	bomsh_log_printf(3, "\n====hook_program pid %d after EXECVE syscall status: %d", pid, status);
 	bomsh_cmd_data_t *cmd = bomsh_remove_cmd(pid);
 	if (!cmd) {
 		bomsh_log_printf(3, "\n===No pid %d cmd_data found\n", pid);
 		return;
+	}
+	if (status && (cmd->flags & 2)) { // non-zero status and this cmd is instrumented
+		bomsh_log_printf(8, "\nWarning: non-zero exit status %d %d for instrumented PID %d prog: %s\n", status>>8, status, pid, cmd->path);
 	}
 	bomsh_log_cmd_data(cmd, 4);
 	bomsh_process_shell_command(cmd, 0);
