@@ -146,7 +146,7 @@ def get_filetype(afile):
     cmd = "file " + cmd_quote(afile) + " || true"
     #print (cmd)
     output = subprocess.check_output(cmd, shell=True, universal_newlines=True)
-    res = re.split(":\s+", output.strip())
+    res = re.split(r":\s+", output.strip())
     if len(res) > 1:
         return ": ".join(res[1:])
     return "empty"
@@ -488,7 +488,7 @@ def get_all_gitbom_doc_files_with_checksum(topdir, checksum):
         hexchar_num = 62
     topdir_abspath = os.path.abspath(topdir)
     # filter out .git/ directory which contains files with similar names.
-    cmd = 'find ' + topdir_abspath + ' -name "' + hexchar * hexchar_num + '" -path "*/[0-9a-f][0-9a-f]/*" -type f | grep -v "\/\.git\/" | xargs grep -l ' + checksum + ' || true'
+    cmd = 'find ' + topdir_abspath + ' -name "' + hexchar * hexchar_num + '" -path "*/[0-9a-f][0-9a-f]/*" -type f | grep -v "/\.git/" | xargs grep -l ' + checksum + ' || true'
     verbose(cmd, LEVEL_3)
     return get_shell_cmd_output(cmd).splitlines()
 
@@ -528,7 +528,7 @@ def get_all_gitbom_doc_files_in_dir(topdir, is_topdir=True):
     else:
         cmd = 'find ' + topdir_abspath + ' -name "' + hexchar * hexchar_num + '" -path "*/objects/[0-9a-f][0-9a-f]/*" -type f || true'
     # filter out .git/ directory which contains files with similar names.
-    cmd = 'find ' + topdir_abspath + ' -name "' + hexchar * hexchar_num + '" -path "*/[0-9a-f][0-9a-f]/*" -type f | grep -v "\/\.git\/" || true'
+    cmd = 'find ' + topdir_abspath + ' -name "' + hexchar * hexchar_num + '" -path "*/[0-9a-f][0-9a-f]/*" -type f | grep -v "/\.git/" || true'
     verbose(cmd, LEVEL_3)
     output = get_shell_cmd_output(cmd)
     ret = {}
@@ -704,6 +704,8 @@ def create_gitbom_doc_treedb_for_checksums(bomdir, checksums, use_checksum_line=
             print("Warning: No embedded .omnibor section and no recorded bom_id mapping for blob ID: " + checksum)
             continue
         verbose("Will use mapping of blob_id: " + checksum + " bom_id: " + bom_id)
+        if checksum not in g_gitbom_doc_db: # save the top-level checksum => bom_id mapping too
+            g_gitbom_doc_db[checksum] = bom_id
         if use_checksum_line:
             # Add below blob_id to bom_id mapping for convenience, which has the is_self_hashtree attribute to distinguish from regular nodes.
             checksum_line = "blob " + checksum + " bom " + bom_id

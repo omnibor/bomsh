@@ -138,7 +138,7 @@ def get_filetype(afile):
     cmd = "file " + cmd_quote(afile) + " || true"
     #print (cmd)
     output = subprocess.check_output(cmd, shell=True, universal_newlines=True)
-    res = re.split(":\s+", output.strip())
+    res = re.split(r":\s+", output.strip())
     if len(res) > 1:
         return ": ".join(res[1:])
     return "empty"
