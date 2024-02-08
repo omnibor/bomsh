@@ -126,8 +126,8 @@ g_bomsh_dockerfile_str = '''
 
 # Set up mock build environment
 RUN     \\
-    dnf install -y git wget mock rpm-build python3-pyyaml which automake autoconf ; \\
     dnf group install -y "Development Tools" ; \\
+    dnf install -y git wget mock rpm-build python3-pip python3-pyyaml which automake autoconf ; \\
     dnf clean all ;
 
 # Set up bomtrace2/bomsh environment
@@ -141,11 +141,15 @@ RUN cd /root ; git clone https://github.com/omnibor/bomsh.git ; \\
     ./bootstrap && ./configure --enable-mpers=check && make ; \\
     cp src/strace /tmp/bomtrace2 ;
 
+# Set up SPDX tools-python environment
+RUN cd /root ; git clone https://github.com/spdx/tools-python.git ;
+
 # Bomtrace/Bomsh mock build run to generate OmniBOR documents
 # if BASELINE_REBUILD is not empty, then it will not use bomtrace2 to run mock, that is, the baseline run.
 # if CHROOT_CFG is not empty, then the provided mock chroot_cfg will be used, otherwise, default.cfg is used.
 CMD if [ -z "${BASELINE_REBUILD}" ]; then bomtrace_cmd="/tmp/bomtrace2 -w /tmp/bomtrace_watched_programs -c /tmp/bomtrace.conf -o /tmp/bomsh_hook_strace_logfile " ; fi ; \\
-    if [ -z "${CHROOT_CFG}" ]; then CHROOT_CFG=$(basename $(readlink /etc/mock/default.cfg) .cfg) ; fi ; \\
+    if [ -z "${CHROOT_CFG}" ]; then CHROOT_CFG=$(basename $(readlink /etc/mock/default.cfg) .cfg) ; \\
+    elif [ -h /etc/mock/${CHROOT_CFG}.cfg ] ; then CHROOT_CFG=$(basename $(readlink /etc/mock/${CHROOT_CFG}.cfg) .cfg) ; fi ; \\
     mkdir -p /out/bomsher_out ; cd /out/bomsher_out ; \\
     # Need to put the extra MOCK_OPTION into an array for use by later mock command ; \\
     echo $MOCK_OPTION ; eval "mock_opt=($MOCK_OPTION)" ; declare -p mock_opt ; \\
@@ -168,7 +172,10 @@ CMD if [ -z "${BASELINE_REBUILD}" ]; then bomtrace_cmd="/tmp/bomtrace2 -w /tmp/b
     /tmp/bomsh_search_cve.py --derive_sbom -b omnibor_dir $cvedb_file_param -f $rpmfiles -vvv ; cp /tmp/bomsh_search_jsonfile* bomsh_logfiles/ ; \\
     # Extra handling of syft generated SPDX SBOM documents ; \\
     if [ "${SYFT_SBOM}" ]; then /tmp/bomsh_sbom.py -b omnibor_dir -F $rpmfiles -vv --output_dir syft_sbom --sbom_format spdx ; fi ; \\
-    if [ "${SYFT_SBOM}" ]; then /tmp/bomsh_sbom.py -b omnibor_dir -F $rpmfiles -vv --output_dir syft_sbom --sbom_format spdx-json ; fi ;
+    if [ "${SYFT_SBOM}" ]; then /tmp/bomsh_sbom.py -b omnibor_dir -F $rpmfiles -vv --output_dir syft_sbom --sbom_format spdx-json ; fi ; \\
+    # Extra handling of bomsh-spdx generated SPDX SBOM documents ; \\
+    export PYTHONPATH=/root/tools-python/src ; \\
+    if [ "${BOMSH_SPDX}" ]; then /tmp/bomsh_spdx_rpm.py -r $rpmfiles --output_dir bomsh_sbom --sbom_server_url http://your.org ; fi ;
 '''
 
 def create_dockerfile(work_dir):
@@ -185,10 +192,20 @@ def create_dockerfile(work_dir):
         bomsh_dockerfile_str = bomsh_dockerfile_str.replace("RUN     ", "RUN     dnf install -y epel-release ; ")
     if "almalinux" in from_str:
         bomsh_dockerfile_str = bomsh_dockerfile_str.replace("RUN     ", "RUN     dnf install -y almalinux-release ; ")
+    if args.bomsh_spdx:
+        # bomsh_spdx_rpm.py requires additional python libraries from pip3
+        bomsh_dockerfile_str = bomsh_dockerfile_str.replace("dnf clean all ;",
+                "pip3 install requests license-expression beartype uritools rdflib xmltodict pyyaml packageurl-python ; \\\n"
+                "    dnf clean all ;")
+    if args.bomsh_spdx and "almalinux:8" in from_str:
+        # almalinux8 has python3.6 version as default, but we need at least python3.8 version for bomsh_spdx_rpm.py and spdx/tools-python library
+        bomsh_dockerfile_str = bomsh_dockerfile_str.replace("dnf clean all ;",
+                "dnf install -y python38 python38-pip ; ln -sf /usr/bin/python3.8 /usr/bin/python3 ; ln -sf /usr/bin/pip3.8 /usr/bin/pip3 ; \\\n"
+                "    pip3.8 install requests license-expression beartype uritools rdflib xmltodict pyyaml packageurl-python ; \\\n"
+                "    dnf clean all ;")
     if args.chroot_cfg and "mageia" in args.chroot_cfg:  # special handling for mageia platform due to file permission check with multiple levels of symlinks
-        tokens = g_bomsh_dockerfile_str.splitlines()
-        # insert one line to do sed replacement of bomtrace.conf file to change bomtrace config
-        bomsh_dockerfile_str = '\n'.join(tokens[:11] + ["    sed -i -e 's/#skip_checking_prog_access=1/skip_checking_prog_access=1/' /tmp/bomtrace.conf ; \\",] + tokens[11:]) + '\n'
+        bomsh_dockerfile_str = bomsh_dockerfile_str.replace("cp bomsh/scripts/*.py bomsh/bin/bomtrace* /tmp ; ",
+                "cp bomsh/scripts/*.py bomsh/bin/bomtrace* /tmp ; \\\n    sed -i -e 's/#skip_checking_prog_access=1/skip_checking_prog_access=1/' /tmp/bomtrace.conf ; ")
     dockerfile_str = from_str + bomsh_dockerfile_str
     dockerfile = os.path.join(work_dir, "Dockerfile")
     write_text_file(dockerfile, dockerfile_str)
@@ -224,6 +241,9 @@ def run_docker(src_rpm_file, output_dir):
     if args.syft_sbom:
         # Generate SBOM document with the syft tool
         docker_cmd += ' -e SYFT_SBOM=1'
+    if args.bomsh_spdx:
+        # Generate SPDX SBOM document with the bomsh_spdx_rpm.py tool
+        docker_cmd += ' -e BOMSH_SPDX=1'
     docker_cmd += ' -v ' + output_dir + ':/out $(docker build -t bomsher-rpm -q ' + bomsher_indir + ')'
     verbose("==== Here is the docker run command: " + docker_cmd, LEVEL_1)
     os.system(docker_cmd)
@@ -262,6 +282,9 @@ def rtd_parse_options():
     parser.add_argument("--syft_sbom",
                     action = "store_true",
                     help = "run syft to generate RPM SBOM in spdx/spdx-json SBOM format")
+    parser.add_argument("--bomsh_spdx",
+                    action = "store_true",
+                    help = "run bomsh_spdx_rpm.py to generate RPM SBOM in spdx/spdx-json SBOM format")
     parser.add_argument("-b", "--baseline_rebuild",
                     action = "store_true",
                     help = "baseline rebuild only, do not run bomtrace2 to generate OmniBOR documents")
