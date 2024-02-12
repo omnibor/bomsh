@@ -15,7 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Bomsh script to create SPDX documents for RPM packages built from its src RPM.
+Bomsh script to create SPDX documents for Debian packages built from its src.
 """
 
 import sys
@@ -32,6 +32,12 @@ import uuid
 import secrets
 import requests
 import argparse
+
+# for special filename handling with shell
+try:
+    from shlex import quote as cmd_quote
+except ImportError:
+    from pipes import quote as cmd_quote
 
 from spdx_tools.common.spdx_licensing import spdx_licensing
 from spdx_tools.spdx.model import (
@@ -98,8 +104,8 @@ CREATOR_ORG = "your-organization-name"
 # This is the email address of the SPDX creator
 CREATOR_EMAIL = "sbom@your-organization-name"
 
-# This is the dir where all the built RPMs end up
-RPMS_DIR = "/out/bomsher_out/rpms"
+# This is the dir where all the built DEBs end up
+RPMS_DIR = "/out/bomsher_out/debs"
 
 # TODO: this is for development purposes.  Once we figure out how we are going to leverage this script we will
 # come up with a better way of identifying where our DB files live
@@ -138,73 +144,98 @@ def load_json_db(db_file):
         db = json.load(f)
     return db
 
+def get_shell_cmd_output(cmd):
+    """
+    Returns the output of the shell command "cmd".
+
+    :param cmd: the shell command to execute
+    """
+    #print (cmd)
+    output = subprocess.check_output(cmd, shell=True, universal_newlines=True)
+    return output
+
+def find_all_regular_files(builddir):
+    """
+    Find all regular files in the build dir, excluding symbolic link files.
+
+    It simply runs the shell's find command and saves the result.
+
+    :param builddir: String, build dir of the workspace
+    :returns a list that contains all the regular file names.
+    """
+    #verbose("entering find_all_regular_files: the build dir is " + builddir, LEVEL_4)
+    builddir = os.path.abspath(builddir)
+    findcmd = "find " + cmd_quote(builddir) + ' -type f -print || true '
+    output = subprocess.check_output(findcmd, shell=True, universal_newlines=True)
+    files = output.splitlines()
+    return files
+
+def unbundle_package(pkgfile, destdir=''):
+    '''
+    unbundle RPM/DEB package to destdir.
+    :param pkgfile: the RPM/DEB package file to unbundle
+    :param destdir: the destination directory to save unbundled files
+    '''
+    if not destdir:
+        extract_dir = os.path.join(g_tmpdir, "bomsh_extract_dir")
+        if not os.path.exists(extract_dir):
+            os.makedirs(extract_dir)
+        destdir = os.path.join(extract_dir, os.path.basename(pkgfile) + ".extractdir")
+    if pkgfile[-4:] == ".rpm":
+        cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; cd " + destdir + " ; rpm2cpio " + pkgfile + " | cpio -idm || true"
+    elif pkgfile[-4:] == ".deb" or pkgfile[-5:] in (".udeb", ".ddeb"):
+        cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; dpkg-deb -xv " + pkgfile + " " + destdir + " || true"
+    elif pkgfile[-4:] == ".tgz" or pkgfile[-7:] in (".tar.gz", ".tar.xz") or pkgfile[-8:] == ".tar.bz2":
+        cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; tar -xf " + pkgfile + " -C " + destdir + " || true"
+    else:
+        print("Unsupported package format in " + pkgfile + " file, skipping it.")
+        return ''
+    print(f'Unpacking archive: {pkgfile} to dir: {destdir}\n')
+    get_shell_cmd_output(cmd)
+    return destdir
+
 # This generates a 16 digit unique hex string that can be appended to values to make them unique
 # syft does this via IDByHash()
 # In theory we could have the caller add the number of digits they want
 def unique():
     return secrets.token_hex(8)
 
-def rpm_unpack(rpm_name):
-    unpack_base = os.path.join(g_tmpdir, "bomsh_extract_dir")
-    unpack_cmd_1 = f'/usr/bin/rpm2cpio {rpm_name}'
-    unpack_cmd_2 = 'cpio -idm'
-
-    os.makedirs(unpack_base, exist_ok=True)
-    rpm_unpack_dir = tempfile.mkdtemp(dir=unpack_base, prefix=f'{os.path.basename(rpm_name)}-')
-
-    # Extract CPIO arechive from RPM
-    # The result ends up in the pipe
-    p1 = subprocess.Popen(unpack_cmd_1.split(' '), stdout=subprocess.PIPE)
-    # Set our current dir to our temp dir
-    # Use CPIO to unpack the archive in the pipe to our temp dir
-    # NOTE: if this starts doing weird things (especially for large archives) then we may need
-    # to go low level with subprocess.Popen and subprocess.communicate() here
-    p2 = subprocess.run(unpack_cmd_2.split(' '), stdin=p1.stdout, capture_output=True, text=True,
-        cwd=rpm_unpack_dir)
-
-    print(f'Unpacking archive: {rpm_name} to dir: {rpm_unpack_dir}\n{p2.stdout}')
-    return rpm_unpack_dir
-
-def rpm_query_fmt(query_tag, rpm):
-    # You quote braces with a '{{'
-    cmd_str = f'rpm -qp --queryformat=%{{{query_tag}}} {rpm}'
-    query_data = subprocess.run(cmd_str.split(" "), capture_output=True, text=True)
-    return query_data.stdout
-
-def rpm_query_files(rpm):
-    # I'm putting the fixed width / number stuff first in the output
-    cmd_str = 'rpm -q --queryformat=[%{FILEMD5S}\t%{FILEMODES}\t%{FILESIZES}\t%{FILENAMES}\n] ' + rpm
-
-    query_data = subprocess.run(cmd_str.split(" "), capture_output=True, text=True)
-
-    # The cmd output is a list of \n terminated lines with the fields in each line separated by a \t
-    # We need to kill the last \n to make the zip work out
-    tags = ["file_sha256", "file_mode", "file_size", "file_name"]
-    return [dict(zip(tags, x.split('\t'))) for x in query_data.stdout.rstrip('\n').split('\n')]
+def deb_unpack(debfile):
+    return unbundle_package(debfile)
 
 # Instead of getting the full pkg info from the DB, this one gets it from the package itself
-def rpm_query_pkg(rpm):
-    cmd_str = f'rpm -qpi {rpm}'
+def deb_query_pkg(rpm):
+    cmd_str = f'dpkg -f {rpm}'
     query_data = subprocess.run(cmd_str.split(" "), capture_output=True, text=True)
 
     pkg_info = query_data.stdout.splitlines()
     pkg_data = parse_pkg_info(pkg_info)
     return pkg_data
 
-def rpm_pkg_nvra(pkg_data):
+def get_pkg_name(pkg_data):
+    pkg_name = ''
+    if 'Package' in pkg_data:
+        pkg_name = pkg_data['Package']
+    else:
+        pkg_name = pkg_data['Source'] + ".Source"
+    return pkg_name
+
+def deb_pkg_nvra(pkg_data):
     # "Name        : gcc"
-    pkg_name = pkg_data['Name']
+    #pkg_name = pkg_data['Name']
+    pkg_name = get_pkg_name(pkg_data)
 
     # "Version     : 8.5.0"
     pkg_ver = pkg_data['Version']
 
+    # There is no Name or Release in Debian package data.
     # "Release     : 18.el8.alma"
-    pkg_rel = pkg_data['Release']
+    #pkg_rel = pkg_data['Release']
 
     # "Architecture: x86_64"
     pkg_arch = pkg_data['Architecture']
 
-    return (pkg_name, pkg_ver, pkg_rel, pkg_arch)
+    return (pkg_name, pkg_ver, '', pkg_arch)
 
 def valid_spdx_id(name):
     # spdx_id must only contain letters, numbers, "." and "-"
@@ -233,14 +264,17 @@ def parse_pkg_info(pkg_info_array):
     desc_tag = "Description"
 
     for idx, l in enumerate(pkg_info_array):
+        if ":" not in l:
+            continue
+
         # Every line will have a '<tag>: <value>' format except the description field
         # We only want to split at the first ':' (or else we will be splitting timestamps)
         v = l.split(':', 1)
         # The tag will most likely have trailing spaces
-        tag = v[0].rstrip()
+        tag = v[0].strip()
         if tag == desc_tag:
             # Just in case we have a value sitting on the same line as the Description
-            desc_list += v[1].lstrip()
+            desc_list.append(v[1].lstrip())
             # Everything after the Description tag is the description value
             break
 
@@ -258,6 +292,7 @@ def parse_pkg_info(pkg_info_array):
     # We are done with the loop.  Everything else is the desription
     desc_list += pkg_info_array[idx+1:end]
     pkg_info[desc_tag] = desc_list
+    #print(pkg_info)
 
     return pkg_info
 
@@ -278,14 +313,18 @@ def build_pkg_purl(rel_data, pkg_data):
     if src_pkg:
         qual_d['upstream'] = src_pkg
 
-    qual_d['distro'] = f"{rel_data['ID']}-{rel_data['VERSION_ID']}"
+    qual_d['distro'] = f"{rel_data['ID']}"
+    #qual_d['distro'] = f"{rel_data['ID']}-{rel_data['VERSION_ID']}"
 
     # TODO: Need to figure out where subpath comes into play.  Where do I find an example
 
-    purl = PackageURL(type='rpm',
+    pkg_name = get_pkg_name(pkg_data)
+
+    purl = PackageURL(type='deb',
                       namespace=rel_data['ID'],
-                      name=pkg_data['Name'],
-                      version=f"{pkg_data['Version']}-{pkg_data['Release']}",
+                      name=pkg_name,
+                      version=f"{pkg_data['Version']}",
+                      #version=f"{pkg_data['Version']}-{pkg_data['Release']}",
                       qualifiers=qual_d,
                       subpath=None)
 
@@ -329,9 +368,10 @@ def spdx_add_package(spdx_doc, rpm_file, bom_id, file_verification_code, os_rel_
     # Only name, spdx_id and download_location are mandatory in SPDX v2.3.
 
     # This one
-    pkg_data = rpm_query_pkg(rpm_file)
+    pkg_data = deb_query_pkg(rpm_file)
 
-    (pkg_name, pkg_ver, pkg_rel, pkg_arch) = rpm_pkg_nvra(pkg_data)
+    (pkg_name, pkg_ver, pkg_rel, pkg_arch) = deb_pkg_nvra(pkg_data)
+
     sha1_hash = calculate_file_checksum(rpm_file, hash_algorithm=ChecksumAlgorithm.SHA1)
     md5_hash = calculate_file_checksum(rpm_file, hash_algorithm=ChecksumAlgorithm.MD5)
     # This was not parsing.  We will have to figure out how to handle non-standard license stuff.
@@ -342,7 +382,8 @@ def spdx_add_package(spdx_doc, rpm_file, bom_id, file_verification_code, os_rel_
         spdx_id = f'SPDXRef-Package-{valid_spdx_id(pkg_name)}-{unique()}',
         download_location = SpdxNoAssertion(),
         license_concluded = SpdxNoAssertion(),
-        version = f'{pkg_ver}-{pkg_rel}',
+        version = f'{pkg_ver}',
+        #version = f'{pkg_ver}-{pkg_rel}',
         file_name = os.path.basename(rpm_file),
         # TODO: In theory, we could have the file verification code default to None and if
         # there was a value, then set the file_analyzed / verification_code but since we
@@ -388,6 +429,8 @@ def spdx_add_package(spdx_doc, rpm_file, bom_id, file_verification_code, os_rel_
 def analyze_files(rpm_file, unpack_dir):
     # The list of file records
     file_list = []
+    files = find_all_regular_files(unpack_dir)
+    len_prefix = len(unpack_dir.rstrip("/")) + 1
 
     # We have a choice as to how we want to analyze our files
     # We can use the RPM tool to query the package or we can look at the extracted CPIO archive
@@ -395,20 +438,16 @@ def analyze_files(rpm_file, unpack_dir):
     # or symlinks) is the same both ways.
     # We will use the RPM tool to query the package as the preferred mechanism and use the extracted files when that
     # proves unsatisfactory
-    file_data = rpm_query_files(rpm_file)
+    #####file_data = rpm_query_files(rpm_file)
 
-    for idx, f in enumerate(file_data):
-        # if the file is a symlink or a directory it won't have a hash and we should probably skip it.
-        # Note: if you dump the file mode you need to wrap it in oct(file_mode) for it to look like a normal mode
-        if not stat.S_ISREG(int(f['file_mode'])):
-            continue
-
+    for f in files:
         # NOTE: Another design choice here.  If we want we can also add the file to the reference
         #
         spdx_file_ref = f'SPDXRef-File-{unique()}'
         # The parser does not like filenames that start with '/'
-        file_name = f['file_name'].lstrip('/')
-        file_sha1 = calculate_file_checksum(os.path.join(unpack_dir, file_name), hash_algorithm=ChecksumAlgorithm.SHA1)
+        file_name = f[len_prefix:]
+        file_sha1 = calculate_file_checksum(f, hash_algorithm=ChecksumAlgorithm.SHA1)
+        file_sha256 = calculate_file_checksum(f, hash_algorithm=ChecksumAlgorithm.SHA256)
         file_rec = File(
             name=file_name,
             spdx_id=spdx_file_ref,
@@ -424,7 +463,7 @@ def analyze_files(rpm_file, unpack_dir):
             file_types=[FileType.SOURCE],
             checksums=[
                 Checksum(ChecksumAlgorithm.SHA1, file_sha1),
-                Checksum(ChecksumAlgorithm.SHA256, f['file_sha256']),
+                Checksum(ChecksumAlgorithm.SHA256, file_sha256),
             ],
         #     license_concluded=spdx_licensing.parse("MIT"),
         #     license_info_in_file=[spdx_licensing.parse("MIT")],
@@ -437,13 +476,13 @@ def analyze_files(rpm_file, unpack_dir):
     return file_list
 
 def spdx_add_files(spdx_doc, file_list):
-    for file in file_list:
-        spdx_doc.files += [file]
+    for file_rec in file_list:
+        spdx_doc.files += [file_rec]
 
         # Create the contains relationship
         # TODO: We may want to look into a better way of referencing the package but this will do for now since
         # we know we only have one package
-        contains_relationship = Relationship(spdx_doc.packages[0].spdx_id, RelationshipType.CONTAINS, file.spdx_id)
+        contains_relationship = Relationship(spdx_doc.packages[0].spdx_id, RelationshipType.CONTAINS, file_rec.spdx_id)
 
         # The spdx library uses run-time type checks when assigning properties.
         # Because in-place alterations like .append() circumvent these checks, we don't use them here.
@@ -451,7 +490,7 @@ def spdx_add_files(spdx_doc, file_list):
     return spdx_doc
 
 def pkg_exists(spdx_doc, pkg):
-    pkg_file_name = f'{os.path.basename(pkg)}.rpm'
+    pkg_file_name = f'{os.path.basename(pkg)}.deb'
 
     for p in spdx_doc.packages:
         if p.file_name == pkg_file_name:
@@ -467,7 +506,7 @@ def build_basic_spdx_package(pkg, pkg_db, os_rel_data):
 
     pkg_data = parse_pkg_info(db_entry['pkg_info'])
 
-    (pkg_name, pkg_ver, pkg_rel, pkg_arch) = rpm_pkg_nvra(pkg_data)
+    (pkg_name, pkg_ver, pkg_rel, pkg_arch) = deb_pkg_nvra(pkg_data)
 
     # There are only a couple of mandatory package fields
     package = Package(
@@ -476,8 +515,8 @@ def build_basic_spdx_package(pkg, pkg_db, os_rel_data):
         download_location = SpdxNoAssertion(),
         files_analyzed = False,
         # Everything else is optional
-        version = f'{pkg_ver}-{pkg_rel}',
-        file_name = f'{os.path.basename(pkg)}.rpm',
+        version = f'{pkg_ver}',
+        file_name = f'{os.path.basename(pkg)}',
         external_references=[ make_purl_ref(pkg_data, os_rel_data) ]
     )
 
@@ -526,7 +565,7 @@ def build_sbom(rpm_file, os_rel_db):
 
     # At a minimum, we will need to get some SHA1 information from the package files
     # so unpack the RPM and save the directory name
-    unpack_dir = rpm_unpack(rpm_file)
+    unpack_dir = deb_unpack(rpm_file)
 
     # Build the basic SPDX structure
     spdx_doc = build_base_spdx(pkg_name, doc_uuid)
@@ -630,7 +669,8 @@ def build_all_spdx(env_data, tree_db):
     # We could also add an "if  _.suffix == '.rpm'" to the end if we want that restriction
     # This will put a full posix path for each RPM in the array
     # use .name if you only want the name
-    rpms = [_ for _ in rpm_path.iterdir() if str(_).endswith(".rpm")]
+    rpms = [_ for _ in rpm_path.iterdir() if str(_).endswith(".deb")]
+    print(rpms)
 
     # For now there will be a key for each package that we built
     for rpm_path in rpms:
@@ -651,24 +691,31 @@ def build_all_spdx(env_data, tree_db):
         print(f'Package gitoid: {gitoid}')
         print(f'Package OmniBOR BOM-ID: {pkg_bom_id}')
 
-        pkg_nvra = rpm_query_fmt('NVRA', str(rpm_path))
+        pkg_data = deb_query_pkg(rpm_path)
+        (pkg_name, pkg_ver, pkg_rel, pkg_arch) = deb_pkg_nvra(pkg_data)
+        pkg_nvra = ".".join([pkg_name, pkg_ver, pkg_arch])
+
+        #pkg_nvra = rpm_query_fmt('NVRA', str(rpm_path))
         # If this is a source package, the result will be the string '(none)'
         # TODO: Can we make this True / False?
-        source_pkg = rpm_query_fmt('SOURCERPM', str(rpm_path))
+        #source_pkg = rpm_query_fmt('SOURCERPM', str(rpm_path))
+        # There is no Source for Debian package
+        #source_pkg = pkg_data['Source'] + ".Source"
 
         print(f'NVRA = {pkg_nvra}')
-        print(f'Source Package: {source_pkg}')
+        #print(f'Source Package: {source_pkg}')
 
         sbom_payload = {
             "sbom_name": rpm_path.name,
             "sbom_uuid": str(doc_uuid),
             "nvra": pkg_nvra,
-            "source_pkg" : source_pkg,
+            #"source_pkg" : source_pkg,
             "distro" : env_data['ID'],
-            "release" : env_data['VERSION_ID'],
+            #"release" : env_data['VERSION_ID'],
             "gitoid": gitoid,
             "sbom": sbom_dict
         }
+        #print(sbom_payload)
 
         response = rest_put(SBOM_URL, sbom_payload)
         print(f'Storing SBOM: {response}\n')
@@ -677,9 +724,10 @@ def build_all_spdx(env_data, tree_db):
             "gitoid": gitoid,
             "pkg_name": rpm_path.name,
             "distro" : env_data['ID'],
-            "release" : env_data['VERSION_ID'],
+            #"release" : env_data['VERSION_ID'],
             "adg": tree_db[gitoid]
         }
+        #print(omnibor_payload)
 
         response = rest_put(OMNIBOR_URL, omnibor_payload)
         print(f'Storing ADG: {response}\n')
@@ -694,7 +742,7 @@ def handle_files(rel_data):
 
     # If we supply an argument then build the SPDX doc for those RPM packages
     omnibor_sbom_docs = []
-    for rpm_file in args.rpm_files.split(","):
+    for rpm_file in args.deb_files.split(","):
         if not os.path.exists(rpm_file):
             print(f'File ({rpm_file}) does not exist')
             exit(1)
@@ -726,12 +774,12 @@ def rtd_parse_options():
     Parse command options.
     """
     parser = argparse.ArgumentParser(
-        description = "This tool creates SPDX documents for RPM packages built from its src RPM")
+        description = "This tool creates SPDX documents for Debian packages built from its src")
     parser.add_argument("--version",
                     action = "version",
                     version=VERSION)
-    parser.add_argument('-F', '--rpm_files',
-                    help = "comma-separated list of RPM files to create SPDX documents")
+    parser.add_argument("-F", '--deb_files',
+                    help = "comma-separated list of Debian files to create SPDX documents")
     parser.add_argument('-o', '--output_dir',
                     help = "the output directory to store the created SPDX documents, the default is current dir")
     parser.add_argument('--sbom_server_url',
@@ -744,8 +792,8 @@ def rtd_parse_options():
                     help = "the email address of the creator used in SPDX document")
     parser.add_argument("-l", "--logs_dir",
                     help = "the directory with bomsh log files")
-    parser.add_argument("--rpms_dir",
-                    help = "the directory with RPM files")
+    parser.add_argument("--debs_dir",
+                    help = "the directory with Debian package files")
     parser.add_argument("--keep_intermediate_files",
                     action = "store_true",
                     help = "after run completes, keep all intermediate files like unbundled packages, etc.")
@@ -762,8 +810,8 @@ def rtd_parse_options():
     if args.logs_dir:
         LOGFILE_DIR = args.logs_dir
     global RPMS_DIR
-    if args.rpms_dir:
-        RPMS_DIR = args.rpms_dir
+    if args.debs_dir:
+        RPMS_DIR = args.debs_dir
     global SBOM_SERVER_URL
     if args.sbom_server_url:
         SBOM_SERVER_URL = args.sbom_server_url
@@ -818,6 +866,7 @@ def main():
     # Just in case someone hid a second '=' somewhere in there
     # We also don't want the redundant double quotes
     rel_data = dict([_.strip().replace('"','').split('=', 1) for _ in rel_info if '=' in _])
+    print(rel_data)
 
     # This file is indexed by the generated package gitoid and contains the OmniBOR bom-id info
     global g_bom_mappings_db
@@ -831,7 +880,7 @@ def main():
     global g_pkg_index_db
     g_pkg_index_db = load_json_db(os.path.join(LOGFILE_DIR, PKG_INDEX_DB))
 
-    if args.rpm_files:
+    if args.deb_files:
         handle_files(rel_data)
     else:
         build_all_spdx(rel_data, tree_db)
@@ -839,7 +888,6 @@ def main():
     extract_dir = os.path.join(g_tmpdir, "bomsh_extract_dir")
     if os.path.exists(extract_dir) and not args.keep_intermediate_files:
         shutil.rmtree(extract_dir)
-
 
 if __name__ == "__main__":
     main()
