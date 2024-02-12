@@ -200,7 +200,10 @@ CMD if [ "${SRC_TAR_DIR}" ]; then srctardir_param="--srctardir=/out/bomsher_in" 
     /tmp/bomsh_search_cve.py --derive_sbom -b omnibor_dir $cvedb_file_param -f $debfiles -vvv ; cp /tmp/bomsh_search_jsonfile* bomsh_logfiles/ ; \\
     # Extra handling of syft generated SPDX SBOM documents ; \\
     if [ "${SYFT_SBOM}" ]; then /tmp/bomsh_sbom.py -b omnibor_dir -F $debfiles -vv --output_dir syft_sbom --sbom_format spdx --force_insert ; fi ; \\
-    if [ "${SYFT_SBOM}" ]; then /tmp/bomsh_sbom.py -b omnibor_dir -F $debfiles -vv --output_dir syft_sbom --sbom_format spdx-json --force_insert ; fi ;
+    if [ "${SYFT_SBOM}" ]; then /tmp/bomsh_sbom.py -b omnibor_dir -F $debfiles -vv --output_dir syft_sbom --sbom_format spdx-json --force_insert ; fi ; \\
+    # Extra handling of bomsh-spdx generated SPDX SBOM documents ; \\
+    export PYTHONPATH=/root/tools-python/src:/root/beartype:/root/packageurl-python/src ; \\
+    if [ "${BOMSH_SPDX}" ]; then /tmp/bomsh_spdx_deb.py -F $debfiles --output_dir bomsh_sbom --sbom_server_url http://your.org ; fi ;
 '''
 
 def create_dockerfile(work_dir):
@@ -213,6 +216,14 @@ def create_dockerfile(work_dir):
     else:
         from_str = 'FROM debian:bookworm'
     dockerfile_str = from_str + g_bomsh_dockerfile_str
+    if args.bomsh_spdx:
+        # bomsh_spdx_deb.py requires additional python libraries
+        dockerfile_str = dockerfile_str.replace("rm -rf /var/lib/apt/lists/* ;",
+                "apt install python3-requests python3-license-expression python3-uritools python3-rdflib python3-xmltodict python3-yaml ; \\\n"
+                "    cd /root ; git clone https://github.com/spdx/tools-python.git ; \\\n"
+                "    git clone https://github.com/beartype/beartype.git ; \\\n"
+                "    git clone https://github.com/package-url/packageurl-python.git ; \\\n"
+                "    rm -rf /var/lib/apt/lists/* ;")
     dockerfile = os.path.join(work_dir, "Dockerfile")
     write_text_file(dockerfile, dockerfile_str)
 
@@ -251,6 +262,9 @@ def run_docker(buildinfo_file, output_dir):
     if args.syft_sbom:
         # Generate SBOM document with the syft tool
         docker_cmd += ' -e SYFT_SBOM=1'
+    if args.bomsh_spdx:
+        # Generate SPDX SBOM document with the bomsh_spdx_rpm.py tool
+        docker_cmd += ' -e BOMSH_SPDX=1'
     docker_cmd += ' -v ' + output_dir + ':/out $(docker build -t bomsher-deb -q ' + bomsher_indir + ')'
     verbose("==== Here is the docker run command: " + docker_cmd, LEVEL_1)
     os.system(docker_cmd)
@@ -289,6 +303,9 @@ def rtd_parse_options():
     parser.add_argument("--syft_sbom",
                     action = "store_true",
                     help = "run syft to generate DEB SBOM in spdx/spdx-json SBOM format")
+    parser.add_argument("--bomsh_spdx",
+                    action = "store_true",
+                    help = "run bomsh_spdx_deb.py to generate DEB SBOM in spdx/spdx-json SBOM format")
     parser.add_argument("--mmdebstrap_no_cleanup",
                     action = "store_true",
                     help = "do not cleanup chroot directory after mmdebstrap run")

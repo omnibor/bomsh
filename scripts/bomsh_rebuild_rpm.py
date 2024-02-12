@@ -141,9 +141,6 @@ RUN cd /root ; git clone https://github.com/omnibor/bomsh.git ; \\
     ./bootstrap && ./configure --enable-mpers=check && make ; \\
     cp src/strace /tmp/bomtrace2 ;
 
-# Set up SPDX tools-python environment
-RUN cd /root ; git clone https://github.com/spdx/tools-python.git ;
-
 # Bomtrace/Bomsh mock build run to generate OmniBOR documents
 # if BASELINE_REBUILD is not empty, then it will not use bomtrace2 to run mock, that is, the baseline run.
 # if CHROOT_CFG is not empty, then the provided mock chroot_cfg will be used, otherwise, default.cfg is used.
@@ -175,7 +172,7 @@ CMD if [ -z "${BASELINE_REBUILD}" ]; then bomtrace_cmd="/tmp/bomtrace2 -w /tmp/b
     if [ "${SYFT_SBOM}" ]; then /tmp/bomsh_sbom.py -b omnibor_dir -F $rpmfiles -vv --output_dir syft_sbom --sbom_format spdx-json ; fi ; \\
     # Extra handling of bomsh-spdx generated SPDX SBOM documents ; \\
     export PYTHONPATH=/root/tools-python/src ; \\
-    if [ "${BOMSH_SPDX}" ]; then /tmp/bomsh_spdx_rpm.py -r $rpmfiles --output_dir bomsh_sbom --sbom_server_url http://your.org ; fi ;
+    if [ "${BOMSH_SPDX}" ]; then /tmp/bomsh_spdx_rpm.py -F $rpmfiles --output_dir bomsh_sbom --sbom_server_url http://your.org ; fi ;
 '''
 
 def create_dockerfile(work_dir):
@@ -196,6 +193,7 @@ def create_dockerfile(work_dir):
         # bomsh_spdx_rpm.py requires additional python libraries from pip3
         bomsh_dockerfile_str = bomsh_dockerfile_str.replace("dnf clean all ;",
                 "pip3 install requests license-expression beartype uritools rdflib xmltodict pyyaml packageurl-python ; \\\n"
+                "    cd /root ; git clone https://github.com/spdx/tools-python.git ; \\\n"
                 "    dnf clean all ;")
     if args.bomsh_spdx and "almalinux:8" in from_str:
         # almalinux8 has python3.6 version as default, but we need at least python3.8 version for bomsh_spdx_rpm.py and spdx/tools-python library
