@@ -219,7 +219,7 @@ def create_dockerfile(work_dir):
     if args.bomsh_spdx:
         # bomsh_spdx_deb.py requires additional python libraries
         dockerfile_str = dockerfile_str.replace("rm -rf /var/lib/apt/lists/* ;",
-                "apt install python3-requests python3-license-expression python3-uritools python3-rdflib python3-xmltodict python3-yaml ; \\\n"
+                "apt install -y python3-requests python3-license-expression python3-uritools python3-rdflib python3-xmltodict python3-yaml ; \\\n"
                 "    cd /root ; git clone https://github.com/spdx/tools-python.git ; \\\n"
                 "    git clone https://github.com/beartype/beartype.git ; \\\n"
                 "    git clone https://github.com/package-url/packageurl-python.git ; \\\n"
