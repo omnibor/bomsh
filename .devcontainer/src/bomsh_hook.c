@@ -975,7 +975,7 @@ int bomsh_record_command(struct tcb *tcp, const unsigned int index)
 	int num_argv = 0;
 	char **tracee_argv = NULL;
 	char ***p_tracee_argv = NULL;
-	if (!g_bomsh_config.generate_depfile) {
+	if (!(g_bomsh_config.generate_depfile & 1)) {
 		// trace_argv is only needed for depfile instrumentation, which is 0 mode
 		p_tracee_argv = &tracee_argv;
 	}
@@ -1181,7 +1181,6 @@ static int gcc_generates_dependency_rule(char **argv)
 	return is_token_prefix_in_argv(argv, "-M");
 }
 
-#if 0
 // Whether the gcc command compiles from C/C++ source files to intermediate .o/.s/.E only
 static int gcc_is_compile_only(char **argv)
 {
@@ -1193,7 +1192,6 @@ static int gcc_is_compile_only(char **argv)
 	}
 	return 0;
 }
-#endif
 
 // read depend_file and put the list of depend files in the depends array.
 // depend_buf contains the contents of depend_file, with NULL-terminated file paths.
@@ -1970,6 +1968,38 @@ static void handle_linux_kernel_piggy_object(bomsh_cmd_data_t *cmd)
 	}
 }
 
+static void bomsh_gcc_generate_depfile(bomsh_cmd_data_t *cmd)
+{
+	int level = 6;
+	// Let's try adding extra option to collect dependency list
+	if ((g_bomsh_config.generate_depfile & 1) == 0) {
+		// Add "-MD -MF depfile" option to existing argv to generate dependency file by default
+		bomsh_log_string(level, "\npre-exec mode, instrument gcc command for dependency\n");
+		bomsh_execve_instrument_for_dependency(cmd);
+		cmd->flags |= 2; // indicate this cmd is instrumented for gcc dependency
+	} else if (g_bomsh_config.generate_depfile == 1) {
+		// Invoke a child process to generate dependency file
+		bomsh_log_string(level, "\npre-exec mode, run child-process gcc for dependency\n");
+		bomsh_invoke_subprocess_for_dependency(cmd);
+	}
+}
+
+static void bomsh_gcc_try_generate_depfile(bomsh_cmd_data_t *cmd)
+{
+	if (g_bomsh_config.generate_depfile == 100 || gcc_is_compile_only(cmd->argv)) {
+		//if(!gcc_generates_dependency_rule(cmd->argv)) { // must not have -r/-M option
+		if (!is_token_in_argv(cmd->argv, "-r") && !gcc_generates_dependency_rule(cmd->argv)) { // must not have -r/-M option
+			bomsh_try_get_gcc_subfiles(cmd);
+			if (!cmd->num_inputs || (cmd->num_inputs == 1 && strcmp(cmd->input_files[0], "/dev/null") == 0)) {
+				bomsh_log_string(6, "\nThere is no input file, or input is /dev/null, skip recording raw info\n");
+				cmd->skip_record_raw_info = 1;
+				return;
+			}
+			bomsh_gcc_generate_depfile(cmd);
+		}
+	}
+}
+
 static void bomsh_process_gcc_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 {
 	int level = 6;
@@ -2042,8 +2072,28 @@ static void bomsh_process_gcc_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 
 		if (!g_bomsh_config.handle_conftest) {
 			// outfiles are usually conftest/conftest.o/conftest2.o
-	       		if (cmd->output_file && strncmp(bomsh_basename(cmd->output_file), "conftest", strlen("conftest")) == 0) {
+			if (cmd->output_file && strncmp(bomsh_basename(cmd->output_file), "conftest", strlen("conftest")) == 0) {
 				bomsh_log_string(level, "\nconftest outfile, will skip recording raw info\n");
+				cmd->skip_record_raw_info = 1;
+				return;
+			}
+			// CMakeFiles testing also just fails, so we can ignore these gcc cmd too
+			// output file always starts with CMakeFiles/cmTC_
+			if (cmd->output_file && (strncmp(cmd->output_file, "cmTC_", strlen("cmTC_")) == 0 ||
+						strncmp(cmd->output_file, "CMakeFiles/cmTC_", strlen("CMakeFiles/cmTC_")) == 0)) {
+				int pwd_len = strlen(cmd->pwd);
+				const char *suffix = "CMakeFiles/CMakeTmp";
+				int suffix_len = strlen(suffix);
+				// pwd always ends with CMakeFiles/CMakeTmp
+				if (pwd_len > suffix_len && strcmp(cmd->pwd + pwd_len - suffix_len, suffix) == 0) {
+					bomsh_log_string(level, "\nCMakeFiles Tmp outfile, will skip recording raw info\n");
+					cmd->skip_record_raw_info = 1;
+					return;
+				}
+			}
+			// Perl SDK always has try.o output file, which usually just fails, so we can ignore this gcc cmd
+			if (cmd->output_file && strcmp(cmd->output_file, "try.o") == 0 && strstr(cmd->pwd, "/perl-")) {
+				bomsh_log_string(level, "\nperl try.o outfile, will skip recording raw info\n");
 				cmd->skip_record_raw_info = 1;
 				return;
 			}
@@ -2056,27 +2106,9 @@ static void bomsh_process_gcc_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 			}
 		}
 
-		// we should not do generating depfile for gcc linking command
-		//if (gcc_is_compile_only(cmd->argv) && !gcc_generates_dependency_rule(cmd->argv)) { // must not have -M option
-		if (!gcc_generates_dependency_rule(cmd->argv)) { // must not have -M option
-			bomsh_try_get_gcc_subfiles(cmd);
-			if (!cmd->num_inputs || (cmd->num_inputs == 1 && strcmp(cmd->input_files[0], "/dev/null") == 0)) {
-				bomsh_log_string(level, "\nThere is no input file, or input is /dev/null, skip recording raw info\n");
-				cmd->skip_record_raw_info = 1;
-				return;
-			}
-			// Let's try adding extra option to collect dependency list
-			if (g_bomsh_config.generate_depfile == 0) {
-				// Add "-MD -MF depfile" option to existing argv to generate dependency file by default
-				bomsh_log_string(level, "\npre-exec mode, instrument gcc command for dependency\n");
-				bomsh_execve_instrument_for_dependency(cmd);
-				cmd->flags |= 2; // indicate this cmd is instrumented for gcc dependency
-			} else if (g_bomsh_config.generate_depfile == 1) {
-				// Invoke a child process to generate dependency file
-				bomsh_log_string(level, "\npre-exec mode, run child-process gcc for dependency\n");
-				bomsh_invoke_subprocess_for_dependency(cmd);
-			}
-		}
+		// try to generate dependency file if needed.
+		bomsh_gcc_try_generate_depfile(cmd);
+
 		bomsh_log_printf(14, "\n== BEFORE EXEC we are now done handling CC command pid %d\n", cmd->pid);
 		bomsh_log_cmd_data(cmd, 14);
 		return;
@@ -2655,6 +2687,42 @@ static int is_leading_token_for_patch_file_line(char *p)
 		 (*p == '*' && *(p+1) == '*' && *(p+2) == '*')) && *(p+3) == ' ';
 }
 
+// is it the ending string for the patch file line?
+// The end string is supposed to be "date timestamp timezone" format, like
+// --- hostname/hostname.1.rh   2013-11-03 15:24:23.000000000 +0100
+// +++ squashfs4.2/squashfs-tools/unsquashfs.h     Tue Mar  5 16:25:57 2013
+// --- libusal/CMakeLists.txt     (Revision 579)
+static int is_ending_date_timestamp(char *ending)
+{
+	char *new_str = strdup(ending);
+	char delim[] = " \t"; // both space and tab characters are valid separators
+	char *saveptr = NULL;
+	char *ptr = strtok_r(new_str, delim, &saveptr);
+	int num_tokens = 0;
+	while(ptr != NULL) {
+		if (num_tokens > 2) { // do not check the first two tokens
+			char *p = ptr;
+			while (*p) {
+				// the rest must be date/timestamp/timezone, check it
+				if ((*p < '0' || *p > '9') && *p != '-' && *p != '+' && *p != '.' && *p != ':') {
+					bomsh_log_printf(10, "found invalid character '%c' in date/timestamp token '%s' for line: %s\n", *p, ptr, ending);
+					free(new_str);
+					return 0;
+				}
+				p++;
+			}
+		}
+		ptr = strtok_r(NULL, delim, &saveptr);
+		num_tokens++;
+	}
+	if (num_tokens > 6) { // too many tokens
+		free(new_str);
+		return 0;
+	}
+	free(new_str);
+	return 1;
+}
+
 // the line for old/new file has the format of:
 // --- path/to/file date timestamp timezone
 // +++ path/to/file
@@ -2679,13 +2747,8 @@ static char * parse_patch_file_line(char *line, int *length, int strip_num)
 			if (p == ptr) return NULL; // empty file
 			int len = (int)(p - ptr);
 			if (length) *length = len;
-			while (*p) {
-				// the rest must be date/timestamp/timezone, check it
-				if (*p != '-' && *p != '+' && *p != '.' && *p != ':' && *p != ' ' && *p != '\t' && (*p < '0' || *p > '9')) {
-					bomsh_log_printf(10, "found invalid character '%c' in date/timestamp for line: %s\n", *p, ptr);
-					return NULL;
-				}
-				p++;
+			if (!is_ending_date_timestamp(p)) { // additional check on valid date/timestamp ending
+				return NULL;
 			}
 			bomsh_log_printf(10, "found valid file with length %d to patch: %s\n", len, ptr);
 			return ptr;
@@ -2722,7 +2785,8 @@ static int bomsh_read_patch_file(bomsh_cmd_data_t *cmd, char *patch_file, int st
 	char *afiles[200]; int alens[200];
 
 	char delim[] = "\n";
-	char *ptr = strtok(patch_str, delim);
+	char *saveptr = NULL;
+	char *ptr = strtok_r(patch_str, delim, &saveptr);
 	while(ptr != NULL)
 	{
 		if (is_leading_token_for_patch_file_line(ptr)) {
@@ -2738,7 +2802,7 @@ static int bomsh_read_patch_file(bomsh_cmd_data_t *cmd, char *patch_file, int st
 				}
 			}
 		}
-		ptr = strtok(NULL, delim);
+		ptr = strtok_r(NULL, delim, &saveptr);
 	}
 	bomsh_log_printf(8, "\nfind %d files from the patch_str\n", num_files);
 	if (!num_files || num_files % 2 != 0) {
