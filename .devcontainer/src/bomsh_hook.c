@@ -222,6 +222,56 @@ static void bomsh_execve_instrument_for_dependency(bomsh_cmd_data_t * cmd)
 	free(new_param_buf);
 }
 
+// modify/instrument argv of existing execve syscall, to obtain gcc dependency
+// this GCC cmd has -M option, and we will replace -MMD with -MD.
+// Note: this may cause functionality issue, so be cautious to use this function
+static void bomsh_execve_instrument_for_dependency_with_m_opt(bomsh_cmd_data_t * cmd)
+{
+	int level = 9;
+	struct tcb *tcp = cmd->tcp;
+	int argc = cmd->num_argv;
+	char **argv = cmd->argv;
+	char *stack_addr = NULL;
+	char new_param_buf[PATH_MAX];
+	int new_buf_size = 0;
+	for (int i=1; i<argc; i++) {
+		if (strcmp(argv[i], "-MMD") == 0) {
+			// replace -MMD with -MD
+			stack_addr = cmd->tracee_argv[i];
+			strcpy(new_param_buf, "-MD");
+			new_buf_size = 4;
+			break;
+		} else if (strncmp(argv[i], "-Wp,-MMD,", 9) == 0) {
+			stack_addr = cmd->tracee_argv[i];
+			strcpy(new_param_buf, "-Wp,-MD,");
+			strcpy(new_param_buf + 8, argv[i] + 9);
+			new_buf_size = strlen(new_param_buf) + 1;
+			break;
+		}
+	}
+	if (!new_buf_size) {
+		bomsh_log_string(level, "Info: there is no -MMD option to replace\n");
+		return;
+	}
+	// writing new_param_buf content to tracee process's argv[i] memory
+	unsigned int nwrite = upoken(tcp, (kernel_ulong_t)stack_addr, new_buf_size, new_param_buf);
+	if (nwrite) {
+		bomsh_log_printf(level, "Succeeded to write upoken for tracee_argv nwrite: %d\n", nwrite);
+	} else {
+		bomsh_log_string(level, "Failed to write upoken for stack\n");
+	}
+	if (bomsh_verbose > 20) {
+		// read back to make sure correct content is written to tracee memory
+		if (umoven(tcp, (kernel_ulong_t)stack_addr, new_buf_size, new_param_buf)) {
+			bomsh_log_string(level, "Failed to read-back umoven for stack\n");
+		} else {
+			bomsh_log_string(level, "Succeeded to read-back umoven for stack\n");
+		}
+		// if insufficient to skip the stack red zone, then reading back does not work
+		bomsh_log_printf(level, "read-back tracee argv: %s\n", new_param_buf);
+	}
+}
+
 /******** end of EXECVE instrumentation routines ********/
 
 /******** SHA1/SHA256 computation routines ********/
@@ -975,7 +1025,7 @@ int bomsh_record_command(struct tcb *tcp, const unsigned int index)
 	int num_argv = 0;
 	char **tracee_argv = NULL;
 	char ***p_tracee_argv = NULL;
-	if (!(g_bomsh_config.generate_depfile & 1)) {
+	if (!(g_bomsh_config.generate_depfile & 3)) {
 		// trace_argv is only needed for depfile instrumentation, which is 0 mode
 		p_tracee_argv = &tracee_argv;
 	}
@@ -1178,7 +1228,7 @@ static int is_token_prefix_in_argv(char **argv, const char *prefix)
 // whether gcc generates dependency rule, that is, with some -M/-MM/-Mx option
 static int gcc_generates_dependency_rule(char **argv)
 {
-	return is_token_prefix_in_argv(argv, "-M");
+	return is_token_prefix_in_argv(argv, "-M") || is_token_prefix_in_argv(argv, "-Wp,-M");
 }
 
 // Whether the gcc command compiles from C/C++ source files to intermediate .o/.s/.E only
@@ -1293,28 +1343,97 @@ static void bomsh_cmd_read_depend_file(bomsh_cmd_data_t *cmd)
 }
 
 // run a child process to generate dependency for GCC compilation
+// this GCC cmd has -M option, and we will replace -MMD with -MD.
+static void bomsh_invoke_subprocess_for_dependency_with_m_opt(bomsh_cmd_data_t *cmd)
+{
+	int num_tokens = cmd->num_argv;
+	char **args = malloc( (num_tokens + 5) * sizeof(char *) );
+	memcpy(args, cmd->argv, (num_tokens + 1) * sizeof(char *));
+
+	char buf[PATH_MAX];
+	if (cmd->root[1]) {
+		// -E should override the previous -c/-S option, to improve performance
+		sprintf(buf, "-E -MD -MF /tmp/bomsh_hook_target_dependency_pid%d.d", cmd->pid);
+	} else {
+		sprintf(buf, "-E -MD -MF %s/bomsh_hook_target_dependency_pid%d.d", g_bomsh_config.tmpdir, cmd->pid);
+	}
+	buf[2] = buf[6] = buf[10] = '\0';
+	char *md_str = buf + 3;
+	char *mf_str = buf + 7;
+	char *depend_file = buf + 11;
+
+	int found_mmd_option = 0;
+	int replace_mf_file = 0;
+	char **p = args;
+	while (*p) {
+		if (strcmp(*p, "-MMD") == 0) {
+			*p = md_str; // the -MD string
+			found_mmd_option = 1;
+		} else if (strcmp(*p, "-MF") == 0) {
+			p++;
+			if (*p) {
+				*p = depend_file; // the depfile string
+				replace_mf_file = 1;
+			} else {
+				bomsh_log_string(6, "\nWarning: bad gcc grammar, -MF option is the last gcc option\n");
+				break;
+			}
+		} else if (strncmp(*p, "-Wp,-MMD,", 9) == 0) {
+			char buf2[PATH_MAX];
+			if (cmd->root[1]) {
+				sprintf(buf2, "-Wp,-MD,/tmp/bomsh_hook_target_dependency_pid%d.d", cmd->pid);
+			} else {
+				sprintf(buf2, "-Wp,-MD,%s/bomsh_hook_target_dependency_pid%d.d", g_bomsh_config.tmpdir, cmd->pid);
+			}
+			*p = buf2; // replace with the new -Wp,-MD,depfile string
+			found_mmd_option = 1;
+			replace_mf_file = 1;
+		}
+		p++;
+	}
+	if (!found_mmd_option) {
+		bomsh_log_string(6, "\nWarning: -MMD option is not replaced by -MD, not invoking subprocess for dependency\n");
+		free(args);
+		return;
+	}
+	if (!replace_mf_file) {
+		bomsh_log_string(6, "\nInfo: There is no -MF option, will add it to gcc cmd\n");
+		args[num_tokens++] = mf_str; // the -MF string
+		args[num_tokens++] = depend_file; // the depfile string
+	}
+	// The -E option is always added to improve performance
+	args[num_tokens++] = buf;
+	args[num_tokens] = NULL;
+	// since cmd->pwd contains cmd->root part, we need to adjust the pwd parameter of the below call.
+	if (cmd->root[1]) {
+		bomsh_run_child_prog(args, cmd->root, cmd->pwd + strlen(cmd->root));
+	} else {
+		bomsh_run_child_prog(args, cmd->root, cmd->pwd);
+	}
+	free(args);
+	cmd->depend_file = strdup(depend_file);
+}
+
+// run a child process to generate dependency for GCC compilation
 static void bomsh_invoke_subprocess_for_dependency(bomsh_cmd_data_t *cmd)
 {
-	char **args = NULL;
-	int num_tokens = 0;
-	char **p = cmd->argv;
-	while (*p) {
-		num_tokens++; p++;
-	}
-	args = malloc( (num_tokens + 4) * sizeof(char *) );
+	int num_tokens = cmd->num_argv;
+	char **args = malloc( (num_tokens + 5) * sizeof(char *) );
 	memcpy(args, cmd->argv, num_tokens * sizeof(char *));
 	char buf[PATH_MAX];
 	if (cmd->root[1]) {
-		sprintf(buf, "-MD -MF /tmp/bomsh_hook_target_dependency_pid%d.d", cmd->pid);
+		// -E should override the previous -c/-S option, to improve performance
+		sprintf(buf, "-E -MD -MF /tmp/bomsh_hook_target_dependency_pid%d.d", cmd->pid);
 	} else {
-		sprintf(buf, "-MD -MF %s/bomsh_hook_target_dependency_pid%d.d", g_bomsh_config.tmpdir, cmd->pid);
+		sprintf(buf, "-E -MD -MF %s/bomsh_hook_target_dependency_pid%d.d", g_bomsh_config.tmpdir, cmd->pid);
 	}
-	buf[3] = buf[7] = '\0';
-	char *depend_file = buf + 8;
-	args[num_tokens] = buf;
-	args[num_tokens+1] = buf+4;
-	args[num_tokens+2] = buf+8;
-	args[num_tokens+3] = NULL;
+	buf[2] = buf[6] = buf[10] = '\0';
+	char *depend_file = buf + 11;
+	args[num_tokens] = buf; // the -E string
+	args[num_tokens+1] = buf+3; // the -MD string
+	args[num_tokens+2] = buf+7; // the -MF string
+	args[num_tokens+3] = depend_file;
+	args[num_tokens+4] = NULL;
 	// since cmd->pwd contains cmd->root part, we need to adjust the pwd parameter of the below call.
 	if (cmd->root[1]) {
 		bomsh_run_child_prog(args, cmd->root, cmd->pwd + strlen(cmd->root));
@@ -1326,22 +1445,75 @@ static void bomsh_invoke_subprocess_for_dependency(bomsh_cmd_data_t *cmd)
 }
 
 // find the depend_file from gcc argv string array
-static char * extract_depend_file_from_cc_argv(char **argv)
+static char * extract_depend_file_from_cc_argv(bomsh_cmd_data_t *cmd)
 {
-	char **p = argv; p++; // start from argv[1]
+	char *md_option = NULL;
+	char **p = cmd->argv; p++; // start from argv[1]
 	while (*p) {
-		char *token = *p;
+		char *token = *p; p++;
 		if (strncmp(token, "-Wp,-MD,", 8) == 0) {
 			return strdup(token + 8);
 		} else if (strncmp(token, "-Wp,-MMD,", 9) == 0) {
 			return strdup(token + 9);
 		}
-		if (strcmp(token, "-MF") == 0) {
-			if (*(p+1)) {
-				return strdup(*(p+1));
+		if (strcmp(token, "-MD") == 0 || strcmp(token, "-MMD") == 0) {
+			md_option = token;
+		} else if (strcmp(token, "-MF") == 0) {
+			if (*p) {
+				return strdup(*p);
 			}
 		}
-		p++;
+	}
+	if (md_option) {
+		// The driver determines file based on whether an -o option is given.
+		// If it is, the driver uses its argument but with a suffix of .d,
+		// otherwise it takes the name of the input file, removes any directory
+		// components and suffix, and applies a .d suffix.
+		if (!cmd->output_file) {
+			cmd->output_file = get_outfile_in_argv(cmd->argv);
+		}
+		char buf[PATH_MAX];
+		// the outputfile is given, then depfile is determined based on outfile
+		if (cmd->output_file) {
+			char *end = stpcpy(buf, cmd->output_file);
+			char *dot = strrchr(bomsh_basename(buf), '.');
+			if (dot) {
+				// replace outfile hello.o with hello.d
+				dot[1] = 'd'; dot[2] = 0;
+			} else {
+				// append .d to hello to become hello.d
+				end[0] = '.'; end[1] = 'd'; end[2] = 0;
+			}
+			return strdup(buf);
+#if 0
+		} else {
+			// usually we don't process gcc/clang cmd without -o option,
+			// thus this case will not run into.
+			char *infile = NULL;
+			p = cmd->argv; p++;
+			while (*p) {
+				char *dot = strrchr(*p, '.');
+				//if (bomsh_endswith(*p, "c", '.') || bomsh_endswith(*p, "cpp", '.')) {
+				if (dot && ((dot[1] == 'c' && dot[2] == 0) || (strcmp(dot + 1, "cpp") == 0))
+					&& bomsh_is_regular_file(*p, cmd->pwd, cmd->root)) {
+					infile = *p;
+					bomsh_log_printf(6, "We will construct depfile based on this found input file: %s\n", infile);
+					break;
+				}
+				p++;
+			}
+			if (infile) {
+				// construct the depfile based on input file
+				char *end = stpcpy(buf, cmd->pwd);
+				*end = '/'; end[1] = 0;
+				strcat(end + 1, bomsh_basename(infile));
+				char *dot = strrchr(end, '.');
+				dot[1] = 'd'; dot[2] = 0;
+				return strdup(buf);
+			}
+#endif
+		}
+
 	}
 	return NULL;
 }
@@ -1887,7 +2059,6 @@ input_data:
 	.incbin	"arch/arm/boot/compressed/piggy_data"
 	.globl	input_data_end
 input_data_end:
-[root@87e96394b5b5 linux]#
  *
  * Note, it can be either space character or tab character after ".incbin"
  */
@@ -1968,27 +2139,68 @@ static void handle_linux_kernel_piggy_object(bomsh_cmd_data_t *cmd)
 	}
 }
 
+static int gcc_md_option_exists_in_argv(char **argv)
+{
+	// only mode 0 and 1 handle -MMD option replacement with -MD option
+	if (g_bomsh_config.generate_depfile < 2) { // -MMD without system header files is not ok
+		// this covers all negative generate_depfile values
+		//if ((is_token_in_argv(argv, "-MD") && is_token_in_argv(argv, "-MF")) ||
+		if (is_token_in_argv(argv, "-MD") ||
+			is_token_prefix_in_argv(argv, "-Wp,-MD,")) {
+			return 1;
+		}
+	} else { // -MMD without system header files is ok
+		if (is_token_in_argv(argv, "-MD") || is_token_in_argv(argv, "-MMD") ||
+			is_token_prefix_in_argv(argv, "-Wp,-MD,") ||
+			is_token_prefix_in_argv(argv, "-Wp,-MMD,")) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
 static void bomsh_gcc_generate_depfile(bomsh_cmd_data_t *cmd)
 {
 	int level = 6;
+	if (gcc_generates_dependency_rule(cmd->argv)) { // this cmd has -M option
+		char *depend_file = extract_depend_file_from_cc_argv(cmd);
+		if (depend_file && g_bomsh_config.generate_depfile == -100) { // -100 is hack mode
+			// Invoke a child process to generate dependency file
+			cmd->depend_file = depend_file;
+			bomsh_log_string(level, "\npre-exec mode, with -M option, instrument gcc for dependency\n");
+			bomsh_execve_instrument_for_dependency_with_m_opt(cmd);
+			cmd->flags |= 2; // indicate this cmd is instrumented for gcc dependency
+			return;
+		} else if (g_bomsh_config.generate_depfile < 2) { // only for 0 and 1 mode
+			// Invoke a child process to generate dependency file
+			bomsh_log_string(level, "\npre-exec mode, with -M option, run child-process gcc for dependency\n");
+			bomsh_invoke_subprocess_for_dependency_with_m_opt(cmd);
+		}
+		if (depend_file) free(depend_file);
+		return;
+	}
 	// Let's try adding extra option to collect dependency list
-	if ((g_bomsh_config.generate_depfile & 1) == 0) {
+	if ((g_bomsh_config.generate_depfile & 3) == 0) {
 		// Add "-MD -MF depfile" option to existing argv to generate dependency file by default
 		bomsh_log_string(level, "\npre-exec mode, instrument gcc command for dependency\n");
 		bomsh_execve_instrument_for_dependency(cmd);
 		cmd->flags |= 2; // indicate this cmd is instrumented for gcc dependency
-	} else if (g_bomsh_config.generate_depfile == 1) {
+	} else if ((g_bomsh_config.generate_depfile & 3) == 1) {
 		// Invoke a child process to generate dependency file
 		bomsh_log_string(level, "\npre-exec mode, run child-process gcc for dependency\n");
 		bomsh_invoke_subprocess_for_dependency(cmd);
 	}
+	// mode 2 and 3 will not generate depfile
 }
 
 static void bomsh_gcc_try_generate_depfile(bomsh_cmd_data_t *cmd)
 {
-	if (g_bomsh_config.generate_depfile == 100 || gcc_is_compile_only(cmd->argv)) {
+	// 100 and 101 are special, to skip is_compile_only() check, 100 will instrument, and 101 will invoke subprocess
+	if (g_bomsh_config.generate_depfile == 100 || g_bomsh_config.generate_depfile == 101
+			|| gcc_is_compile_only(cmd->argv)) {
 		//if(!gcc_generates_dependency_rule(cmd->argv)) { // must not have -r/-M option
-		if (!is_token_in_argv(cmd->argv, "-r") && !gcc_generates_dependency_rule(cmd->argv)) { // must not have -r/-M option
+		//if (!is_token_in_argv(cmd->argv, "-r") && !gcc_generates_dependency_rule(cmd->argv)) { // must not have -r/-M option
+		if (!is_token_in_argv(cmd->argv, "-r")) { // must not have -r option
 			bomsh_try_get_gcc_subfiles(cmd);
 			if (!cmd->num_inputs || (cmd->num_inputs == 1 && strcmp(cmd->input_files[0], "/dev/null") == 0)) {
 				bomsh_log_string(6, "\nThere is no input file, or input is /dev/null, skip recording raw info\n");
@@ -2007,17 +2219,17 @@ static void bomsh_process_gcc_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 		bomsh_log_printf(13, "\n== BEFORE EXEC we will now start handling CC command pid %d\n", cmd->pid);
 		bomsh_log_cmd_data(cmd, 13);
 
-		// "clang -cc1" and "clang -cc1as" commands are not handled, since they are invoked by clang parent process
-		if (is_token_in_argv(cmd->argv, "-cc1") || is_token_in_argv(cmd->argv, "-cc1as")) {
-			bomsh_log_string(21, "\nclang -cc1 or -cc1as commands are not handled\n");
-			cmd->skip_record_raw_info = 1;
-			return;
-		}
 		// always get outfile first, make it easier for later handling
 		cmd->output_file = get_outfile_in_argv(cmd->argv);
 		bomsh_log_printf(level, "gcc cmdline found output file %s\n", cmd->output_file);
 		if (!cmd->output_file) {
 			bomsh_log_string(21, "\ngcc/clang commands without -o option are not handled\n");
+			cmd->skip_record_raw_info = 1;
+			return;
+		}
+		// "clang -cc1" and "clang -cc1as" commands are not handled, since they are invoked by clang parent process
+		if (is_token_in_argv(cmd->argv, "-cc1") || is_token_in_argv(cmd->argv, "-cc1as")) {
+			bomsh_log_string(21, "\nclang -cc1 or -cc1as commands are not handled\n");
 			cmd->skip_record_raw_info = 1;
 			return;
 		}
@@ -2029,25 +2241,9 @@ static void bomsh_process_gcc_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 			return;
 		}
 #endif
-		if (is_token_in_argv(cmd->argv, "-MF") ||
-				is_token_prefix_in_argv(cmd->argv, "-Wp,-MD,") ||
-				is_token_prefix_in_argv(cmd->argv, "-Wp,-MMD,")) {
-			cmd->depend_file = extract_depend_file_from_cc_argv(cmd->argv);
-			bomsh_log_string(level, "pre-exec mode, found cc command with depend-file\n");
-			if (cmd->depend_file) {
-				if (strcmp(cmd->depend_file, "/dev/null")) { // not /dev/null file, valid depend_file
-					return; // will read the depend_file and record depenency after EXECVE syscall
-				} else {
-					free(cmd->depend_file);
-					cmd->depend_file = NULL;
-				}
-			}
-		}
-
-		// handle the -o option first, so that we can skip some undesired outfile earlier
-		//cmd->output_file = get_outfile_in_argv(cmd->argv);
-		// the -o option has been handled earlier, so no need to do it here
-		if (cmd->output_file) {
+		// check if we can skip some undesired outfile earlier
+		//if (cmd->output_file) {
+		if (1) {
 			if (strcmp(cmd->output_file, "/dev/null") == 0) {
 				// no need to do anything if output is /dev/null
 				bomsh_log_string(level, "\nThe output file is /dev/null, skip recording raw info\n");
@@ -2072,15 +2268,15 @@ static void bomsh_process_gcc_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 
 		if (!g_bomsh_config.handle_conftest) {
 			// outfiles are usually conftest/conftest.o/conftest2.o
-			if (cmd->output_file && strncmp(bomsh_basename(cmd->output_file), "conftest", strlen("conftest")) == 0) {
+			if (strncmp(bomsh_basename(cmd->output_file), "conftest", strlen("conftest")) == 0) {
 				bomsh_log_string(level, "\nconftest outfile, will skip recording raw info\n");
 				cmd->skip_record_raw_info = 1;
 				return;
 			}
 			// CMakeFiles testing also just fails, so we can ignore these gcc cmd too
 			// output file always starts with CMakeFiles/cmTC_
-			if (cmd->output_file && (strncmp(cmd->output_file, "cmTC_", strlen("cmTC_")) == 0 ||
-						strncmp(cmd->output_file, "CMakeFiles/cmTC_", strlen("CMakeFiles/cmTC_")) == 0)) {
+			if (strncmp(cmd->output_file, "cmTC_", strlen("cmTC_")) == 0 ||
+					strncmp(cmd->output_file, "CMakeFiles/cmTC_", strlen("CMakeFiles/cmTC_")) == 0) {
 				int pwd_len = strlen(cmd->pwd);
 				const char *suffix = "CMakeFiles/CMakeTmp";
 				int suffix_len = strlen(suffix);
@@ -2092,7 +2288,7 @@ static void bomsh_process_gcc_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 				}
 			}
 			// Perl SDK always has try.o output file, which usually just fails, so we can ignore this gcc cmd
-			if (cmd->output_file && strcmp(cmd->output_file, "try.o") == 0 && strstr(cmd->pwd, "/perl-")) {
+			if (strcmp(cmd->output_file, "try.o") == 0 && strstr(cmd->pwd, "/perl-")) {
 				bomsh_log_string(level, "\nperl try.o outfile, will skip recording raw info\n");
 				cmd->skip_record_raw_info = 1;
 				return;
@@ -2103,6 +2299,20 @@ static void bomsh_process_gcc_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
 				bomsh_log_string(level, "\nconftest infile, will skip recording raw info\n");
 				cmd->skip_record_raw_info = 1;
 				return;
+			}
+		}
+
+		// gcc cmd may already generate dependency file, if so, use it directly
+		if (gcc_md_option_exists_in_argv(cmd->argv)) {
+			cmd->depend_file = extract_depend_file_from_cc_argv(cmd);
+			bomsh_log_string(level, "pre-exec mode, found cc command with depend-file\n");
+			if (cmd->depend_file) {
+				if (strcmp(cmd->depend_file, "/dev/null")) { // not /dev/null file, valid depend_file
+					return; // will read the depend_file and record depenency after EXECVE syscall
+				} else {
+					free(cmd->depend_file);
+					cmd->depend_file = NULL;
+				}
 			}
 		}
 
