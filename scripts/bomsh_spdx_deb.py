@@ -220,6 +220,12 @@ def get_pkg_name(pkg_data):
         pkg_name = pkg_data['Source'] + ".Source"
     return pkg_name
 
+def get_pkg_version(pkg_data):
+    pkg_ver = 'UNKNOWN'
+    if 'Version' in pkg_data:
+        pkg_ver = pkg_data['Version']
+    return pkg_ver
+
 def deb_pkg_nvra(pkg_data):
     # "Name        : gcc"
     #pkg_name = pkg_data['Name']
@@ -327,7 +333,6 @@ def build_pkg_purl(rel_data, pkg_data):
                       #version=f"{pkg_data['Version']}-{pkg_data['Release']}",
                       qualifiers=qual_d,
                       subpath=None)
-
     return str(purl)
 
 def make_purl_ref(pkg_data, os_rel_data):
@@ -339,7 +344,28 @@ def make_purl_ref(pkg_data, os_rel_data):
         locator=purl,
         # comment="external reference comment",
     )
+    return ref
 
+def build_pkg_cpe(rel_data, pkg_data):
+
+    # cpe:<cpe_version>:<part>:<vendor>:<product>:<version>:<update>:<edition>:<language>:<sw_edition>:<target_sw>:<target_hw>:<other>
+    # like "cpe:2.3:o:canonical:ubuntu_linux:10.04:-:lts:*:*:*:*:*"
+    # or "cpe:2.3:a:pivotal_software:spring_framework:4.1.0:*:*:*:*:*:*:"
+
+    pkg_name = get_pkg_name(pkg_data)
+    pkg_ver = get_pkg_version(pkg_data)
+    wfn = ["cpe", "2.3", "a", rel_data['ID'], pkg_name, pkg_ver, "*", "*", "*", "*", "*", "*", "*"]
+    return ":".join(wfn)
+
+def make_cpe_ref(pkg_data, os_rel_data):
+    cpe = build_pkg_cpe(os_rel_data, pkg_data)
+
+    ref = ExternalPackageRef(
+        category=ExternalPackageRefCategory.SECURITY,
+        reference_type="cpe23Type",
+        locator=cpe,
+        # comment="external reference comment",
+    )
     return ref
 
 def build_base_spdx(pkg_name, doc_uuid):
@@ -401,7 +427,8 @@ def spdx_add_package(spdx_doc, rpm_file, bom_id, file_verification_code, os_rel_
                 locator=f'gitoid:blob:sha1:{bom_id}',
                 comment=f'{ADG_SERVER_URL}/adg/tree/{bom_id}',
             ),
-            make_purl_ref(pkg_data, os_rel_data)
+            make_purl_ref(pkg_data, os_rel_data),
+            make_cpe_ref(pkg_data, os_rel_data)
         ]
         # license_concluded=spdx_licensing.parse("GPL-2.0-only OR MIT"),
         # license_info_from_files=[spdx_licensing.parse("GPL-2.0-only"), spdx_licensing.parse("MIT")],
@@ -760,10 +787,16 @@ def handle_files(rel_data):
         # The document namespace will be something like this:
         #    https://sbom.your-org.com/spdxdocs/sysstat-11.7.3-9.el8.src.rpm-b184657e-6b09-48d5-a5fc-df2f106f40b5
         # so the path will be: sysstat-11.7.3-9.el8.src.rpm-b184657e-6b09-48d5-a5fc-df2f106f40b5.spdx.json
-        output_fn = f'{os.path.basename(urlsplit(spdx_doc.creation_info.document_namespace).path)}.spdx.json'
-        output_file = os.path.join(output_dir, output_fn)
-        write_file(spdx_doc, output_file)
-        omnibor_sbom_docs.append(output_file)
+        doc_basename = os.path.basename(urlsplit(spdx_doc.creation_info.document_namespace).path)
+        if args.spdx_format:
+            format_list = args.spdx_format.split(",")
+        else:
+            format_list = ["spdx", "spdx.json", "spdx.rdf", "spdx.xml", "spdx.yaml"]
+        for suffix in format_list:
+            output_fn = f'{doc_basename}.{suffix}'
+            output_file = os.path.join(output_dir, output_fn)
+            write_file(spdx_doc, output_file)
+            omnibor_sbom_docs.append(output_file)
 
     print("\nDone. All bomsh created SPDX SBOM documents with OmniBOR info are: " + str(omnibor_sbom_docs))
 
@@ -794,6 +827,8 @@ def rtd_parse_options():
                     help = "the directory with bomsh log files")
     parser.add_argument("--debs_dir",
                     help = "the directory with Debian package files")
+    parser.add_argument('--spdx_format',
+                    help = "comma-separated list of output SPDX SBOM format, like spdx,json,rdf,xml,yaml, etc.")
     parser.add_argument("--keep_intermediate_files",
                     action = "store_true",
                     help = "after run completes, keep all intermediate files like unbundled packages, etc.")

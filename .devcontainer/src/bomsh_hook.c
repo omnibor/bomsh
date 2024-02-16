@@ -2032,6 +2032,41 @@ static void bomsh_try_get_ld_subfiles(bomsh_cmd_data_t *cmd)
 	bomsh_get_gcc_subfiles(cmd, (char **)linker_skip_tokens, num_skip_tokens);
 }
 
+// This is for OpenWRT kernel build, and the below should be the piggy_gzip_cmd_file content:
+// echo 'cmd_arch/arm/boot/compressed/piggy.gzip := (cat arch/arm/boot/compressed/../Image | gzip -n -f -9 > arch/arm/boot/compressed/piggy.gzip) || (rm -f arch/arm/boot/compressed/piggy.gzip ; false)' > arch/arm/boot/compressed/.piggy.gzip.cmd"
+
+// pigg_gzip_file is absolute path with /root/pwd/path/piggy.gzip format
+static char *handle_piggy_gzip(char *piggy_gzip_file)
+{
+	char buf[PATH_MAX];
+	bomsh_log_printf(6, "incbin piggy_gzip file: %s\n", piggy_gzip_file);
+	char *end = stpcpy(buf, piggy_gzip_file);
+	strcpy(end - strlen("piggy.gzip"), ".piggy.gzip.cmd");
+	if (!is_regular_file(buf)) {
+		return NULL;
+	}
+	bomsh_log_printf(6, "found piggy_gzip_cmd file: %s the whole gzip_cmd_str:\n", buf);
+	char *content = bomsh_read_file(buf, NULL);
+	bomsh_log_string(6, content);
+
+	char *real_image = NULL;
+	char delim[] = " ";
+	char *ptr = strtok(content, delim);
+	while(ptr != NULL)
+	{
+		if (strcmp(ptr, "(cat") == 0) {
+			// the next token is the real image
+			ptr = strtok(NULL, delim);
+			real_image = strdup(ptr);
+			bomsh_log_printf(6, "for piggy_gzip file, found real image: %s\n", real_image);
+			break;
+		}
+		ptr = strtok(NULL, delim);
+	}
+	free(content);
+	return real_image;
+}
+
 /*
  * Read the piggy.S file and return the included binary file vmlinux.bin
  *
@@ -2059,14 +2094,24 @@ input_data:
 	.incbin	"arch/arm/boot/compressed/piggy_data"
 	.globl	input_data_end
 input_data_end:
+[root@87e96394b5b5 linux]#
+[root@rtp base]# cat kernel/linux-mvl-3.14/arch/arm/boot/compressed/piggy.gzip.S
+	.section .piggydata,#alloc
+	.globl	input_data
+input_data:
+	.incbin	"arch/arm/boot/compressed/piggy.gzip"
+	.globl	input_data_end
+input_data_end:
+[root@rtp base]#
  *
  * Note, it can be either space character or tab character after ".incbin"
  */
 static char * bomsh_read_piggy_S_file(bomsh_cmd_data_t *cmd, char *piggy_S_file)
 {
 	char buf[PATH_MAX];
-	char *afile = get_real_path2(cmd, piggy_S_file, buf);
-	char *content = bomsh_read_file(afile, NULL);
+	char *piggy_S_path = get_real_path2(cmd, piggy_S_file, buf);
+	//bomsh_log_printf(6, "piggy_S file abspath: %s\n", piggy_S_path);
+	char *content = bomsh_read_file(piggy_S_path, NULL);
 	char *p = content;
 	char *inc_bin_str = NULL;
 	while (*p) {
@@ -2081,8 +2126,16 @@ static char * bomsh_read_piggy_S_file(bomsh_cmd_data_t *cmd, char *piggy_S_file)
 				// remove the .gz to get the real vmlinux_bin file
 				*(end - 3) = 0;
 			}
-			inc_bin_str = strdup(start + 1);
-			bomsh_log_printf(8, "\nFound vmlinux_bin: %s from piggy_S file: %s\n", inc_bin_str, piggy_S_file);
+			if (strcmp(bomsh_basename(start + 1), "piggy.gzip") == 0) {
+				//bomsh_log_string(6, "found piggy.gzip incbin file, will read .piggy.gzip.cmd file for real image.\n");
+				// start+1 points to "arch/arm/boot/compressed/piggy.gzip" string
+				char *piggy_gzip_file = get_real_path2(cmd, start+1, buf);
+				inc_bin_str = handle_piggy_gzip(piggy_gzip_file);
+			}
+			if (!inc_bin_str) {
+				inc_bin_str = strdup(start + 1);
+			}
+			bomsh_log_printf(8, "\nFound real image vmlinux_bin: %s from piggy_S file: %s\n", inc_bin_str, piggy_S_file);
 			break;
 		}
 	}
@@ -2098,16 +2151,14 @@ static char * find_piggy_S_file(char *output_file, char **input_files)
 		return NULL;
 	}
 	char *outfile = bomsh_basename(output_file);
-	//if (strcmp(outfile, "piggy.o") && strcmp(outfile, "piggy.gzip.o")) {
-	if (strcmp(outfile, "piggy.o")) {
+	if (strcmp(outfile, "piggy.o") && strcmp(outfile, "piggy.gzip.o")) {
 		return NULL;
 	}
 	char **p = input_files;
 	while (*p) {
 		char *token = *p; p++;
 		char *name = bomsh_basename(token);
-		//if (strcmp(name, "piggy.S") == 0 || strcmp(name, "piggy.gzip.S") == 0) {
-		if (strcmp(name, "piggy.S") == 0) {
+		if (strcmp(name, "piggy.S") == 0 || strcmp(name, "piggy.gzip.S") == 0) {
 			return token;
 		}
 	}
