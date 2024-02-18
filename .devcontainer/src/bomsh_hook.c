@@ -1741,6 +1741,11 @@ static void bomsh_record_raw_info(bomsh_cmd_data_t *cmd)
 // record raw info for a single file OUTFILE, which is both input file and output file.
 static void bomsh_record_raw_info2_infile(bomsh_cmd_data_t *cmd, char *outfile, char *in_hash, char **extra_infiles, int hash_alg, char *ahash, int level)
 {
+	if (!bomsh_check_permission(outfile, cmd->pwd, cmd->root, F_OK)) {
+		// when patching deletes a file, then this outfile does not exist after patching
+		bomsh_log_printf(8, "\nWarning: not-existent output infile to record raw info: %s\n", outfile);
+		return;
+	}
 	bomsh_cmd_get_hash(cmd, outfile, hash_alg, ahash);
 	// if hash_alg=100, then always empty hash, thus ahash always equals in_hash, but we still want to record this raw info
 	if (g_bomsh_config.hash_alg != 100 && strcmp(ahash, in_hash) == 0) {
@@ -2564,7 +2569,7 @@ static void get_all_subfiles_in_ar_cmdline(bomsh_cmd_data_t *cmd)
 		// # also support "ar rvs archive file1...fileN" format
 		return;
 	}
-	if (!g_bomsh_config.handle_conftest && strcmp(token2, "libconftest.a") == 0) {
+	if (!g_bomsh_config.handle_conftest && (strcmp(token2, "libconftest.a") == 0 || strcmp(token2, "conftest.a") == 0)) {
 		cmd->skip_record_raw_info = 1;
 		return;
 	}
@@ -3001,6 +3006,9 @@ static char * parse_patch_file_line(char *line, int *length, int strip_num)
 	char *ptr = line + 4;
 	char *p = ptr;
 	int strips = strip_num;
+	if (strncmp(ptr, "/dev/null", strlen("/dev/null")) == 0) { // "/dev/null" is special
+		strips = 0;  // no stripping, even if -p1 or -p2 in patch cmd
+	}
 	bomsh_log_printf(10, "\nparse patch file line: %s\n", line);
 	while (1) {
 		char c = *p;
@@ -3033,13 +3041,15 @@ static char * parse_patch_file_line(char *line, int *length, int strip_num)
 // read patch file and return the list of files to patch.
 // return the number of files to patch in the patch file.
 // if FILES is not NULL, then the list of files will be put there.
-static int bomsh_read_patch_file(bomsh_cmd_data_t *cmd, char *patch_file, int strip_num, char ***files)
+static int bomsh_read_patch_file(bomsh_cmd_data_t *cmd, char *patch_file, int strip_num, char *change_dir, char ***files)
 {
 	char *patch_str = bomsh_read_file(patch_file, NULL);
 	bomsh_log_printf(22, "\nReading patch_file: %s the whole patch_str:\n%s\n", patch_file, patch_str);
 	if (!patch_str) {
 		return 0;
 	}
+	// the -d option of patch cmd may specify a different change_dir than cmd->pwd
+	char *patch_file_pwd = change_dir ? change_dir : (cmd->pwd);
 
 	int num_files = 0;
 	// record the start position and length of each file
@@ -3088,23 +3098,29 @@ static int bomsh_read_patch_file(bomsh_cmd_data_t *cmd, char *patch_file, int st
 			cfile = afile; clen = alen;
 		} else if (alen <= blen) {
 			memcpy(buf, afile, alen); buf[alen] = 0;
-			if (bomsh_check_permission(buf, cmd->pwd, cmd->root, F_OK)) {
+			if (bomsh_check_permission(buf, patch_file_pwd, cmd->root, F_OK)) {
 				cfile = afile; clen = alen;
 			} else {
 				cfile = bfile; clen = blen;
 			}
 		} else {
 			memcpy(buf, bfile, blen); buf[blen] = 0;
-			if (bomsh_check_permission(buf, cmd->pwd, cmd->root, F_OK)) {
+			if (bomsh_check_permission(buf, patch_file_pwd, cmd->root, F_OK)) {
 				cfile = bfile; clen = blen;
 			} else {
 				cfile = afile; clen = alen;
 			}
 		}
-		memcpy(buf, cfile, clen); buf[clen] = 0;
+		char *end = buf;
+		if (cfile[0] != '/') {
+			// either use absolute path to avoid cmd->pwd mis-use later during record_raw_info()
+			// or use the new correct relative path, with patch_file_pwd prefix already.
+			end = stpcpy(buf, patch_file_pwd); *(end++) = '/';
+		}
+		memcpy(end, cfile, clen); end[clen] = 0;
 #if 0
 		// if afile is /dev/null, then bfile does not exist yet before applying the patch
-		if (!bomsh_check_permission(buf, cmd->pwd, cmd->root, F_OK)) {
+		if (!bomsh_check_permission(buf, patch_file_pwd, cmd->root, F_OK)) {
 			bomsh_log_printf(3, "Warning: the %d-th file to patch does not exist: %s\n", i, buf);
 			// free all allocated strings
 			for (int j=0; j<i; j++) {
@@ -3164,12 +3180,12 @@ static int get_strip_num_of_patch_command(bomsh_cmd_data_t *cmd)
 			if (len > 2) {
 				strip_num_str = token + 2;
 			} else {
-				strip_num_str = *p; p++;
+				strip_num_str = *p;
 			}
 			break;
 		}
 		if (strcmp(token, "--strip") == 0) {
-			strip_num_str = *p; p++;
+			strip_num_str = *p;
 			break;
 		}
 		if (strncmp(token, "--strip=", 8) == 0) {
@@ -3181,6 +3197,35 @@ static int get_strip_num_of_patch_command(bomsh_cmd_data_t *cmd)
 		return atoi(strip_num_str);
 	}
 	return 0;
+}
+
+// Get the "-d dir" option value for the patch command
+static char *get_change_dir_of_patch_command(bomsh_cmd_data_t *cmd)
+{
+	char *change_dir = NULL;
+	char **p = cmd->argv;
+	p++; // start from argv[1]
+	while (*p) {
+		char *token = *p; p++; // p points to next token already
+		if (strncmp(token, "-d", 2) == 0) {
+			int len = strlen(token);
+			if (len > 2) {
+				change_dir = token + 2;
+			} else {
+				change_dir = *p;
+			}
+			break;
+		}
+		if (strcmp(token, "--directory") == 0) {
+			change_dir = *p;
+			break;
+		}
+		if (strncmp(token, "--directory=", 12) == 0) {
+			change_dir = token + 12;
+			break;
+		}
+	}
+	return change_dir;
 }
 
 // Get the --input=PATCHFILE for the patch command
@@ -3228,6 +3273,10 @@ static void bomsh_prehook_patch_cmd(bomsh_cmd_data_t *patch_cmd)
 
 	int strip_num = get_strip_num_of_patch_command(patch_cmd);
 	bomsh_log_printf(8, "Get strip num of %d for patch cmd\n", strip_num);
+	char *change_dir = get_change_dir_of_patch_command(patch_cmd);
+	if (change_dir) {
+		bomsh_log_printf(8, "Get patch cmd change dir: %s\n", change_dir);
+	}
 
 	char **afiles = NULL;
 	int array_size = 100;
@@ -3239,7 +3288,7 @@ static void bomsh_prehook_patch_cmd(bomsh_cmd_data_t *patch_cmd)
 		char *patch_file = get_real_path(patch_cmd, token);
 		// need to get the real path of the patch file to read successfully
 		bomsh_log_printf(7, "\nRead patch file: %s real-path: %s\n", token, patch_file);
-		int num_files = bomsh_read_patch_file(patch_cmd, patch_file, strip_num, &afiles);
+		int num_files = bomsh_read_patch_file(patch_cmd, patch_file, strip_num, change_dir, &afiles);
 		free(patch_file);
 		for (int j = 0; j< num_files; j++) {
 			array[num_array++] = afiles[j];
@@ -3501,6 +3550,10 @@ static void get_all_subfiles_in_samefile_converter_cmdline(bomsh_cmd_data_t *cmd
 	p++; // start from argv[1]
 	while (*p) {
 		token = *p; p++; // p points to next token already
+	}
+	if (!token || token[0] == '-') { // cmd like "ranlib" or "ranlib --version"
+		cmd->skip_record_raw_info = 1;
+		return;
 	}
 	cmd->output_file = token;
 	char **array = alloc_2element_array(token);
