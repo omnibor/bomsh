@@ -50,6 +50,8 @@ Multiple Python scripts are developed to work together with these tools.
 - bomsh_sbom.py script, which creates or updates SPDX SBOM documents with OmniBOR info.
 - bomsh_spdx_rpm.py script, which creates or updates SPDX SBOM documents for RPMs built from its src RPM.
 - bomsh_spdx_deb.py script, which creates or updates SPDX SBOM documents for DEBs built from its src.
+- bomsh_spdx_image.py script, which creates SPDX SBOM documents for software product images.
+- bomsh_spdx_image_docker.py script, which creates SPDX SBOM documents and CVE vulnerability reports for software product images.
 - bomsh_art_tree.py script, which grafts new subtrees or prunes existing subtrees of OmniBOR artifact trees.
 - bomsh_dynlib.py script, which creates raw_logfile of runtime-dependency fragments for ELF executables.
 - bomsh_pylib.py script, which creates raw_logfile of runtime-dependency fragments for Python scripts.
@@ -1054,3 +1056,5 @@ References
 1. Towards a GitBOM Specification : https://hackmd.io/@aeva/draft-gitbom-spec
 
 2. [Bomsh/Bomtrace: Tools to Generate GitBOM Artifact Trees and Search CVE for Software Build](https://docs.google.com/presentation/d/14HuQ2_4kJYkDNumd7w7WgXJTOup0tp-AkCY7jtBNHjg)
+
+3. [OmniBOR: A System for Automatic, Verifiable Artifact Resolution across Software Supply Chains](https://arxiv.org/abs/2402.08980)

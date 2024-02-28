@@ -7,6 +7,9 @@
  * this file except in compliance with the License.  You can obtain a copy
  * in the file LICENSE in the source distribution or at
  * https://github.com/omnibor/bomsh/blob/main/LICENSE
+ *
+ * Bomsh config/init/log functions for bomtrace.
+ * January 2024, Yongkui Han
  */
 
 #include "defs.h"

@@ -48,6 +48,7 @@ LEVEL_1 = 1
 LEVEL_2 = 2
 LEVEL_3 = 3
 LEVEL_4 = 4
+LEVEL_5 = 5
 
 args = None
 # CVE DB with checksum (blob_id) as key, containing various metadata like file_path/CVElist/FixedCVElist, etc.
@@ -164,7 +165,7 @@ def load_json_db(db_file):
     return db
 
 
-def save_json_db(db_file, db, indentation=4):
+def save_json_db(db_file, db, indentation=4, verbose_level=0):
     """ Save the dictionary data to a JSON file
 
     :param db_file: the JSON database file
@@ -173,7 +174,7 @@ def save_json_db(db_file, db, indentation=4):
     """
     if not db:
         return
-    print ("save_json_db: db file is " + db_file)
+    verbose("save_json_db: db file is " + db_file, verbose_level)
     try:
         f = open(db_file, 'w')
     except IOError as e:
@@ -1024,15 +1025,34 @@ def find_cve_lists_for_checksums(checksums, is_bom_id=False):
         tree = create_hash_tree_for_checksums(checksums, g_bomid_db)
     else:
         tree = create_hash_tree_for_checksums(checksums, g_checksum_db)
-    if g_jsonfile and args.verbose > 1:
-        save_json_db(g_jsonfile + "-details.json", tree)
-        save_json_db(g_jsonfile + "-adg.json", get_tree_with_metadata_stripped(tree))
+    if g_jsonfile:
+        if args.verbose > 2:
+            if args.multi_part_json_level:
+                save_json_db_mpart(g_jsonfile + "-details-mpart.json", tree, g_jsonfile + "-details-mpart")
+            else:
+                save_json_db(g_jsonfile + "-details.json", tree)
+        if args.verbose > 1:
+            save_json_db(g_jsonfile + "-adg.json", get_tree_with_metadata_stripped(tree))
     if tree and args.derive_sbom:  # user may want to derive SBOM for the search result
         sbom_sum_db, sbom_detail_db, dynlib_detail_db = derive_sbom(tree)
-        if g_jsonfile and args.verbose > 1:
-            save_json_db(g_jsonfile + "-sbom.json", sbom_sum_db)
-            save_json_db(g_jsonfile + "-sbom-detail.json", sbom_detail_db)
-            save_json_db(g_jsonfile + "-dynlib-sbom-detail.json", dynlib_detail_db)
+        if g_jsonfile:
+            if args.verbose > 1:
+                save_json_db(g_jsonfile + "-sbom.json", sbom_sum_db)
+            if args.verbose > 2:
+                save_json_db(g_jsonfile + "-sbom-detail.json", sbom_detail_db)
+                save_json_db(g_jsonfile + "-dynlib-sbom-detail.json", dynlib_detail_db)
+    if tree and args.derive_pkg_for_img:
+        # user may want to derive package name/version for the search result, which is usually an unbundled image
+        img_pkg_db, img_pkg_db2, img_pkg_db3, sbom_sum_db, sbom_detail_db, dynlib_detail_db = derive_packages_for_image(tree)
+        if g_jsonfile:
+            if args.verbose > 1:
+                save_json_db(g_jsonfile + "-img-pkgs.json", img_pkg_db)
+                save_json_db(g_jsonfile + "-img-pkgs-blobs.json", img_pkg_db2)
+                save_json_db(g_jsonfile + "-img-pkgs-summary.json", img_pkg_db3)
+                save_json_db(g_jsonfile + "-img-sbom.json", sbom_sum_db)
+            if args.verbose > 2:
+                save_json_db(g_jsonfile + "-img-sbom-detail.json", sbom_detail_db)
+                save_json_db(g_jsonfile + "-img-dynlib-sbom-detail.json", dynlib_detail_db)
     if args.copyout_bomdir:  # Copy out necessary gitBOM docs only and truncated metadata files
         copy_all_bomdoc_in_tree(tree, args.copyout_bomdir)
         # Truncate the .omnibor/metadata/bomsh/* files too
@@ -1061,7 +1081,7 @@ def find_cve_lists_for_checksums(checksums, is_bom_id=False):
             cve_results = cve_check_rule_for_files(blobs, afiles, g_cve_check_rules)
             verbose("Here is CVE check results of downloaded SWH blobs: " + json.dumps(cve_results, indent=4, sort_keys=True), LEVEL_3)
             update_hash_tree_with_cve_results(tree, cve_results)
-            if g_jsonfile and args.verbose > 1:
+            if g_jsonfile and args.verbose > 4:
                 save_json_db(g_jsonfile + "-details_cve_swh.json", tree)
     if g_swh_dir:
         verbose("Updating swh_path for the search result tree...", LEVEL_1)
@@ -1076,6 +1096,8 @@ def find_cve_lists_for_checksums(checksums, is_bom_id=False):
     if args.create_swh_tree_dir:
         verbose("Creating the SWH tree in directory: " + args.create_swh_tree_dir, LEVEL_1)
         create_swh_tree(tree, os.path.abspath(args.create_swh_tree_dir))
+    if args.no_collect_cve:
+        return {checksum : {} for checksum in checksums}
     ret = {}
     for checksum in checksums:
         if checksum in tree:
@@ -1870,6 +1892,25 @@ def get_all_blobid_in_tree(tree):
     return list(set(result))
 
 
+# store the dict of blob_id => bom_id mappings
+g_mapping_db = {}
+
+def get_mapping_db(metadata_dir):
+    """
+    Load the mapping DB from JSON file bomsh_omnibor_doc_mapping.
+    """
+    global g_mapping_db
+    if g_mapping_db:
+        return g_mapping_db
+    mapping_file = os.path.join(metadata_dir, "bomsh_omnibor_doc_mapping")
+    if not os.path.exists(mapping_file):
+        return {}
+    mapping_db = load_json_db(mapping_file)
+    verbose("there are " + str(len(mapping_db)) + " blob_id => bom_id mappings in the original mapping file " + mapping_file)
+    g_mapping_db = mapping_db
+    return mapping_db
+
+
 def get_all_extra_blobid_in_tree(tree, metadata_dir, get_new_mapping=False):
     """
     Get all blob IDs in the tree, plus some extra blob IDs that share the same set of bom IDs in the tree.
@@ -1880,12 +1921,10 @@ def get_all_extra_blobid_in_tree(tree, metadata_dir, get_new_mapping=False):
     """
     tree_blob_ids = set(get_all_blobid_in_tree(tree))
     # Also get those blob IDs that share the same bom_id in the tree
-    mapping_file = os.path.join(metadata_dir, "bomsh_omnibor_doc_mapping")
+    mapping_db = get_mapping_db(metadata_dir)
+    if not mapping_db:
+        return (tree_blob_ids, mapping_db)
     new_mapping_db = {}
-    if not os.path.exists(mapping_file):
-        return (tree_blob_ids, new_mapping_db)
-    mapping_db = load_json_db(mapping_file)
-    verbose("there are " + str(len(mapping_db)) + " blob_id => bom_id mappings in the original mapping file " + mapping_file)
     bomids = set(get_all_bomid_in_tree(tree))
     blob_ids = set()
     for blob_id in mapping_db:
@@ -2385,6 +2424,302 @@ def derive_sbom(tree):
 #### End of metadata SBOM routines ####
 ############################################################
 
+def get_pkg_info_from_python_eggs_info_file(egg_info_file):
+    """
+    Get name/version info from Python package's "PKG-INFO" file.
+    """
+    pkg_info = read_text_file(egg_info_file)
+    name, version = '', ''
+    lines = pkg_info.splitlines()
+    for line in lines:
+        tokens = line.split(":")
+        if len(tokens) < 2:
+            continue
+        if tokens[0] == "Name":
+            name = tokens[1].strip()
+        elif tokens[0] == "Version":
+            version = tokens[1].strip()
+            break # assume Name line always comes first
+    return (name, version, lines)
+
+
+def get_src_files_from_python_sources_file(egg_sources_file, dirname):
+    """
+    Get list of files from Python package's "SOURCES" file.
+    """
+    sources = read_text_file(egg_sources_file)
+    afiles = sources.splitlines()
+    return [os.path.join(dirname, afile) for afile in afiles]
+
+
+def get_pkg_db_from_image_unbundle_dir(img_unbundle_dir):
+    """
+    Get more packages from the unpack dir of the image.
+    Here we just use Python package egg-info as one example to illustrate.
+    """
+    cmd = "find " + img_unbundle_dir + ' -name "*.egg-info" || true'
+    verbose(cmd, LEVEL_2)
+    output = get_shell_cmd_output(cmd)
+    if not output:
+        return {}
+    pkg_db = {}
+    eggs = output.splitlines()
+    for egg in eggs:
+        if os.path.isdir(egg):
+            dirname = os.path.dirname(egg)
+            pkg_info_file = os.path.join(egg, "PKG-INFO")
+            pkg_key, pkg_info_lines, blobs = '', [], []
+            if os.path.isfile(pkg_info_file):
+                name, version, pkg_info_lines = get_pkg_info_from_python_eggs_info_file(pkg_info_file)
+                pkg_key = "PY_PKG " + name + " " + version
+            sources_file = os.path.join(egg, "SOURCES.txt")
+            if os.path.isfile(sources_file):
+                afiles = get_src_files_from_python_sources_file(sources_file, dirname)
+                #for afile in afiles:
+                #    if not os.path.isfile(afile):
+                #        verbose("this py_pkg file is not found: " + afile, LEVEL_2)
+                # Get all files that exist and whose size is not 0
+                blobs = [(get_git_file_hash(afile), afile) for afile in afiles if os.path.isfile(afile) and os.path.getsize(afile) > 0]
+            if pkg_key:
+                pkg_db[pkg_key] = {"blobs" : blobs, "pkg_info": pkg_info_lines}
+        else:
+            name, version, lines = get_pkg_info_from_python_eggs_info_file(egg)
+            pkg_key = "PY_PKG " + name + " " + version
+            pkg_db[pkg_key] = {"pkg_info": lines}
+    save_json_db(g_jsonfile + "-img-pypkg-db.json", pkg_db)
+    return pkg_db
+
+
+def derive_sbom_for_image(tree):
+    """
+    Try to derive name/version of packages for SBOM, for top-level tree, which contains a few OmniBOR trees.
+    returns 3 dicts (sbom_sum_db, sbom_detail_db, dynlib_detail_db)
+    """
+    sbom_sum_db, sbom_detail_db, dynlib_detail_db = {}, {}, {}
+    metadata_dir = bomsh_get_metadata_dir(args)
+    for key in tree:
+        if " bom " not in key: # leaf node
+            continue
+        subtree = tree[key]
+        sbom = derive_sbom_for_atree(subtree, metadata_dir)
+        dynlib_sbom = derive_sbom_for_atree(subtree, metadata_dir, True)
+        prov_pkgs = {k : len(sbom[k]) for k in sbom} # prov_pkgs dict contains only summary (#blobs) for each package
+        num_blobs = sum(prov_pkgs.values())
+        sbom_summary = {}
+        sbom_summary["TOTAL_NUM_BLOBS"] = num_blobs
+        if num_blobs:
+            sbom_summary["UNKNOWN_VERSION_PERCENT"] = 100 * prov_pkgs["UNKNOWN_COMPONENT_VERSION"] / num_blobs
+        sbom_summary["prov_pkgs"] = prov_pkgs
+        dynlibs = {k : len(dynlib_sbom[k]) for k in dynlib_sbom} # dynlibs dict contains only summary (#blobs) for each package
+        num_blobs = sum(dynlibs.values())
+        sbom_summary["DYNLIB_TOTAL_NUM_BLOBS"] = num_blobs
+        if num_blobs:
+            sbom_summary["DYNLIB_UNKNOWN_VERSION_PERCENT"] = 100 * dynlibs["UNKNOWN_COMPONENT_VERSION"] / num_blobs
+        sbom_summary["dyn_libs"] = dynlibs
+        # Add some metadata like file_path/build_cmd
+        blobid, bomid = get_blob_bom_id_from_checksum_line(key)
+        if blobid in g_metadata_db:
+            value = g_metadata_db[blobid]
+            if "file_path" in value:
+                sbom_summary["file_path"] = value["file_path"]
+                sbom["file_path"] = value["file_path"]
+                dynlib_sbom["file_path"] = value["file_path"]
+            if "build_cmd" in value:
+                sbom_summary["build_cmd"] = value["build_cmd"]
+                sbom["build_cmd"] = value["build_cmd"]
+                dynlib_sbom["build_cmd"] = value["build_cmd"]
+        sbom_sum_db[key] = sbom_summary
+        sbom_detail_db[key] = sbom
+        dynlib_detail_db[key] = dynlib_sbom
+    return sbom_sum_db, sbom_detail_db, dynlib_detail_db
+
+
+def derive_img_pkg_for_atree(atree, metadata_dir):
+    """
+    Try to derive name/version of packages for immediate children of top-level tree, which is usually an unbundled image.
+    returns 6 dicts (img_pkg_db, img_pkg_db2, img_pkg_db3, sbom_sum_db, sbom_detail_db, dynlib_detail_db)
+    """
+    sbom_sum_db, sbom_detail_db, dynlib_detail_db = derive_sbom_for_image(atree)
+    img_pkg_db = {}
+    for line in atree:
+        node = atree[line]
+        new_node = {}
+        if "file_path" in node:
+            new_node["file_path"] = node["file_path"]
+        if "prov_pkg" in node:
+            new_node["prov_pkg"] = node["prov_pkg"]
+        img_pkg_db[line] = new_node
+        blobid, bomid = get_blob_bom_id_from_checksum_line(line)
+        if not bomid: # leaf node
+            continue
+        # non-leaf node
+        sbom = derive_sbom_for_atree(node, metadata_dir)
+        if "prov_pkg" in node: # already know its providing package
+            continue
+        # if prov_pkg not known, try to derive its package name/version
+        # this imag_pkg (imaginary package) can help create SPDX SBOM documents
+        new_node["imag_pkg"] = "UNKNOWN_PATH UNKNOWN_PKG UNKNOWN_VERSION"
+        if blobid not in g_metadata_db: # unknown blob
+            continue
+        value = g_metadata_db[blobid]
+        # try to derive its package from its file_paths
+        if "file_paths" not in value:
+            continue
+        for path in value["file_paths"]:
+            name, version = derive_componant_name_version_from_path(path)
+            if name:
+                pkg_key = "DERIVED_PKG " + name + " " + version
+                new_node["imag_pkg"] = pkg_key
+                if line in sbom_sum_db:
+                    sbom_sum_db[line]["imag_pkg"] = pkg_key
+                if line in sbom_detail_db:
+                    sbom_detail_db[line]["imag_pkg"] = pkg_key
+                if line in dynlib_detail_db:
+                    dynlib_detail_db[line]["imag_pkg"] = pkg_key
+                break
+    # try to get some pkg_info from image unbundle directory
+    if args.img_unbundle_dir:
+        pypkg_db = get_pkg_db_from_image_unbundle_dir(args.img_unbundle_dir)
+        for pkg in pypkg_db:
+            if "blobs" not in pypkg_db[pkg]:
+                continue
+            blobs = pypkg_db[pkg]["blobs"]
+            for blob, file_path in blobs:
+                blob_line = "blob " + blob
+                if blob_line in img_pkg_db:
+                    value = img_pkg_db[blob_line]
+                    verbose("found one pypkg blob: " + blob + " value: "  + str(value), LEVEL_5)
+                    if "prov_pkg" not in value:
+                        value["py_pkg"] = pkg
+                        verbose("it does not have prov_pkg, set py_pkg to " + pkg, LEVEL_5)
+                    else:
+                        verbose("it already has prov_pkg", LEVEL_5)
+                else:
+                    verbose("Warning: not found this pypkg blob: " + blob + " file_path: " + file_path, LEVEL_2)
+    # also create a dict with pkg-name-version as key, and list of blobs as value
+    img_pkg_db2 = {}
+    for line in img_pkg_db:
+        node = img_pkg_db[line]
+        if not line.startswith("blob "):
+            continue
+        pkg = "UNKNOWN_PATH UNKNOWN_PKG UNKNOWN_VERSION"
+        if "prov_pkg" in node:
+            pkg = node["prov_pkg"]
+        elif "py_pkg" in node:
+            pkg = node["py_pkg"]
+        elif "imag_pkg" in node:
+            pkg = node["imag_pkg"]
+        if pkg in img_pkg_db2:
+            img_pkg_db2[pkg].append( (line, node["file_path"]) )
+        else:
+            img_pkg_db2[pkg] = [(line, node["file_path"]),]
+    # create a dict of pkg summary { pkg => pkg_info_summary }
+    img_pkg_db3 = {}
+    for pkg in img_pkg_db2:
+        if pkg in ("build_cmd", "file_path"):
+            continue
+        else:
+            tokens = pkg.split()
+            new_node = {"Name": tokens[1], "Version": tokens[2], "num_blobs": len(img_pkg_db2[pkg])}
+            img_pkg_db3[pkg] = new_node
+    return img_pkg_db, img_pkg_db2, img_pkg_db3, sbom_sum_db, sbom_detail_db, dynlib_detail_db
+
+
+def derive_packages_for_image(tree):
+    """
+    Try to derive name/version of packages for immediate children of top-level tree, which is usually an unbundled image.
+    returns 6 dicts (img_pkg_db, img_pkg_db2, img_pkg_db3, sbom_sum_db, sbom_detail_db, dynlib_detail_db)
+    """
+    img_pkg_db, img_pkg_db2, img_pkg_db3 = {}, {}, {}
+    sbom_sum_db, sbom_detail_db, dynlib_detail_db = {}, {}, {}
+    metadata_dir = bomsh_get_metadata_dir(args)
+    for key in tree:
+        subtree = tree[key]
+        if ' ' not in key: # special key for top level only
+            for newkey in subtree:
+                if key in newkey:
+                    subtree = subtree[newkey] # replace with its real subtree of "blob key bom bom_id"
+                    break
+        img_pkgs, img_pkgs2, img_pkgs3, sbom_sum, sbom_detail, dynlib_detail = derive_img_pkg_for_atree(subtree, metadata_dir)
+        img_pkg_db[key] = img_pkgs
+        img_pkg_db2[key] = img_pkgs2
+        img_pkg_db3[key] = img_pkgs3
+        sbom_sum_db[key] = sbom_sum
+        sbom_detail_db[key] = sbom_detail
+        dynlib_detail_db[key] = dynlib_detail
+        # Add some metadata like file_path/build_cmd
+        if key in g_metadata_db:
+            value = g_metadata_db[key]
+            if "file_path" in value:
+                img_pkgs["file_path"] = value["file_path"]
+                img_pkgs2["file_path"] = value["file_path"]
+                img_pkgs3["file_path"] = value["file_path"]
+                sbom_detail["file_path"] = value["file_path"]
+                sbom_sum["file_path"] = value["file_path"]
+                dynlib_detail["file_path"] = value["file_path"]
+            if "build_cmd" in value:
+                img_pkgs["build_cmd"] = value["build_cmd"]
+                img_pkgs2["build_cmd"] = value["build_cmd"]
+                img_pkgs3["build_cmd"] = value["build_cmd"]
+                sbom_detail["build_cmd"] = value["build_cmd"]
+                sbom_sum["build_cmd"] = value["build_cmd"]
+                dynlib_detail["build_cmd"] = value["build_cmd"]
+
+    return img_pkg_db, img_pkg_db2, img_pkg_db3, sbom_sum_db, sbom_detail_db, dynlib_detail_db
+
+############################################################
+#### End of metadata SPDX package routines ####
+############################################################
+
+def save_json_node_mpart(key, value, destdir, mpart_level):
+    """
+    Save the search result node as multip-part JSON instead of a single JSON file.
+    This function recurses on itself.
+    :param key, value: the (key, value) pair for an OmniBOR "blob XX bom YY" checksum_line
+    :param destdir: the directory to save all the JSON files.
+    :param mpart_level: the recursion level, if level is 0, then no further recursion.
+    returns the saved JSON file name for the new value of this node.
+    """
+    newfile = os.path.join(destdir, key.replace(" ", "-") + ".json")
+    if os.path.exists(newfile):
+        verbose("At mpart_level " + str(mpart_level) + ", this JSON file already exists: " + newfile, LEVEL_4)
+        return newfile
+    if not mpart_level: # no further recursion
+        save_json_db(newfile, value, indentation=4, verbose_level=5)
+        return newfile
+    new_value = value.copy()
+    for new_key in new_value:
+        if " bom " in new_key or (args.multi_part_json_leaf and new_key.startswith("blob ")):
+            # recursion for bom node (and leaf node if configured)
+            new_value[new_key] = save_json_node_mpart(new_key, value[new_key], destdir, mpart_level - 1)
+    save_json_db(newfile, new_value, indentation=4, verbose_level=5)
+    return newfile
+
+
+def save_json_db_mpart(db_file, db, destdir):
+    """
+    Save the search result DB as multi-part JSON instead of a single JSON file.
+    This is useful when the bomsh_search_jsonfile-details.json file is too big.
+    :param db_file: the JSON database file to save
+    :param db: the python dict struct
+    :param destdir: the directory to save all the JSON files.
+    """
+    mpart_level = int(args.multi_part_json_level)
+    os.makedirs(destdir, exist_ok=True)
+    new_db = {}
+    for key in db:
+        value = db[key]
+        new_value = value.copy()
+        new_db[key] = new_value
+        for new_key in new_value:
+            if " bom " in new_key: # replace the value with the saved JSON file
+                new_value[new_key] = save_json_node_mpart(new_key, value[new_key], destdir, mpart_level)
+    save_json_db(db_file, new_db)
+
+############################################################
+#### End of Saving search result as multi-part JSON ####
+############################################################
+
 def rtd_parse_options():
     """
     Parse command options.
@@ -2452,9 +2787,22 @@ def rtd_parse_options():
     parser.add_argument("--derive_sbom",
                     action = "store_true",
                     help = "derive SBOM for the search result")
+    parser.add_argument("--derive_pkg_for_img",
+                    action = "store_true",
+                    help = "derive package name/version for the immediate children of search result, which is usually an unbundled image")
+    parser.add_argument("--img_unbundle_dir",
+                    help = "the unbundle directory for the image to derive package")
+    parser.add_argument("--multi_part_json_level",
+                    help = "save search result dict with multiple JSON files instead of a single JSON file, specify the recursion level")
+    parser.add_argument("--multi_part_json_leaf",
+                    action = "store_true",
+                    help = "save leaf nodes as JSON file too")
     parser.add_argument("--leaf_nodes_only",
                     action = "store_true",
                     help = "only leaf nodes in the OmniBOR tree are considered for SBOM")
+    parser.add_argument("--no_collect_cve",
+                    action = "store_true",
+                    help = "do not collect CVE info for the search result")
     parser.add_argument("--check_blobs_in_db",
                     action = "store_true",
                     help = "find blobs of OmniBOR trees in metadata_db or index_db")
@@ -2602,7 +2950,7 @@ def main():
         print("Try -c/-f/-g option.")
     if g_jsonfile:
         save_json_db(g_jsonfile, cve_result)
-        if args.verbose > 4:  # this cache_db can be huge sometimes
+        if args.verbose > 6:  # this cache_db can be huge sometimes
             save_json_db(g_jsonfile + "-cache.json", g_checksum_cache_db)
     print("\nHere is the CVE search results:")
     print(json.dumps(cve_result, indent=4, sort_keys=True))
