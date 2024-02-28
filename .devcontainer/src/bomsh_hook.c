@@ -7,6 +7,9 @@
  * this file except in compliance with the License.  You can obtain a copy
  * in the file LICENSE in the source distribution or at
  * https://github.com/omnibor/bomsh/blob/main/LICENSE
+ *
+ * Bomsh hookup functions to record raw info of files during software build.
+ * January 2024, Yongkui Han
  */
 
 #include <sys/stat.h>
@@ -1177,7 +1180,24 @@ static int is_cc_linker(char *name)
 static int is_shared_library(char *afile)
 {
 	int len = strlen(afile);
-	return strncmp(afile + len - 3, ".so", 3) == 0;
+	if (strncmp(afile + len - 3, ".so", 3) == 0) {
+		return 1;
+	}
+	char *name = bomsh_basename(afile);
+	if (strncmp(name, "lib", 3) == 0) {
+		char *pos = strstr(name, ".so.");
+		if (pos) {
+			char *p = pos + 4;
+			while (*p) {
+				if (*p != '.' && *p < '0' && *p > '9') {
+					return 0;
+				}
+				p++;
+			}
+			return 1;
+		}
+	}
+	return 0;
 }
 
 // Get the output file in argv
