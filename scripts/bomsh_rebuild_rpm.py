@@ -169,7 +169,7 @@ CMD if [ -z "${BASELINE_REBUILD}" ]; then bomtrace_cmd="/tmp/bomtrace2 -w /tmp/b
     /tmp/bomsh_search_cve.py --derive_sbom -b omnibor_dir $cvedb_file_param -f $rpmfiles -vvv ; cp /tmp/bomsh_search_jsonfile* bomsh_logfiles/ ; \\
     # Extra handling of syft generated SPDX SBOM documents ; \\
     if [ "${SYFT_SBOM}" ]; then /tmp/bomsh_sbom.py -b omnibor_dir -F $rpmfiles -vv --output_dir syft_sbom --sbom_format spdx ; fi ; \\
-    if [ "${SYFT_SBOM}" ]; then /tmp/bomsh_sbom.py -b omnibor_dir -F $rpmfiles -vv --output_dir syft_sbom --sbom_format spdx-json ; fi ; \\
+    # if [ "${SYFT_SBOM}" ]; then /tmp/bomsh_sbom.py -b omnibor_dir -F $rpmfiles -vv --output_dir syft_sbom --sbom_format spdx-json ; fi ; \\
     # Extra handling of bomsh-spdx generated SPDX SBOM documents ; \\
     export PYTHONPATH=/root/tools-python/src ; \\
     if [ "${BOMSH_SPDX}" ]; then /tmp/bomsh_spdx_rpm.py -F $rpmfiles --output_dir bomsh_sbom --sbom_server_url http://your.org ; fi ;
@@ -211,7 +211,7 @@ def create_dockerfile(work_dir):
 
 def run_docker(src_rpm_file, output_dir):
     """
-    Run docker to rebuild .deb packages from its .buildinfo file.
+    Run docker to rebuild .rpm packages from its src RPM file.
     :param src_rpm_file: the SRC RPM file for RPM packages
     :param output_dir: the output directory to store rebuilt RPM packages and OmniBOR documents.
     """

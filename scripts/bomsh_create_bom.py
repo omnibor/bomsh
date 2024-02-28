@@ -574,6 +574,9 @@ def update_hash_tree_db_and_gitbom(db, record):
     if "ignore_this_record" in record:
         verbose("Warning: ignore_this_record for outfile " + record["outfile"][1] + ", skipping hash tree and OmniBOR doc update")
         return
+    if "outfile" not in record:
+        verbose("Warning: there is no outfile for this record, skipping hash tree and OmniBOR doc update: " + str(record), LEVEL_0)
+        return
     checksum, outfile = record["outfile"]
     verbose("\n=== Update treedb and OmniBOR for checksum: " + checksum + " outfile: " + outfile, LEVEL_0)
     if not checksum and outfile:  # for llvm-gitbom generated .metadata files, which have empty checksum for outfile
@@ -732,6 +735,8 @@ def read_raw_logfile(raw_logfile):
             elif line.startswith("pkg_info: "):
                 record["pkg_info"] = line[10:]
             elif line.startswith("==== End of raw info for "):
+                record["raw_line_num"] = line_num
+                record["last_pid_line"] = line
                 update_hash_tree_db_and_gitbom(g_treedb, record)
                 record = {}  # create the next record
             elif line.startswith("PID: "):

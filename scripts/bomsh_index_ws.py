@@ -48,6 +48,10 @@ g_tmpdir = "/tmp"
 g_jsonfile = "/tmp/bomsh-index"
 g_package_type = "rpm"
 
+# tarball/gitdir package blobs DB for prov_pkg of blobs in raw_logfile
+g_targit_pkg_db = {}
+g_targit_blob_pkg_db = {}
+
 #
 # Helper routines
 #########################
@@ -107,7 +111,7 @@ def save_json_db(db_file, db, indentation=4):
             json.dump(db, f, indent=indentation, sort_keys=True)
 
 
-def find_all_regular_files(builddir):
+def find_all_regular_files(builddir, extra_opt=''):
     """
     Find all regular files in the build dir, excluding symbolic link files.
 
@@ -118,7 +122,7 @@ def find_all_regular_files(builddir):
     """
     #verbose("entering find_all_regular_files: the build dir is " + builddir, LEVEL_4)
     builddir = os.path.abspath(builddir)
-    findcmd = "find " + cmd_quote(builddir) + ' -type f -print || true '
+    findcmd = "find " + cmd_quote(builddir) + ' ' + extra_opt + ' -type f -print || true '
     output = subprocess.check_output(findcmd, shell=True, universal_newlines=True, errors='backslashreplace')
     files = output.splitlines()
     return files
@@ -164,6 +168,8 @@ def unbundle_package(pkgfile, destdir=''):
         if not os.path.exists(extract_dir):
             os.makedirs(extract_dir)
         destdir = os.path.join(extract_dir, os.path.basename(pkgfile) + ".extractdir")
+        if args.skip_unbundle_if_exist and os.path.exists(destdir):
+            return destdir
     if pkgfile[-4:] == ".rpm":
         cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; cd " + destdir + " ; rpm2cpio " + pkgfile + " | cpio -idm 2>/dev/null || true"
     elif pkgfile[-4:] == ".deb" or pkgfile[-5:] in (".udeb", ".ddeb"):
@@ -299,9 +305,12 @@ def get_provider_packages_for_files(infiles):
     pkg_db = {}
     for infile in infiles:
         blob_id, path = infile
-        package = get_prov_pkg(path)
-        if not package:
-            continue
+        # first check if this blob is in the src tarball/gitdir pkg DB
+        if blob_id in g_targit_blob_pkg_db:
+            package = g_targit_blob_pkg_db[blob_id]
+        else:
+            package = get_prov_pkg(path)
+        # add this blob to the blobs of appropriate package
         if package in pkg_db:
             pkg_entry = pkg_db[package]
             if "blobs" in pkg_entry:
@@ -310,7 +319,11 @@ def get_provider_packages_for_files(infiles):
                 pkg_entry["blobs"] = [infile, ]
         else:
             pkg_db[package] = {"blobs" : [infile, ]}
-    for package in pkg_db.keys():
+    for package in pkg_db:
+        # add pkg_info for the found packages of these infiles
+        if package in g_targit_pkg_db and "pkg_info" in g_targit_pkg_db[package]:
+            pkg_db[package]["pkg_info"] = g_targit_pkg_db[package]["pkg_info"]
+            continue
         pkg_info = get_installed_pkg_info(package)
         pkg_db[package]["pkg_info"] = pkg_info
     return pkg_db
@@ -352,7 +365,8 @@ def get_deb_pkg_info(deb_file):
     :param deb_file: the deb file
     returns a list of lines of the package info.
     '''
-    cmd = 'dpkg-deb -I ' + deb_file + ' || true'
+    cmd = 'dpkg-deb -f ' + deb_file + ' || true'
+    #cmd = 'dpkg-deb -I ' + deb_file + ' || true'
     verbose(cmd, LEVEL_3)
     output = get_shell_cmd_output(cmd)
     return output.splitlines()
@@ -558,7 +572,7 @@ def convert_pkg_db_to_blob_db(pkg_db):
                         # src RPM or tarball has higher priority than arch-specific RPM/DEB, so do not overwrite it
                         overwrite = False
                 else:
-                    verbose("Warning: new path " + str( (package, path) ) + " differs from existing path: " + str( blob_db[checksum] ), LEVEL_2)
+                    verbose("InfoWarning: new path " + str( (package, path) ) + " differs from existing path: " + str( blob_db[checksum] ), LEVEL_2)
             if overwrite:
                 blob_db[checksum] = (package, path)  # only keep a single package, newer package overwrites older package
     return blob_db
@@ -570,11 +584,12 @@ def get_workspace_index_db(rpm_files, raw_logfile=''):
     :param rpm_files: a list of user provided RPM files
     :param raw_logfile: the bomsh_hook_raw_logfile generated during software build
     '''
-    # First get the pkg_db from installed packages
+    pkg_db = {}
+    # First get the pkg_db from raw_logfile or installed packages
     if raw_logfile:
         infiles = read_all_infiles_from_raw_logfile(raw_logfile)
         pkg_db = get_provider_packages_for_files(infiles)
-    else:
+    elif args.index_installed_pkgs:
         packages = get_all_installed_packages()
         if args.first_n_packages:
             first_n = int(args.first_n_packages)
@@ -685,6 +700,401 @@ def get_deb_source_tarball_files():
         return output.splitlines()
     return []
 
+############################################################
+#### End of package database processing routines ####
+############################################################
+
+def get_src_tarball_files_in_dir(adir):
+    '''
+    Get the list of source tarball files in a directory.
+    returns a list of tarball files.
+    '''
+    cmd = 'find ' + adir + ' -name "*.tar.gz" -o -name "*.tar.xz" -o -name "*.tar.bz2" -o -name "*.tgz" -type f || true'
+    verbose(cmd, LEVEL_3)
+    output = get_shell_cmd_output(cmd)
+    if output:
+        return output.splitlines()
+    if not (g_chroot_dir and os.path.exists(g_chroot_dir)):
+        return []
+    cmd = 'find ' + g_chroot_dir + '/' + adir + ' -name "*.tar.gz" -o -name "*.tar.xz" -o -name "*.tar.bz2" -o -name "*.tgz" -type f || true'
+    verbose(cmd, LEVEL_3)
+    output = get_shell_cmd_output(cmd)
+    if output:
+        return output.splitlines()
+    return []
+
+
+def get_all_src_tarball_files():
+    '''
+    Get a list of source tarball files for prov_pkg database.
+    '''
+    if not args.src_tarball_dir:
+        return []
+    adirs = args.src_tarball_dir.split(",")
+    alist = []
+    for adir in adirs:
+        alist.extend(get_src_tarball_files_in_dir(adir))
+    return alist
+
+
+def find_version_in_dir(destdir):
+    '''
+    Try to find VERSION info from the src tarball unbundled dir.
+    '''
+    cmd = 'find ' + destdir + ' -name "VERSION" -type f | xargs cat || true'
+    verbose(cmd, LEVEL_3)
+    output = get_shell_cmd_output(cmd)
+    if output:
+        return output.strip().split()[0]
+    return ''
+
+
+def get_tarball_pkg_info(tarball, destdir=''):
+    '''
+    Get name,version pkg_info for a src tarball file.
+    We first split file name into tokens by ".", and then by "-", and then by "_",
+    And then find the token with digits only, which is the start of version string.
+    '''
+    dirname, filename = os.path.split(tarball)
+    tokens = filename.split(".")
+    # strip the .tgz or .tar.gz/.tar.xz/.tar.bz2 suffix first
+    if tokens[-1] == "tgz":
+        # the middle tokens except the first and last token
+        midtokens = tokens[1:-1]
+    else:
+        midtokens = tokens[1:-2]
+    tokens2 = tokens[0].split("-")
+    if midtokens: # like kexec-tools-2.0.18.tar.xz, gdb-linaro-7.6-2013.05.tar.bz2 or glibc-2.23-eabd6f4.tar.bz2
+        if len(tokens2) > 1 and (tokens2[-1].isdigit() or
+                (tokens2[-1][0] == 'v' and tokens2[-1][1:].isdigit())): # ebtables-v2.0.10-4.tar.gz
+            # like kexec-tools-2.0.18.tar.xz, gdb-linaro-7.6-2013.05.tar.bz2 or glibc-2.23-eabd6f4.tar.bz2
+            name = "-".join(tokens2[:-1])
+            version = ".".join( [tokens2[-1],] + midtokens )
+        elif len(midtokens) > 1: # backports.ssl_match_hostname-3.4.0.2.tar.gz
+            tokens3 = midtokens[0].split("-")
+            if len(tokens3) > 1 and tokens3[-1].isdigit():
+                name = tokens[0] + '.' + "-".join(tokens3[:-1])
+                version = ".".join( [tokens3[-1],] + midtokens[1:] )
+            else:
+                name = tokens[0] + '.' + midtokens[0]
+                version = ".".join( midtokens[1:] )
+        else: # wireless_tools.29.tar.gz
+            name = tokens[0]
+            version = ".".join( midtokens )
+            if name.startswith("squashfs"): # special case for squashfs4.2.tar.gz
+                version = name[len("squashfs"):] + "." + version
+                name = "squashfs"
+    else: # like boost_1_60_0.tar.gz, or sscep.tgz
+        # or yaffs2_android-2008-12-18.tar.bz2, systemd-219-42-9.tar.xz, ca-certificates_20150426.tar.xz
+        name = tokens2[0]
+        version = "-".join( tokens2[1:] )
+        # find the first digit from left
+        if not version or (version and not tokens2[1].isdigit()): # for boost_1_60_0.tar.gz and ca-certificates_20150426.tar.xz
+            tokens3 = tokens[0].split("_")
+            if len(tokens3) > 1:
+                name = tokens3[0]
+                version = "_".join( tokens3[1:] )
+    if not version and destdir: # for sscep.tgz, which has VERSION file in unbundled dir
+            version = find_version_in_dir(destdir)
+    # if this tarball is a committed object in git repo, then get its last commit as git_version
+    # We will also set version if version is still empty
+    git_version = get_last_git_commit_for_afile(tarball)
+    if not version:
+        version = git_version
+        if args.prefer_git_tag:
+            git_tag = get_associated_git_tag_for_commit(version, dirname)
+            if git_tag:
+                version = git_tag
+    if not version:
+        version = "UNKNOWN_VERSION"
+    if not name:
+        name = "UNKNOWN_PKG"
+    remote_url = get_git_remote_url(dirname)
+    #pkg_info = ["Name: " + name, "Version: " + version, "Architecture: all",
+    #        "Source type: tarball", "Remote URL: " + remote_url, "Path: " + tarball]
+    pkg_info_dict = {"Name" : name, "Version" : version, "Git-Version": git_version, "Architecture" : "all",
+            "Package type" : "tarball", "Remote URL" : remote_url, "Path" : tarball}
+    return pkg_info_dict
+
+
+# the reference pkg_db to help populate pkg_db, in order to save unbundling/hash-computation time for tarballs.
+# this ref pkg_db can only be keyed with tarball name, since the pkg name and version may not exist in its filename.
+g_ref_pkg_db = {}
+
+def get_packages_index_db_for_tarballs(tarballs):
+    '''
+    Get the package database for a list of src tarball files.
+    :param tarballs: a list of src tarball files
+    returns a dict of { package => {"blobs": blobs, "pkg_info": pkg_info} }
+    '''
+    pkg_db = {}
+    ref_pkg_db = {}
+    for tarball in tarballs:
+        # tarball_ref_key is just the tarball file name
+        tarball_ref_key = os.path.basename(tarball)
+        tarball_sha1_gitoid = get_file_hash(tarball)
+        if tarball_ref_key in g_ref_pkg_db:
+            tarball_entry = g_ref_pkg_db[tarball_ref_key]
+            if "sha1_gitoid" in tarball_entry:
+                if tarball_entry["sha1_gitoid"] == tarball_sha1_gitoid:
+                    verbose("Found a matched existing tarball pkg entry, reuse it for " + tarball_ref_key, LEVEL_1)
+                    pkg_info = tarball_entry["pkg_info"]
+                    # tarball_key contains Name/Version for easier use by other Bomsh tools
+                    tarball_key = tarball_ref_key + " " + pkg_info["Name"] + " " + pkg_info["Version"]
+                    pkg_db[tarball_key] = tarball_entry
+                    ref_pkg_db[tarball_ref_key] = tarball_entry
+                    continue
+        # first unbundle the tarball
+        verbose("Unbundle " + tarball + " and create pkg_db entry for its blobs", LEVEL_1)
+        destdir = unbundle_package(tarball)
+        len_prefix = len(destdir) + 1
+        pkg_info = get_tarball_pkg_info(tarball, destdir)
+        afiles = find_all_regular_files(destdir, "-size +0")
+        blobs = []
+        for afile in afiles:
+            bfile = get_chroot_path(afile)
+            if os.path.isfile(bfile) and not os.path.islink(bfile):
+                blobs.append( (get_file_hash(bfile), afile[len_prefix:]) )
+        # create the tarball entry in pkg_db
+        # tarball_key is format "filename pkg_name pkg_version" for easier use by later bomsh scripts
+        tarball_key = tarball_ref_key + " " + pkg_info["Name"] + " " + pkg_info["Version"]
+        pkg_db[tarball_key] = {"blobs": blobs, "num_blobs": len(blobs), "pkg_info": pkg_info, "sha1_gitoid": tarball_sha1_gitoid}
+        # ref_pkg_db is keyed by tarball filename only
+        ref_pkg_db[tarball_ref_key] = pkg_db[tarball_key]
+        verbose("tarball " + tarball + " contains " + str(len(blobs)) + " blobs", LEVEL_1)
+        verbose("tarball " + tarball + " pkg_info " + str(pkg_info), LEVEL_1)
+        if not args.keep_intermediate_files:
+            shutil.rmtree(destdir)
+    save_json_db(g_jsonfile + "-tarball-pkg-db.json", pkg_db)
+    # Save the ref-pkg-db too, so next time we can save time
+    save_json_db(g_jsonfile + "-tarball-ref-pkg-db.json", ref_pkg_db)
+    return pkg_db
+
+
+def get_tarball_packages_index_db():
+    '''
+    Get the package database for a user provided src tarball files.
+    returns a dict of { package => {"blobs": blobs, "pkg_info": pkg_info} }
+    '''
+    tarballs = get_all_src_tarball_files()
+    verbose("List of " + str(len(tarballs)) + " tarballs: " + str(tarballs), LEVEL_4)
+    if args.first_n_packages:
+            first_n = int(args.first_n_packages)
+            start_i = 0
+            if args.start_with_ith_package:
+                start_i = int(args.start_with_ith_package)
+            tarballs = tarballs[ start_i : start_i + first_n ]
+    return get_packages_index_db_for_tarballs(tarballs)
+
+
+def is_git_dir(git_dir):
+    """
+    Check if a directory is a git directory.
+    "git rev-parse" has better performance than "git status".
+    """
+    verbose("Checking if this dir is git repo: " + git_dir, LEVEL_4)
+    rc = subprocess.call(['git', "rev-parse"], cwd=git_dir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return rc == 0
+
+
+def get_src_gitdirs_in_dir(adir):
+    '''
+    Get the list of source git_dir in a directory.
+    returns a list of git_dir.
+    '''
+    cmd = 'find ' + adir + ' -name "\\.git" || true'
+    verbose(cmd, LEVEL_3)
+    output = get_shell_cmd_output(cmd)
+    if output:
+        return [adir for adir in [os.path.dirname(afile) for afile in output.splitlines()] if is_git_dir(adir)]
+    if not (g_chroot_dir and os.path.exists(g_chroot_dir)):
+        return []
+    cmd = 'find ' + g_chroot_dir + '/' + adir + ' -name "\\.git" || true'
+    verbose(cmd, LEVEL_3)
+    output = get_shell_cmd_output(cmd)
+    if output:
+        return [adir for adir in [os.path.dirname(afile) for afile in output.splitlines()] if is_git_dir(adir)]
+    return []
+
+
+def get_all_src_gitdirs():
+    '''
+    Get a list of source git directories for prov_pkg database.
+    '''
+    if not args.git_top_dir:
+        return []
+    adirs = args.git_top_dir.split(",")
+    alist = []
+    for adir in adirs:
+        alist.extend(get_src_gitdirs_in_dir(adir))
+    return alist
+
+
+def get_git_remote_url(git_dir):
+    """
+    Get the remote URL of a git directory.
+    """
+    cmd = "cd " + git_dir + " ; git remote get-url origin || true"
+    verbose(cmd, LEVEL_2)
+    output = get_shell_cmd_output(cmd)
+    return output.strip()
+
+
+def get_associated_git_commit_for_tag(git_tag, git_dir=''):
+    """
+    Find the associated git commit ID for a git tag.
+    This tells us which commit a tag points to in git.
+    """
+    if git_dir:
+        cmd = "cd " + git_dir + " ; git rev-list -n 1 " + git_tag + " || true"
+    else:
+        cmd = "git rev-list -n 1 " + git_tag + " || true"
+    verbose(cmd, LEVEL_2)
+    output = get_shell_cmd_output(cmd)
+    return output.strip()
+
+
+def get_associated_git_tag_for_commit(git_commit, git_dir=''):
+    """
+    Find the associated git tag for a git commit ID.
+    If there is not associated git tag, then return ''
+    """
+    if git_dir:
+        cmd = "cd " + git_dir + " ; git describe --exact-match --tags " + git_commit + " 2>/dev/null || true"
+    else:
+        cmd = "git describe --exact-match --tags " + git_commit + " 2>/dev/null || true"
+    verbose(cmd, LEVEL_2)
+    output = get_shell_cmd_output(cmd)
+    return output.strip()
+
+
+def get_last_git_commit_for_afile(afile):
+    """
+    Get the last commit id for a file in git repo.
+    """
+    dirname, basename = os.path.split(afile)
+    cmd = "cd " + dirname + " ; git log -n 1 --pretty=format:%H -- " + basename + " || true"
+    verbose(cmd, LEVEL_2)
+    output = get_shell_cmd_output(cmd)
+    return output.strip()
+
+
+def get_git_commit_head(git_dir):
+    """
+    Get the commit id for the git HEAD.
+    """
+    cmd = "cd " + git_dir + " ; git rev-parse HEAD || true"
+    verbose(cmd, LEVEL_2)
+    output = get_shell_cmd_output(cmd)
+    return output.strip()
+
+
+def get_gitdir_pkg_info(git_dir, head_commit=''):
+    '''
+    Get name,version,arch info for a src git directory.
+    '''
+    if not head_commit:
+        head_commit = get_git_commit_head(git_dir)
+    git_version = head_commit
+    version = head_commit
+    if args.prefer_git_tag:
+        git_tag = get_associated_git_tag_for_commit(head_commit, git_dir)
+        if git_tag:
+            version = git_tag
+    remote_url = get_git_remote_url(git_dir)
+    if remote_url:
+        name = os.path.basename(remote_url)
+    else:
+        name = os.path.basename(git_dir)
+    #pkg_info = ["Name: " + name, "Version: " + head_commit, "Architecture: all",
+    #        "Package type: gitrepo", "Remote URL: " + remote_url, "Path: " + git_dir]
+    pkg_info_dict = {"Name" : name, "Version" : version, "Git-Version": git_version, "Architecture" : "all",
+            "Package type" : "gitrepo", "Remote URL" : remote_url, "Path" : git_dir}
+    return pkg_info_dict
+
+
+def get_all_blobs_of_git_commit(commit, git_dir=''):
+    """
+    Run the "git rev-list -n 1 commit_id" command to get all blobs of a a commit.
+    returns a list of (checksum, size, filename)
+    """
+    if git_dir:
+        cmd = "cd " + git_dir + " ; git rev-list -n 1 --objects " + commit
+    else:
+        cmd = "git rev-list -n 1 --objects " + commit
+    cmd += " | git cat-file --batch-check='%(objectname) %(objecttype) %(objectsize) %(rest)' |  grep '^[^ ]* blob' | cut -d' ' -f1,3- || true"
+    verbose(cmd, LEVEL_2)
+    output = get_shell_cmd_output(cmd)
+    #print(output)
+    lines = output.splitlines()
+    blobs = []
+    for line in lines:
+        tokens = line.split()
+        checksum, size = tokens[0], tokens[1]
+        width = len(size)
+        # len of git SHA1 checksum must be 40
+        filename = line[42 + width : ]
+        #size = int(size)
+        if filename[0] != '.':  # let's exclude hidden files?
+            blobs.append( (checksum, filename) )
+            # well, no need to save the file size
+            #blobs.append( (checksum, size, filename) )
+    return blobs
+
+
+def get_packages_index_db_for_gitdirs(gitdirs):
+    '''
+    Get the package database for a list of git clone directories.
+    :param gitdirs: a list of git directories
+    returns a dict of { package => {"blobs": blobs, "pkg_info": pkg_info} }
+    '''
+    pkg_db = {}
+    for git_dir in gitdirs:
+        commit = get_git_commit_head(git_dir)
+        blobs = get_all_blobs_of_git_commit(commit, git_dir)
+        pkg_info = get_gitdir_pkg_info(git_dir, commit)
+        pkg_key = git_dir + " " + pkg_info["Name"] + " " + pkg_info["Version"]
+        pkg_db[pkg_key] = {"blobs": blobs, "num_blobs": len(blobs), "pkg_info": pkg_info}
+        verbose("git_dir " + git_dir + " contains " + str(len(blobs)) + " blobs", LEVEL_1)
+        verbose("git_dir " + git_dir + " pkg_info " + str(pkg_info), LEVEL_1)
+    save_json_db(g_jsonfile + "-gitdir-pkg-db.json", pkg_db)
+    return pkg_db
+
+
+def get_gitdir_packages_index_db():
+    '''
+    Get the package database for a user provided src git directories.
+    returns a dict of { package => {"blobs": blobs, "pkg_info": pkg_info} }
+    '''
+    gitdirs = get_all_src_gitdirs()
+    verbose("List of " + str(len(gitdirs)) + " gitdirs: " + str(gitdirs), LEVEL_4)
+    if args.first_n_packages:
+            first_n = int(args.first_n_packages)
+            start_i = 0
+            if args.start_with_ith_package:
+                start_i = int(args.start_with_ith_package)
+            gitdirs = gitdirs[ start_i : start_i + first_n ]
+    return get_packages_index_db_for_gitdirs(gitdirs)
+
+
+def get_tarball_gitdir_packages_index_db():
+    '''
+    Get the package database for user provided src tarballs and git directories.
+    returns a dict of { package => {"blobs": blobs, "pkg_info": pkg_info} }
+    '''
+    pkg_db = get_tarball_packages_index_db()
+    # merge the gitdir pkg_db with tarball pkg_db
+    pkg_db.update( get_gitdir_packages_index_db() )
+    save_json_db(g_jsonfile + "-targit-pkg-db.json", pkg_db)
+    global g_targit_pkg_db
+    g_targit_pkg_db = pkg_db
+    # Convert pkg_db to blob_db for use by bomsh_create_bom.py script
+    blob_db = convert_pkg_db_to_blob_db(pkg_db)
+    save_json_db(g_jsonfile + "-targit-blob-db.json", blob_db)
+    blob_pkg_db = { blob : v[0] for blob,v in blob_db.items() }
+    save_json_db(g_jsonfile + "-targit-blob-pkg-db.json", blob_pkg_db)
+    global g_targit_blob_pkg_db
+    g_targit_blob_pkg_db = blob_pkg_db
 
 ############################################################
 #### End of package database processing routines ####
@@ -725,6 +1135,24 @@ def rtd_parse_options():
                     help = "the Linux packaging types, like RPM/DEB, etc.")
     parser.add_argument('--chroot_dir',
                     help = "the mock chroot directory")
+    parser.add_argument('--src_tarball_dir',
+                    help = "a comma-separated list of directories which contain src tarball files")
+    parser.add_argument('--git_top_dir',
+                    help = "a comma-separated list of directories which contain src git directoriest")
+    parser.add_argument('--ref_pkg_db',
+                    help = "a reference pkg_db to help populate the new pkg_db")
+    parser.add_argument("--index_installed_pkgs",
+                    action = "store_true",
+                    help = "index the installed packages in the workspace")
+    parser.add_argument("--keep_intermediate_files",
+                    action = "store_true",
+                    help = "after run completes, keep all intermediate files like unbundled packages, etc.")
+    parser.add_argument("--skip_unbundle_if_exist",
+                    action = "store_true",
+                    help = "skip unbundling a package/tarball if the unbundle directory already exists")
+    parser.add_argument("--prefer_git_tag",
+                    action = "store_true",
+                    help = "prefer to use git tag instead of git commit ID for git version")
     parser.add_argument("-v", "--verbose",
                     action = "count",
                     default = 0,
@@ -752,6 +1180,9 @@ def rtd_parse_options():
     global g_package_type
     if args.package_type:
         g_package_type = args.package_type.lower()
+    global g_ref_pkg_db
+    if args.ref_pkg_db and os.path.isfile(args.ref_pkg_db):
+        g_ref_pkg_db = load_json_db(args.ref_pkg_db)
 
     print ("Your command line is:")
     print (" ".join(sys.argv))
@@ -775,6 +1206,9 @@ def main():
     if args.package_files:
         package_files.extend(args.package_files.split(","))
     package_files = [os.path.abspath(afile) for afile in package_files]
+
+    # Try to index the tarball and gitdir source files
+    get_tarball_gitdir_packages_index_db()
 
     # the real work
     get_workspace_index_db(package_files, args.raw_logfile)
