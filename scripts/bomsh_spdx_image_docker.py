@@ -133,7 +133,7 @@ g_bomsh_dockerfile_str = '''
 
 # Set up python3/pip3 environment
 RUN     \\
-    dnf install -y git wget mock rpm-build python3-pip python3-pyyaml which automake autoconf file ; \\
+    dnf install -y git python3-pip python3-pyyaml which automake autoconf file ; \\
     pip3 install requests license-expression beartype uritools rdflib xmltodict pyyaml packageurl-python ; \\
     dnf clean all ;
 
@@ -145,18 +145,24 @@ RUN cd /root ; git clone https://github.com/omnibor/bomsh.git ; \\
 CMD cd /out ; export PYTHONPATH=/root/tools-python/src ; \\
     echo /tmp/bomsh_spdx_image.py -i ${IMG_FILE} --output_dir bomsh_sbom --sbom_server_url http://your.org \\
     --img_unbundle_dir ${UNPACK_DIR} --img_pkg_db_file ${IMG_PKG_SUMMARY} --bom_mappings_file ${BOM_MAPPINGS} ; \\
-    /tmp/bomsh_spdx_image.py -i ${IMG_FILE} --output_dir bomsh_sbom --sbom_server_url http://your.org \\
+    time /tmp/bomsh_spdx_image.py -i ${IMG_FILE} --output_dir bomsh_sbom --sbom_server_url http://your.org \\
     --img_unbundle_dir ${UNPACK_DIR} --img_pkg_db_file ${IMG_PKG_SUMMARY} --bom_mappings_file ${BOM_MAPPINGS} ; \\
+    echo "==Done creating SPDX documents" ; \\
     # Extra handling of generating CVE reports with cve-bin-tool ; \\
     if [ "${CVE_REPORT}" ]; then \\
-    if [ "${SBOM_SERVER_URL}" ]; then sbom_server_opt = "--sbom_server_url ${SBOM_SERVER_URL}" ; fi \\
+    if [ ! -z "${SBOM_SERVER_URL}" ]; then sbom_server_opt = "--sbom_server_url ${SBOM_SERVER_URL}" ; fi ; \\
+    if [ ! -z "${OFFLINE_CVEDB}" ]; then mkdir -p /root/.cache/cve-bin-tool/ ; touch /root/.cache/cve-bin-tool/cve.db ; \\
+    cve-bin-tool --import ${OFFLINE_CVEDB} ; offline_opt="--offline" ; fi ; \\
     # Need to put the extra CVE_OPTION into an array for use by later cve-bin-tool command ; \\
     #echo $CVE_OPTION ; \\
     eval "cve_opt=($CVE_OPTION)" ; declare -p cve_opt ; \\
-    echo cve-bin-tool --sbom spdx --sbom-file bomsh_sbom/*.spdx -f csv,json,html,console -o bomsh_sbom/sbom-cve-report $sbom_server_opt "${cve_opt[@]}" ; \\
-    cve-bin-tool --sbom spdx --sbom-file bomsh_sbom/*.spdx -f csv,json,html,console -o bomsh_sbom/sbom-cve-report $sbom_server_opt "${cve_opt[@]}" ; \\
-    echo cve-bin-tool ${UNPACK_DIR} --sbom-output ${IMG_FILE}.sbom -f csv,json,html,console -o bomsh_sbom/scan-cve-report $sbom_server_opt "${cve_opt[@]}" ; \\
-    cve-bin-tool ${UNPACK_DIR} --sbom-output bomsh_sbom/${IMG_FILE}.sbom -f csv,json,html,console -o bomsh_sbom/scan-cve-report $sbom_server_opt "${cve_opt[@]}" ; fi ;
+    spdx_file=`ls -t bomsh_sbom/*.spdx | head -1` ; \\
+    echo cve-bin-tool --sbom spdx --sbom-file $spdx_file -f csv,json,html,console -o bomsh_sbom/sbom-cve-report $offline_opt $sbom_server_opt "${cve_opt[@]}" ; \\
+    time cve-bin-tool --sbom spdx --sbom-file $spdx_file -f csv,json,html,console -o bomsh_sbom/sbom-cve-report $offline_opt $sbom_server_opt "${cve_opt[@]}" ; \\
+    echo cve-bin-tool ${UNPACK_DIR} --sbom-output bomsh_sbom/${IMG_FILE}.sbom -f csv,json,html,console \\
+    -o bomsh_sbom/scan-cve-report $offline_opt $sbom_server_opt "${cve_opt[@]}" ; \\
+    time cve-bin-tool ${UNPACK_DIR} --sbom-output bomsh_sbom/${IMG_FILE}.sbom -f csv,json,html,console \\
+    -o bomsh_sbom/scan-cve-report $offline_opt $sbom_server_opt "${cve_opt[@]}" ; fi ;
 '''
 
 def create_dockerfile(work_dir):
@@ -213,6 +219,9 @@ def run_docker(img_file, output_dir):
         docker_cmd += ' -e BOM_MAPPINGS=' + args.bom_mappings_file
     else:
         docker_cmd += ' -e BOM_MAPPINGS=' + bom_mappings
+    if args.offline_cvedb:
+        # offline mode without downloading CVEs
+        docker_cmd += ' -e OFFLINE_CVEDB=' + args.offline_cvedb
     if args.cve_report:
         # Generate CVE report with cve-bin-tool
         docker_cmd += ' -e CVE_REPORT=1'
@@ -255,6 +264,8 @@ def rtd_parse_options():
                     help = "the package summary JSON file of the image file")
     parser.add_argument('--bom_mappings_file',
                     help = "the OmniBOR blob-id to bom-id mappings file")
+    parser.add_argument("--offline_cvedb",
+                    help = "pre-downloaded CVE database to avoid re-downloading CVEs online")
     parser.add_argument("--cve_option",
                     help = "additional command options to run cve-bin-tool from inside container image")
     parser.add_argument("--cve_report",
