@@ -56,6 +56,10 @@ static const char *rpmsign_skip_token_list[] = {"--macros", "--fskpath", "--cert
 // single file as both input and output
 static const char *samefile_converter_list[] = {"ranlib", "objtool", "debugedit", "sortextable", "sorttable", "resolve_btfids"};
 
+static const char *
+rustc_skip_token_list[] = {"-C", "-F", "-L", "-W", "-A", "-D", "--out-dir", "--target", "--explain",
+	"--crate-type", "--crate-name", "--edition", "--emit", "--print", "--extern", "--cfg", "--cap-lints"};
+
 static void bomsh_token_init(void)
 {
 	qsort(gcc_skip_token_list, sizeof(gcc_skip_token_list)/sizeof(*gcc_skip_token_list), sizeof(char *), strcmp_comparator);
@@ -66,6 +70,7 @@ static void bomsh_token_init(void)
 	qsort(dwz_skip_token_list, sizeof(dwz_skip_token_list)/sizeof(*dwz_skip_token_list), sizeof(char *), strcmp_comparator);
 	qsort(rpmsign_skip_token_list, sizeof(rpmsign_skip_token_list)/sizeof(*rpmsign_skip_token_list), sizeof(char *), strcmp_comparator);
 	qsort(samefile_converter_list, sizeof(samefile_converter_list)/sizeof(*samefile_converter_list), sizeof(char *), strcmp_comparator);
+	qsort(rustc_skip_token_list, sizeof(rustc_skip_token_list)/sizeof(*rustc_skip_token_list), sizeof(char *), strcmp_comparator);
 }
 
 #if 0
@@ -3520,6 +3525,144 @@ static void bomsh_process_chrpath_command(bomsh_cmd_data_t *cmd, int pre_exec_mo
 	}
 }
 
+// Parse cmd->argv, and get all files from the command line
+static void bomsh_get_rustc_subfiles(bomsh_cmd_data_t *cmd)
+{
+	int num_skip_tokens = sizeof(rustc_skip_token_list)/sizeof(*rustc_skip_token_list);
+	char **skip_token_list = (char **)rustc_skip_token_list;
+	char *output_file = NULL;
+	int subfiles_size = 100;
+	int num_subfiles = 0;
+	char **subfiles = malloc(subfiles_size * sizeof(char *));
+
+	char *crate_name = NULL;
+	char *output_dir = NULL;
+	char *crate_prefix = NULL;
+	char *crate_suffix = NULL;
+	char *extra_filename = NULL;
+
+	char **p = cmd->argv;
+	p++; // start with argv[1]
+	while (*p) {
+		char *token = *p; p++; // p points to next token already
+
+		// well, we still need to handle this -o option, otherwise, the outfile will be added to infiles
+		if (strncmp(token, "-o", 2) == 0) {
+			int len = strlen(token);
+			if (len > 2) {
+				output_file = token + 2;
+			} else {
+				// p already points to next token, which is output file
+				output_file = *p;
+				p++; // move to next token
+			}
+			if (output_file && strcmp(output_file, "/dev/null") == 0) {
+				bomsh_log_string(3, "NULL outfile, no need to process rustc command\n");
+				cmd->skip_record_raw_info = 1;
+				free(subfiles);
+				return;
+			}
+			bomsh_log_printf(4, "found output file %s\n", output_file);
+			continue;
+		}
+
+		if (bomsh_is_token_inlist(token, skip_token_list, num_skip_tokens)) {
+			if (strcmp(token, "--crate-name") == 0) {
+				crate_name = *p;
+			} else if (strcmp(token, "--out-dir") == 0) {
+				output_dir = *p;
+			} else if (strcmp(token, "--crate-type") == 0) {
+				if (strcmp(*p, "lib") == 0) {
+					crate_prefix = (char *)"lib";
+					crate_suffix = (char *)".rlib";
+				} else if (strcmp(*p, "cdylib") == 0) {
+					crate_prefix = (char *)"lib";
+					crate_suffix = (char *)".so";
+				}
+			} else if (strncmp(*p, "extra-filename=", 15) == 0) {
+				extra_filename = (*p) + 15;
+			}
+			p++; // move to next token
+			continue;
+		}
+		if (token[0] == '-') {
+			continue;
+		}
+		bomsh_log_printf(4, "found one rustc subfile: %s\n", token);
+		// auto-grow the buffer to hold more subfiles
+		if (num_subfiles >= subfiles_size) {
+			subfiles_size *= 2;
+			subfiles = realloc(subfiles, subfiles_size * sizeof(char *));
+		}
+		subfiles[num_subfiles++] = token;
+	}
+
+	// find out the output_file
+	char buf[PATH_MAX];
+	if (crate_name) {
+		if (!output_dir) {
+			output_dir = cmd->pwd;
+		}
+		strcpy(buf, output_dir); strcat(buf, "/");
+		if (crate_prefix) strcat(buf, crate_prefix);
+		strcat(buf, crate_name);
+		if (extra_filename) strcat(buf, extra_filename);
+		if (crate_suffix) strcat(buf, crate_suffix);
+		output_file = strdup(buf);
+		cmd->flags |= 1; // to indicate that output_file is allocated and needs to be freed
+	} else if (num_subfiles == 1 && !output_file) {
+		strcpy(buf, subfiles[0]);
+		char *dot_pos = strrchr(buf, '.');
+		if (strcmp(dot_pos, ".rs") == 0) {
+			*dot_pos = 0;
+		}
+		output_file = strdup(buf);
+		cmd->flags |= 1; // to indicate that output_file is allocated and needs to be freed
+	}
+	/*
+	if (output_file) { // well, output_file does not exist yet before EXECVE syscall
+		if (!bomsh_is_regular_file(output_file, cmd->pwd, cmd->root)) {
+			bomsh_log_printf(4, "not regular file or not-existent outfile: %s\n", output_file);
+			if (cmd->flags & 1) free(output_file);
+			cmd->skip_record_raw_info = 1;
+			return;
+		}
+	}*/
+
+	int num_infiles = 0;
+	// it is sufficient, since #infiles <= #subfiles
+	char **infiles = malloc((num_subfiles + 1) * sizeof(char *));
+	log_gcc_subfiles(4, subfiles, num_subfiles, "\nList of subfiles:");
+	bomsh_log_string(4, "\nChecking rustc subfiles\n");
+	for (int i=0; i<num_subfiles; i++) {
+		if (!bomsh_is_regular_file(subfiles[i], cmd->pwd, cmd->root)) {
+			bomsh_log_printf(4, "not regular file or not-existent subfile: %s\n", subfiles[i]);
+			continue;
+		}
+		infiles[num_infiles++] = strdup(subfiles[i]);
+	}
+	log_gcc_subfiles(4, infiles, num_infiles, "\nList of infiles:");
+
+	// Save the results in cmd_data struct
+	infiles[num_infiles] = NULL;
+	cmd->num_inputs = num_infiles;
+	cmd->input_files = infiles;
+	if (output_file) cmd->output_file = output_file;
+	free(subfiles);
+}
+
+static void bomsh_process_rustc_command(bomsh_cmd_data_t *cmd, int pre_exec_mode)
+{
+	if (pre_exec_mode) {
+		bomsh_log_string(3, "\npre-exec mode, get subfiles for rustc command\n");
+		bomsh_get_rustc_subfiles(cmd);
+	} else {
+		if (cmd->skip_record_raw_info) return;
+		bomsh_log_string(3, "\nrecord raw_info for rustc command after EXECVE syscall\n");
+		bomsh_record_raw_info(cmd);
+	}
+}
+
 // cmdline format: sepdebugcrcfix DEBUG_DIR FILEs
 static void get_all_subfiles_in_sepdebugcrcfix_cmdline(bomsh_cmd_data_t *cmd)
 {
@@ -3871,6 +4014,8 @@ static void bomsh_process_shell_command(bomsh_cmd_data_t *cmd, int pre_exec_mode
 		bomsh_process_strip_like_command(cmd, pre_exec_mode, 3);
 	} else if (strcmp(name, "chrpath") == 0) {
 		bomsh_process_chrpath_command(cmd, pre_exec_mode);
+	} else if (strcmp(name, "rustc") == 0) {
+		bomsh_process_rustc_command(cmd, pre_exec_mode);
 	} else {
 		bomsh_log_printf(15, "\nNot-supported shell command: %s\n", prog);
 	}
