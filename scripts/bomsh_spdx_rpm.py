@@ -118,6 +118,19 @@ OS_REL_INFO = "mock-os-release"
 DB_FN = "bomsh_search_jsonfile-details.json"
 BOM_MAPPING_FN = "bomsh_search_jsonfile-bom-mappings.json"
 
+#
+# Helper routines
+#########################
+def verbose(string, level=1):
+    """
+    Prints information to stdout depending on the verbose level.
+    :param string: String to be printed
+    :param level: Unsigned Integer, listing the verbose level
+    """
+    if args.verbose >= level:
+        # print to stdout
+        print(string)
+
 def get_or_create_dir(destdir):
     """
     Create a directory if it does not exist. otherwise, return it directly
@@ -557,14 +570,20 @@ def spdx_add_src_pkg_dependency(spdx_doc, gitoid, sbom_db, pkg_db, os_rel_data, 
 
     # If we currently don't have a package entry, add one.
     for pkg in pkg_list:
+        # If we ended up with a null package name then skip it.
+        if not pkg:
+            verbose("Skipping null package...")
+            continue
         # The summerization of the sbom detail output leaves the following string in the list
         # of packages.  We don't want that in our output
         if pkg == "UNKNOWN_COMPONENT_VERSION":
+            verbose("Skipping unknown-component-version package...")
             continue
         # All files that were generated during a build will not have an origination package.
         # They are listed under the package name that starts with "GENERATED "
         # The input files used to generate that file will have an origination pkg and those will be captured elsewhere
         if pkg.startswith('DERIVED_PKG '):
+            verbose("Skipping derived package " + pkg)
             continue
         package = pkg_exists(spdx_doc, pkg)
         if not package:

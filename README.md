@@ -8,6 +8,7 @@ Table of Contents
 * [Generating OmniBOR Docs with Bomtrace3](#Generating-OmniBOR-Docs-with-Bomtrace3)
 * [Generating OmniBOR Docs with Bomtrace2](#Generating-OmniBOR-Docs-with-Bomtrace2)
 * [Generating OmniBOR ADGs for Debian or RPM Packages with Bomtrace2](#Generating-OmniBOR-ADGs-for-Debian-or-RPM-Packages-with-Bomtrace2)
+* [Generating SPDX Docs](#Generating-SPDX-Docs)
 * [Reducing Storage of Generated OmniBOR Docs](#Reducing-Storage-of-Generated-OmniBOR-Docs)
 * [Manipulating OmniBOR Artifact Tree with Grafting and Pruning](#Manipulating-OmniBOR-Artifact-Tree-with-Grafting-and-Pruning)
 * [Creating Index Database for Debian Source Packages](#Creating-Index-Database-for-Debian-Source-Packages)
@@ -472,6 +473,43 @@ lrwxrwxrwx. 1 root root     98 Oct 17 05:28 sysstat-debugsource-11.7.3-6.el8.x86
 -rw-r--r--. 1 root mock 434208 Oct 17 05:28 sysstat-11.7.3-6.el8.x86_64.rpm
 [root@e8281323a4d6 rpm-src-dir]#
 ```
+
+Generating SPDX Docs
+--------------------
+
+Bomsh is able to generate SPDX SBOM documents for built Debian/RPM packages.
+When rebuilding Debian/RPM packages using the bomsh_rebuild_deb.py or
+bomsh_rebuild_rpm.py script, adding the --bomsh_spdx option will build the
+SPDX documents.
+
+Also for the bomsh_rebuild_deb.py script, the --deb_build_script can be used
+to specify a script file to build the Debian packages, without specifying the
+-f or --buildinfo_file option. Note that this script must copy the built
+Debian packages and the source tarball files to expected location for later
+use by the bomsh_spdx_deb.py script to generate the SPDX documents.
+An example bomsh-openosc-deb.sh script file has been provided to illustrate
+such Debian-build script.
+
+    $ git clone URL-of-this-git-repo bomsh
+    $ wget https://vault.centos.org/8-stream/AppStream/Source/SPackages/sysstat-11.7.3-7.el8.src.rpm
+    $ bomsh/scripts/bomsh_rebuild_rpm.py -c alma+epel-8-x86_64 --docker_image_base almalinux:8 -s sysstat-11.7.3-7.el8.src.rpm -d bomsh/scripts/sample_sysstat_cvedb.json -o outdir --syft_sbom --bomsh_spdx --mock_option="--no-bootstrap-image --define 'packager BOMSH user $(id -un) at $(hostname)'"
+    $ grep -B1 -A3 CVElist outdir/bomsher_out/bomsh_logfiles/bomsh_search_jsonfile-details.json
+    $
+    $ # the above should take only a few minutes, and the below may take tens of minutes
+    $ wget https://buildinfos.debian.net/buildinfo-pool/s/sysstat/sysstat_11.7.3-1_all-amd64-source.buildinfo
+    $ bomsh/scripts/bomsh_rebuild_deb.py -f sysstat_11.7.3-1_all-amd64-source.buildinfo -d bomsh/scripts/sample_sysstat_cvedb.json -o outdir2 --syft_sbom --bomsh_spdx --mmdebstrap_no_cleanup
+    $ grep -B1 -A3 CVElist outdir2/bomsher_out/bomsh_logfiles/bomsh_search_jsonfile-details.json
+    $
+    $ # specify a Debian build script to build Debian packages
+    $ bomsh/scripts/bomsh_rebuild_deb.py --deb_build_script bomsh/scripts/bomsh-openosc-deb.sh -o openosc-outdir --syft_sbom --bomsh_spdx
+    $ ls -tl openosc-outdir/bomsher_out/bomsh_sbom/
+
+Currently only SPDX v2.3 version SBOM documents are supported.
+
+Bomsh is able to generate SPDX documents for generic images too, like
+ISO/OVA image files. This usually involves an image unbundler or unpacking
+tool to unpack the image to individual binary files. The bomsh_spdx_image.py
+script is created for this purpose. This feature is for advanced users only.
 
 Reducing Storage of Generated OmniBOR Docs
 -----------------------------------------

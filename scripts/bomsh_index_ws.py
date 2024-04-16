@@ -414,6 +414,8 @@ def get_installed_pkg_info(package):
     :param package: the installed package name
     returns a list of lines of the package info.
     '''
+    if not package:
+        return []
     if g_package_type == "deb":
         return get_installed_deb_pkg_info(package)
     return get_installed_rpm_pkg_info(package)
@@ -655,13 +657,13 @@ def get_deb_source_control_file():
         verbose("from buildinfo_file " + args.buildinfo_file + " we get dsc filename: " + dsc_filename)
     if dsc_filename:
         return get_dsc_source_control_file_with_filename(dsc_filename)
-    cmd = 'ls bomsh_logfiles/*.dsc || true'
+    cmd = 'ls bomsh_logfiles/*.dsc 2>/dev/null || true'
     output = get_shell_cmd_output(cmd)
     if output:
         return output.splitlines()[0]
     if not (g_chroot_dir and os.path.exists(g_chroot_dir)):
         return ''
-    cmd = 'ls ' + g_chroot_dir + '/*.dsc || true'
+    cmd = 'ls ' + g_chroot_dir + '/*.dsc 2>/dev/null || true'
     output = get_shell_cmd_output(cmd)
     if output:
         return output.splitlines()[0]
@@ -688,13 +690,13 @@ def get_deb_source_tarball_files():
     They are supposed to have been copied to bomsh_logfiles directory or g_chroot_dir.
     returns a list of tarball files.
     '''
-    cmd = 'ls bomsh_logfiles/*.tar.* || true'
+    cmd = 'ls bomsh_logfiles/*.tar.* 2>/dev/null || true'
     output = get_shell_cmd_output(cmd)
     if output:
         return output.splitlines()
     if not (g_chroot_dir and os.path.exists(g_chroot_dir)):
         return []
-    cmd = 'ls ' + g_chroot_dir + '/*.tar.* || true'
+    cmd = 'ls ' + g_chroot_dir + '/*.tar.* 2>/dev/null || true'
     output = get_shell_cmd_output(cmd)
     if output:
         return output.splitlines()

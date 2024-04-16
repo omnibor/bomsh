@@ -124,6 +124,19 @@ OS_REL_INFO = "mock-os-release"
 DB_FN = "bomsh_search_jsonfile-details.json"
 BOM_MAPPING_FN = "bomsh_search_jsonfile-bom-mappings.json"
 
+#
+# Helper routines
+#########################
+def verbose(string, level=1):
+    """
+    Prints information to stdout depending on the verbose level.
+    :param string: String to be printed
+    :param level: Unsigned Integer, listing the verbose level
+    """
+    if args.verbose >= level:
+        # print to stdout
+        print(string)
+
 def get_or_create_dir(destdir):
     """
     Create a directory if it does not exist. otherwise, return it directly
@@ -274,6 +287,9 @@ def get_pkg_gitoid(pkg_name):
 def parse_pkg_info(pkg_info_array):
     # Our return value
     pkg_info = dict()
+
+    if not pkg_info_array:
+        return pkg_info
 
     # Set a description list to hold all the lines of the description
     desc_list = list()
@@ -521,7 +537,6 @@ def analyze_files(rpm_file, unpack_dir):
             # and then there is the linux "file" command
 
             file_types=[get_spdx_file_type(f)],
-            file_types=[FileType.SOURCE],
             checksums=[
                 Checksum(ChecksumAlgorithm.SHA1, file_sha1),
                 Checksum(ChecksumAlgorithm.SHA256, file_sha256),
@@ -566,6 +581,8 @@ def build_basic_spdx_package(pkg, pkg_db, os_rel_data):
         return None
 
     pkg_data = parse_pkg_info(db_entry['pkg_info'])
+    if not pkg_data:
+        return None
 
     (pkg_name, pkg_ver, pkg_rel, pkg_arch) = deb_pkg_nvra(pkg_data)
 
@@ -594,18 +611,26 @@ def spdx_add_src_pkg_dependency(spdx_doc, gitoid, sbom_db, pkg_db, os_rel_data, 
 
     # If we currently don't have a package entry, add one.
     for pkg in pkg_list:
+        # If we ended up with a null package name then skip it.
+        if not pkg:
+            verbose("Skipping null package...")
+            continue
         # The summerization of the sbom detail output leaves the following string in the list
         # of packages.  We don't want that in our output
         if pkg == "UNKNOWN_COMPONENT_VERSION":
+            verbose("Skipping unknown-component-version package...")
             continue
         # All files that were generated during a build will not have an origination package.
         # They are listed under the package name that starts with "GENERATED "
         # The input files used to generate that file will have an origination pkg and those will be captured elsewhere
         if pkg.startswith('DERIVED_PKG '):
+            verbose("Skipping derived package " + pkg)
             continue
         package = pkg_exists(spdx_doc, pkg)
         if not package:
             package = build_basic_spdx_package(pkg, pkg_db, os_rel_data)
+            if not package: # this is probably empty package ""
+                continue
             spdx_doc.packages += [package]
 
         # Then we add the the dependency relationship.
