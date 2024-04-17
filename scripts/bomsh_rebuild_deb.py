@@ -175,21 +175,35 @@ RUN cd /root ; git clone https://github.com/omnibor/bomsh.git ; \\
 # Bomtrace/Bomsh debrebuild run to generate OmniBOR documents
 # if BASELINE_REBUILD is not empty, then it will not use bomtrace2 to run debrebuild, that is, the baseline run.
 # if SRC_TAR_DIR is not empty, then the python script must have copied tarball and .dsc file into the bomsher_in directory.
-CMD if [ "${SRC_TAR_DIR}" ]; then srctardir_param="--srctardir=/out/bomsher_in" ; fi ; \\
+CMD mkdir -p /out/bomsher_out ; cd /out/bomsher_out ; mkdir -p bomsh_logfiles ; \\
     if [ -z "${BASELINE_REBUILD}" ]; then bomtrace_cmd="/tmp/bomtrace2 -w /tmp/bomtrace_watched_programs -c /tmp/bomtrace.conf -o /tmp/bomsh_hook_strace_logfile " ; fi ; \\
-    mkdir -p /out/bomsher_out ; cd /out/bomsher_out ; \\
-    if [ "${MM_NO_CLEANUP}" ]; then cp /usr/bin/mmdebstrap /usr/bin/mmdebstrap.bak ; echo "Patching mmdebstrap for no-cleanup." ; \\
-    cp /usr/bin/mmdebstrap ./ ; patch -p0 < mmdebstrap_patch_file ; cp mmdebstrap /usr/bin/mmdebstrap ; fi ; \\
-    echo $bomtrace_cmd debrebuild $srctardir_param --buildresult=./debs --builder=mmdebstrap /out/bomsher_in/$BUILDINFO_FILE ; \\
-    # Run strace to collect artifact dependency fragments (ADF) for debrebuild ; \\
-    $bomtrace_cmd debrebuild $srctardir_param --buildresult=./debs --builder=mmdebstrap /out/bomsher_in/$BUILDINFO_FILE ; \\
+    if [ "${BUILDINFO_FILE}" ]; then \\
+        chroot_param="--chroot_dir /tmp/bomsh-mmroot" ; \\
+        if [ "${SRC_TAR_DIR}" ]; then srctardir_param="--srctardir=/out/bomsher_in" ; fi ; \\
+        if [ "${MM_NO_CLEANUP}" ]; then cp /usr/bin/mmdebstrap /usr/bin/mmdebstrap.bak ; echo "Patching mmdebstrap for no-cleanup." ; \\
+        cp /usr/bin/mmdebstrap ./ ; patch -p0 < mmdebstrap_patch_file ; cp mmdebstrap /usr/bin/mmdebstrap ; fi ; \\
+        echo $bomtrace_cmd debrebuild $srctardir_param --buildresult=./debs --builder=mmdebstrap /out/bomsher_in/$BUILDINFO_FILE ; \\
+        # Run strace to collect artifact dependency fragments (ADF) for debrebuild ; \\
+        $bomtrace_cmd debrebuild $srctardir_param --buildresult=./debs --builder=mmdebstrap /out/bomsher_in/$BUILDINFO_FILE ; \\
+        cp /tmp/bomsh-mmroot/etc/os-release bomsh_logfiles/mock-os-release ; \\
+    elif [ "${BUILD_SCRIPT}" ]; then \\
+        mkdir -p debs ; \\
+        # Run strace to collect artifact dependency fragments (ADF) for debian build script ; \\
+        echo $bomtrace_cmd /out/bomsher_in/$BUILD_SCRIPT >&2 ; \\
+        $bomtrace_cmd /out/bomsher_in/$BUILD_SCRIPT ; \\
+        cp /etc/os-release bomsh_logfiles/mock-os-release ; \\
+        #cp /tmp/bomsh_hook_* ./ ; \\
+    else \\
+        echo "Nothing to build." >&2 ; \\
+    fi ; \\
     if [ "${BASELINE_REBUILD}" ]; then exit 0 ; fi ; \\
     debfiles=`for i in debs/*.deb ; do  echo -n $i, ; done | sed 's/.$//'` ; \\
     rm -rf omnibor omnibor_dir ; mv .omnibor omnibor ; mkdir -p bomsh_logfiles ; cp -f /tmp/bomsh_hook_*logfile* bomsh_logfiles/ ; \\
-    if [ "${MM_NO_CLEANUP}" ]; then index_db_param="--pkg_db_file /tmp/bomsh-index-pkg-db.json" ; \\
+    # Indexing the build workspace if needed ; \\
+    if [ "${MM_NO_CLEANUP}" ] || [ "${BUILD_SCRIPT}" ] ; then index_db_param="--pkg_db_file /tmp/bomsh-index-pkg-db.json" ; \\
     # Create the package index database for prov_pkg metadata of source files ; \\
-    /tmp/bomsh_index_ws.py --chroot_dir /tmp/bomsh-mmroot -p $debfiles -r /tmp/bomsh_hook_raw_logfile.sha1 --package_type deb ; \\
-    cp /tmp/bomsh-mmroot/etc/os-release bomsh_logfiles/mock-os-release ; \\
+    echo /out/bomsh_index_ws.py $chroot_param -p $debfiles -r /tmp/bomsh_hook_raw_logfile.sha1 --package_type deb ; \\
+    /tmp/bomsh_index_ws.py $chroot_param -p $debfiles -r /tmp/bomsh_hook_raw_logfile.sha1 --package_type deb ; \\
     cp /tmp/bomsh-index-* bomsh_logfiles ; fi ; \\
     # Create the OmniBOR manifest document and metadata database ; \\
     /tmp/bomsh_create_bom.py -b omnibor_dir -r /tmp/bomsh_hook_raw_logfile.sha1 $index_db_param ; \\
@@ -240,9 +254,16 @@ def run_docker(buildinfo_file, output_dir):
     bomsher_outdir = get_or_create_dir(os.path.join(output_dir, "bomsher_out"))
     # The bomsher_in dir is also the docker build work directory
     create_dockerfile(bomsher_indir)
-    os.system("cp -f " + buildinfo_file + " " + bomsher_indir)
     docker_cmd = 'docker run --cap-add MKNOD --cap-add SYS_ADMIN --cap-add=SYS_PTRACE -it --rm'
-    docker_cmd += ' -e BUILDINFO_FILE=' + os.path.basename(buildinfo_file)
+    if args.buildinfo_file:
+        os.system("cp -f " + args.buildinfo_file + " " + bomsher_indir)
+        docker_cmd += ' -e BUILDINFO_FILE=' + os.path.basename(args.buildinfo_file)
+    elif args.deb_build_script:
+        os.system("cp -f " + args.deb_build_script + " " + bomsher_indir)
+        docker_cmd += ' -e BUILD_SCRIPT=' + os.path.basename(args.deb_build_script)
+    else:
+        verbose("No idea how to build debian packages. Do nothing.")
+        return
     # Set appropriate parameters to run docker
     if args.src_tar_dir:
         tardir_base = os.path.basename(args.src_tar_dir)
@@ -265,7 +286,7 @@ def run_docker(buildinfo_file, output_dir):
     if args.bomsh_spdx:
         # Generate SPDX SBOM document with the bomsh_spdx_rpm.py tool
         docker_cmd += ' -e BOMSH_SPDX=1'
-    docker_cmd += ' -v ' + output_dir + ':/out $(docker build -t bomsher-deb -q ' + bomsher_indir + ')'
+    docker_cmd += ' -v ' + output_dir + ':/out $(docker build -t bomsher-deb2 -q ' + bomsher_indir + ')'
     verbose("==== Here is the docker run command: " + docker_cmd, LEVEL_1)
     os.system(docker_cmd)
     fix_broken_symlinks(bomsher_outdir)
@@ -293,6 +314,8 @@ def rtd_parse_options():
                     help = "Debian package's .buildinfo file generated from a previous reproducible build")
     parser.add_argument('--docker_image_base',
                     help = "the base docker image to start with")
+    parser.add_argument('--deb_build_script',
+                    help = "the script to build debian packages")
     parser.add_argument('-o', '--output_dir',
                     help = "the output directory to store rebuilt .deb files and Bomsh/OmniBOR documents, the default is current dir")
     parser.add_argument('-d', '--cve_db_file',
@@ -321,8 +344,8 @@ def rtd_parse_options():
     # Parse the command line arguments
     args = parser.parse_args()
 
-    if not (args.buildinfo_file):
-        print ("Please specify the buildinfo file with -f option!")
+    if not (args.buildinfo_file or args.deb_build_script):
+        print ("Please specify the buildinfo file with -f option or the debian build script with --deb_build_script option!")
         print ("")
         parser.print_help()
         sys.exit()

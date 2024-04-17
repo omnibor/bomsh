@@ -812,6 +812,8 @@ def unbundle_package(pkgfile, destdir=''):
         cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; dpkg-deb -xv " + pkgfile + " " + destdir + " || true"
     elif pkgfile[-4:] == ".tgz" or pkgfile[-7:] in (".tar.gz", ".tar.xz") or pkgfile[-8:] == ".tar.bz2":
         cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; tar -xf " + pkgfile + " -C " + destdir + " || true"
+    elif pkgfile[-4:] == ".jar":
+        cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; unzip " + pkgfile + " -d " + destdir + " || true"
     else:
         print("Unsupported package format in " + pkgfile + " file, skipping it.")
         return ''
