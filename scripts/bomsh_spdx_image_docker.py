@@ -109,7 +109,9 @@ def verify_bomsh_files_in_dir(adir, img_file):
     '''
     ret = []
     len_prefix = len(adir.rstrip("/")) + 1
-    for afile in ("bomsh_search_jsonfile-img-pkgs-summary.json", "bomsh_search_jsonfile-bom-mappings.json"):
+    #for afile in ("bomsh_search_jsonfile-img-pkgs-summary.json", "bomsh_search_jsonfile-bom-mappings.json"):
+    # Use the details JSON files instead of summary JSON files for pkg-contains-file relations
+    for afile in ("bomsh_search_jsonfile-img-pkgs.json", "bomsh_search_jsonfile-bom-mappings.json"):
         bfile = find_file_in_dir(afile, adir)
         if not bfile:
             print("Cannot find " + afile + " in directory " + adir)

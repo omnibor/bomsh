@@ -283,11 +283,12 @@ def analyze_files(img_file, unpack_dir):
     Analyze files of the img_file.
     :param img_file: the image file to analyze
     :param unpack_dir: the unbundle directory of the img_file
-    returns a list of file_rec
+    returns a list of file_rec and a file dict of {hash => list-of-file_rec}
     """
     files = find_all_regular_files(unpack_dir, "-size +0")
     len_prefix = len(unpack_dir.rstrip("/")) + 1
 
+    file_dict = {}
     file_list = []
     for f in files:
         spdx_file_ref = f'SPDXRef-File-{unique()}'
@@ -309,9 +310,14 @@ def analyze_files(img_file, unpack_dir):
         )
         # Append the file record
         file_list.append(file_rec)
+        file_hash = get_file_hash(f)
+        if file_hash in file_dict:
+            file_dict[file_hash].append(file_rec)
+        else:
+            file_dict[file_hash] = [file_rec,]
 
     # The list of file records
-    return file_list
+    return file_list, file_dict
 
 
 def spdx_add_files(spdx_doc, file_list):
@@ -343,28 +349,58 @@ def create_basic_spdx_package(pkg, pkg_value):
         name = pkg_name,
         spdx_id = f'SPDXRef-Package-{valid_spdx_id(pkg_name)}-{unique()}',
         download_location = SpdxNoAssertion(),
-        files_analyzed = False,
+        files_analyzed = True,
         # Everything else is optional
         version = f'{pkg_ver}',
         #file_name = pkg_path,
         #external_references=[ make_purl_ref(pkg_data, os_rel_data) ]
     )
-    if pkg_path != "DERIVED_PKG":
-        package.file_name = pkg_path
+    #if pkg_path != "DERIVED_PKG":
+    #    package.file_name = pkg_path
+    # Record the file_name for derived_pkg too
+    package.file_name = pkg_path
     return package
 
 
-def create_all_image_subpackages(pkg_db):
+def create_all_image_subpackages(pkg_db, file_dict):
     """
     Create basic SPDX Packages for all packages in the image.
+    returns the list of spdx-pkgs and the list of relations between pkg and files.
     """
     spdx_pkgs = []
+    relations = []
+    all_pkg_values = {}
     for pkg in pkg_db:
         if pkg in ("file_path", "build_cmd", "UNKNOWN_PATH UNKNOWN_PKG UNKNOWN_VERSION"):
             continue
+        if not pkg.startswith("blob "):  # filter some non-blob entries
+            continue
+        blob_id = pkg.split()[1]
         pkg_value = pkg_db[pkg]
-        spdx_pkgs.append( create_basic_spdx_package(pkg, pkg_value) )
-    return spdx_pkgs
+        if "prov_pkg" not in pkg_value and "imag_pkg" not in pkg_value:  # filter non-pkg entries
+            continue
+        if blob_id not in file_dict:
+            continue
+        file_recs = file_dict[blob_id]
+        if "prov_pkg" in pkg_value:
+            real_pkg_value = pkg_value["prov_pkg"]
+        else:
+            real_pkg_value = pkg_value["imag_pkg"]
+            #print("real_pkg_value with imag_pkg is", real_pkg_value)
+        if real_pkg_value == "UNKNOWN_PATH UNKNOWN_PKG UNKNOWN_VERSION":
+            continue
+        if real_pkg_value in all_pkg_values:
+            spdx_pkg = all_pkg_values[real_pkg_value]
+        else:
+            # this is a new pkg, so create the spdx-pkg for it
+            spdx_pkg = create_basic_spdx_package(real_pkg_value, None)
+            spdx_pkgs.append(spdx_pkg)
+            all_pkg_values[real_pkg_value] = spdx_pkg
+        # Add the relationship between package and its files
+        for file_rec in file_recs:
+            contains_relationship = Relationship(spdx_pkg.spdx_id, RelationshipType.CONTAINS, file_rec.spdx_id)
+            relations.append(contains_relationship)
+    return spdx_pkgs, relations
 
 
 def get_image_pkg_db(pkg_db_file, img_file=''):
@@ -488,7 +524,7 @@ def build_image_sbom(img_file, unpack_dir, img_name, img_version):
     # In order to compute the packageVerificationCode for a package you need to have a list
     # of the files in the package (along with their SHA1 hash)
     # packageVerificationCode is mandatory if filesAnalyzed = True
-    file_list = analyze_files(img_file, unpack_dir)
+    file_list, file_dict = analyze_files(img_file, unpack_dir)
 
     # We want to include the OMNIBOR BOM ID for our package
     pkg_blob_id = get_file_hash(img_file)
@@ -508,8 +544,9 @@ def build_image_sbom(img_file, unpack_dir, img_name, img_version):
 
     # And add the imaginery sub-packages for binary files in the image
     pkg_db_file = args.img_pkg_db_file
-    pkg_list = create_all_image_subpackages(get_image_pkg_db(pkg_db_file, img_file))
+    pkg_list, pkg_file_relations = create_all_image_subpackages(get_image_pkg_db(pkg_db_file, img_file), file_dict)
     spdx_add_sub_pkgs(spdx_doc, pkg_list)
+    spdx_doc.relationships.extend(pkg_file_relations)  # add pkg-contins-file relationship
 
     # This library provides comprehensive validation against the SPDX specification.
     # Note that details of the validation depend on the SPDX version of the document.
