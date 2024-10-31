@@ -171,7 +171,8 @@ def unbundle_package(pkgfile, destdir=''):
         if args.skip_unbundle_if_exist and os.path.exists(destdir):
             return destdir
     if pkgfile[-4:] == ".rpm":
-        cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; cd " + destdir + " ; rpm2cpio " + pkgfile + " | cpio -idm 2>/dev/null || true"
+        pkg_path = os.path.abspath(pkgfile)
+        cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; cd " + destdir + " ; rpm2cpio " + pkg_path + " | cpio -idm 2>/dev/null || true"
     elif pkgfile[-4:] == ".deb" or pkgfile[-5:] in (".udeb", ".ddeb"):
         cmd = "rm -rf " + destdir + " ; mkdir -p " + destdir + " ; dpkg-deb -xv " + pkgfile + " " + destdir + " || true"
     elif pkgfile[-4:] == ".tgz" or pkgfile[-7:] in (".tar.gz", ".tar.xz") or pkgfile[-8:] == ".tar.bz2":
@@ -476,6 +477,29 @@ def get_packages_index_db(packages):
     return pkg_db
 
 
+def unbundle_srcrpm_package(rpm_file, destdir=''):
+    '''
+    Unbundle a src RPM file
+    unbundle_package is called twice to unbundle the tarballs inside the RPM/DEB package file.
+    :param rpm_file: the RPM file or the DEB file
+    returns destdir
+    '''
+    destdir = unbundle_package(rpm_file, destdir)
+    if not destdir:
+        return []
+    len_prefix = len(destdir) + 1
+    afiles = find_all_regular_files(destdir)
+    verbose("There are " + str(len(afiles)) + " files in directory " + destdir, LEVEL_2)
+    tarballs = [ afile for afile in afiles if ".tar." in os.path.basename(afile) ]
+    if tarballs:
+        for tarball in tarballs:
+            destdir2 = os.path.join(destdir, os.path.basename(tarball) + ".extractdir")
+            unbundle_package(tarball, destdir2)
+        afiles = find_all_regular_files(destdir)
+        verbose("Round 2, There are " + str(len(afiles)) + " files in directory " + destdir, LEVEL_2)
+    return destdir
+
+
 def get_rpm_pkg_blobs(rpm_file):
     '''
     Unbundle a RPM/DEB file and get a list of files inside this RPM/DEB package file.
@@ -711,7 +735,7 @@ def get_src_tarball_files_in_dir(adir):
     Get the list of source tarball files in a directory.
     returns a list of tarball files.
     '''
-    cmd = 'find ' + adir + ' -name "*.tar.gz" -o -name "*.tar.xz" -o -name "*.tar.bz2" -o -name "*.tgz" -type f || true'
+    cmd = 'find ' + adir + ' -name "*.tar.gz" -o -name "*.tar.xz" -o -name "*.tar.bz2" -o -name "*.tgz" -o -name "*.src.rpm" -type f || true'
     verbose(cmd, LEVEL_3)
     output = get_shell_cmd_output(cmd)
     if output:
@@ -749,6 +773,26 @@ def find_version_in_dir(destdir):
     if output:
         return output.strip().split()[0]
     return ''
+
+
+def get_rpm_tarball_pkg_info(tarball, destdir=''):
+    '''
+    Get name,version pkg_info for a src.rpm tarball file.
+    We use rpm command to get the pkg info, so make sure rpm is installed.
+    '''
+    pkg_info_lines = get_rpm_pkg_info(tarball)
+    name, version = "UNKNOWN_PKG", "UNKNOWN_VERSION"
+    for line in pkg_info_lines:
+        tokens = line.split(":", 1)
+        if len(tokens) < 2:
+            continue
+        if tokens[0].strip() == "Name":
+            name = tokens[1].strip()
+        elif tokens[0].strip() == "Version":
+            version = tokens[1].strip()
+    pkg_info_dict = {"Name" : name, "Version" : version, "Git-Version": "NA", "Architecture" : "all",
+            "Package type" : "src-rpm", "Remote URL" : "NA", "Path" : tarball}
+    return pkg_info_dict
 
 
 def get_tarball_pkg_info(tarball, destdir=''):
@@ -848,9 +892,13 @@ def get_packages_index_db_for_tarballs(tarballs):
                     continue
         # first unbundle the tarball
         verbose("Unbundle " + tarball + " and create pkg_db entry for its blobs", LEVEL_1)
-        destdir = unbundle_package(tarball)
+        if tarball.endswith(".rpm"):
+            destdir = unbundle_srcrpm_package(tarball)
+            pkg_info = get_rpm_tarball_pkg_info(tarball, destdir)
+        else:
+            destdir = unbundle_package(tarball)
+            pkg_info = get_tarball_pkg_info(tarball, destdir)
         len_prefix = len(destdir) + 1
-        pkg_info = get_tarball_pkg_info(tarball, destdir)
         afiles = find_all_regular_files(destdir, "-size +0")
         blobs = []
         for afile in afiles:
