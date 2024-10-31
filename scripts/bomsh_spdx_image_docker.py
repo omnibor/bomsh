@@ -145,22 +145,23 @@ RUN cd /root ; git clone https://github.com/omnibor/bomsh.git ; \\
     git clone https://github.com/spdx/tools-python.git ;
 
 CMD cd /out ; export PYTHONPATH=/root/tools-python/src ; \\
-    echo /tmp/bomsh_spdx_image.py -i ${IMG_FILE} --output_dir bomsh_sbom --sbom_server_url http://your.org \\
+    if [ ! -z "${SBOM_SERVER_URL}" ]; then sbom_server_opt="--sbom_server_url ${SBOM_SERVER_URL}" ; \\
+    else sbom_server_opt="--sbom_server_url http://your.org" ; fi ; \\
+    echo /tmp/bomsh_spdx_image.py -i ${IMG_FILE} --output_dir bomsh_sbom $sbom_server_opt \\
     --img_unbundle_dir ${UNPACK_DIR} --img_pkg_db_file ${IMG_PKG_SUMMARY} --bom_mappings_file ${BOM_MAPPINGS} ; \\
-    time /tmp/bomsh_spdx_image.py -i ${IMG_FILE} --output_dir bomsh_sbom --sbom_server_url http://your.org \\
+    time /tmp/bomsh_spdx_image.py -i ${IMG_FILE} --output_dir bomsh_sbom $sbom_server_opt \\
     --img_unbundle_dir ${UNPACK_DIR} --img_pkg_db_file ${IMG_PKG_SUMMARY} --bom_mappings_file ${BOM_MAPPINGS} ; \\
     echo "==Done creating SPDX documents" ; \\
     # Extra handling of generating CVE reports with cve-bin-tool ; \\
     if [ "${CVE_REPORT}" ]; then \\
-    if [ ! -z "${SBOM_SERVER_URL}" ]; then sbom_server_opt = "--sbom_server_url ${SBOM_SERVER_URL}" ; fi ; \\
     if [ ! -z "${OFFLINE_CVEDB}" ]; then mkdir -p /root/.cache/cve-bin-tool/ ; touch /root/.cache/cve-bin-tool/cve.db ; \\
     cve-bin-tool --import ${OFFLINE_CVEDB} ; offline_opt="--offline" ; fi ; \\
     # Need to put the extra CVE_OPTION into an array for use by later cve-bin-tool command ; \\
     #echo $CVE_OPTION ; \\
     eval "cve_opt=($CVE_OPTION)" ; declare -p cve_opt ; \\
     spdx_file=`ls -t bomsh_sbom/*.spdx | head -1` ; \\
-    echo cve-bin-tool --sbom spdx --sbom-file $spdx_file -f csv,json,html,console -o bomsh_sbom/sbom-cve-report $offline_opt $sbom_server_opt "${cve_opt[@]}" ; \\
-    time cve-bin-tool --sbom spdx --sbom-file $spdx_file -f csv,json,html,console -o bomsh_sbom/sbom-cve-report $offline_opt $sbom_server_opt "${cve_opt[@]}" ; \\
+    echo cve-bin-tool --sbom spdx --sbom-file $spdx_file -f csv,json,html,console -o bomsh_sbom/sbom-cve-report $offline_opt "${cve_opt[@]}" ; \\
+    time cve-bin-tool --sbom spdx --sbom-file $spdx_file -f csv,json,html,console -o bomsh_sbom/sbom-cve-report $offline_opt "${cve_opt[@]}" ; \\
     echo cve-bin-tool ${UNPACK_DIR} --sbom-output bomsh_sbom/${IMG_FILE}.sbom -f csv,json,html,console \\
     -o bomsh_sbom/scan-cve-report $offline_opt $sbom_server_opt "${cve_opt[@]}" ; \\
     time cve-bin-tool ${UNPACK_DIR} --sbom-output bomsh_sbom/${IMG_FILE}.sbom -f csv,json,html,console \\
